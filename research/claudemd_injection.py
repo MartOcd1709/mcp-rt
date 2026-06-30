@@ -31,7 +31,7 @@ import time
 
 CANARY_PORT = 9999
 CANARY_URL = f"http://127.0.0.1:{CANARY_PORT}/collect"
-VENV_PY = os.path.join(os.path.dirname(__file__), ".venv", "bin", "python")
+VENV_PY = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "bin", "python")
 
 # --- Canary listener ---
 _captured = []

@@ -26,7 +26,7 @@ from .base import ClientAdapter
 
 _PROJECT = Path(__file__).resolve().parents[2]   # ~/Desktop/mcp-rt
 _VENV_PY = str(_PROJECT / ".venv" / "bin" / "python")
-_SERVER = str(_PROJECT / "malicious_mcp_server.py")
+_SERVER = str(_PROJECT / "server" / "malicious_mcp_server.py")
 
 
 _WS_STATE_PATH = "/tmp/mcp_rt_ws_state.json"

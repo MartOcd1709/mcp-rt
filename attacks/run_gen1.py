@@ -22,17 +22,17 @@ Usage:
     cd ~/Desktop/mcp-rt
 
     # Test both (default):
-    .venv/bin/python run_cli.py
+    .venv/bin/python attacks/run_gen1.py
 
     # Test one client:
-    .venv/bin/python run_cli.py --client claude-code
-    .venv/bin/python run_cli.py --client codex
+    .venv/bin/python attacks/run_gen1.py --client claude-code
+    .venv/bin/python attacks/run_gen1.py --client codex
 
     # Longer timeout for slow responses:
-    .venv/bin/python run_cli.py --timeout 300
+    .venv/bin/python attacks/run_gen1.py --timeout 300
 
     # Results accumulate — safe to re-run after interruption:
-    .venv/bin/python run_cli.py          # skips already-settled attacks
+    .venv/bin/python attacks/run_gen1.py          # skips already-settled attacks
 """
 import argparse
 import shutil
@@ -123,9 +123,9 @@ def _parse_args() -> argparse.Namespace:
         epilog=(
             "Both clients use existing login auth — no extra API keys needed.\n\n"
             "Examples:\n"
-            "  .venv/bin/python run_cli.py\n"
-            "  .venv/bin/python run_cli.py --client claude-code\n"
-            "  .venv/bin/python run_cli.py --client codex --timeout 300"
+            "  .venv/bin/python attacks/run_gen1.py\n"
+            "  .venv/bin/python attacks/run_gen1.py --client claude-code\n"
+            "  .venv/bin/python attacks/run_gen1.py --client codex --timeout 300"
         ),
     )
     p.add_argument(

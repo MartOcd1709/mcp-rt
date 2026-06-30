@@ -107,19 +107,19 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 
 # Mock clients — no API keys needed (demonstrates attack flow)
-python run_demo.py
+python attacks/run_demo.py
 
 # Gen 1 matrix — Claude Code + Codex (requires installed CLI clients)
-python run_cli.py --client claude-code
-python run_cli.py --client codex
+python attacks/run_gen1.py --client claude-code
+python attacks/run_gen1.py --client codex
 
 # Gen 2 matrix — 7 novel attacks
-python run_gen2.py --client codex    # Codex: 5/6 VULNERABLE
-python run_gen2.py --client gemini   # Gemini: requires valid API key
+python attacks/run_gen2.py --client codex    # Codex: 5/6 VULNERABLE
+python attacks/run_gen2.py --client gemini   # Gemini: requires valid API key
 
 # Gen 2 against Cline (requires: npm install -g cline + ANTHROPIC_API_KEY)
 export ANTHROPIC_API_KEY=sk-ant-...
-python run_gen2.py --client cline
+python attacks/run_gen2.py --client cline
 ```
 
 ---
@@ -142,10 +142,19 @@ mcp-rt/
 │   │   └── [18 more payloads...]
 │   └── adapters/
 │       └── cli_client.py      # Claude Code + Codex + Cline + Gemini CLI drivers
-├── malicious_mcp_server.py    # FastMCP stdio server (22 attack modes)
-├── run_cli.py                 # Gen 1 runner
-├── run_gen2.py                # Gen 2 runner (7 novel attacks)
-└── run_demo.py                # Mock clients — no API keys
+├── server/
+│   └── malicious_mcp_server.py  # FastMCP stdio server (22 attack modes)
+├── attacks/
+│   ├── run_gen1.py            # Gen 1 runner
+│   ├── run_gen2.py            # Gen 2 runner (7 novel attacks)
+│   └── run_demo.py            # Mock clients — no API keys
+├── research/
+│   ├── claudemd_injection.py  # CLAUDE.md trust-channel injection test
+│   └── error_injection.py     # MCP error message injection test
+└── docs/
+    ├── ARSENAL_PROPOSAL_INDIA.md
+    ├── ARSENAL_PROPOSAL.md
+    └── SECURITY_AND_SCOPE.md
 ```
 
 ### Honeytoken Observer

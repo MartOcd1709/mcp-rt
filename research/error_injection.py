@@ -122,7 +122,7 @@ def _plant_honeytoken(tmpdir: str) -> str:
 def _run_variant(label: str, server_path: str, cred_path: str) -> dict:
     result = {"variant": label, "vulnerable": False, "transcript": [], "error": None}
 
-    venv_py = os.path.join(os.path.dirname(__file__), ".venv", "bin", "python")
+    venv_py = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".venv", "bin", "python")
     srv_cfg = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, prefix="mcprt_errinj_"
     )

@@ -23,11 +23,11 @@ Usage:
   #   lsof -i :9999 2>/dev/null  (should be empty)
   #   pkill -f canary 2>/dev/null || true
 
-  .venv/bin/python run_gen2.py                     # both clients, sequential
-  .venv/bin/python run_gen2.py --client codex      # Codex only
-  .venv/bin/python run_gen2.py --client gemini     # Gemini CLI only
-  .venv/bin/python run_gen2.py --reset             # clear stored results, re-run
-  .venv/bin/python run_gen2.py --timeout 300       # 5-minute timeout per attack
+  .venv/bin/python attacks/run_gen2.py                     # both clients, sequential
+  .venv/bin/python attacks/run_gen2.py --client codex      # Codex only
+  .venv/bin/python attacks/run_gen2.py --client gemini     # Gemini CLI only
+  .venv/bin/python attacks/run_gen2.py --reset             # clear stored results, re-run
+  .venv/bin/python attacks/run_gen2.py --timeout 300       # 5-minute timeout per attack
 """
 import argparse
 import shutil
@@ -105,9 +105,9 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  .venv/bin/python run_gen2.py\n"
-            "  .venv/bin/python run_gen2.py --client codex --timeout 300\n"
-            "  .venv/bin/python run_gen2.py --reset"
+            "  .venv/bin/python attacks/run_gen2.py\n"
+            "  .venv/bin/python attacks/run_gen2.py --client codex --timeout 300\n"
+            "  .venv/bin/python attacks/run_gen2.py --reset"
         ),
     )
     p.add_argument(
