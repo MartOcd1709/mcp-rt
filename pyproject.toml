@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-rt"
+version = "0.1.0"
+description = "MCP client red-team framework"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp",
+  "rich",
+  "anthropic",
+  "google-genai",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["mcp_rt*"]
+

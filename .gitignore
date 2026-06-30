@@ -1,0 +1,47 @@
+# Sensitive output — may contain captured API credentials or test transcripts
+evidence/
+disclosures/
+
+# Internal strategy + company documents (not for public repo)
+COMPANY_OVERVIEW.md
+OPERATING_PLAYBOOK.md
+PLAN.md
+TEAM_AND_TIMELINE.md
+BUILD_LOG.md
+
+# Root-level disclosure drafts
+anthropic_disclosure.md
+google_disclosure.md
+openai_disclosure.md
+
+# Report files generated during testing (JSON + HTML)
+report_cli.json
+report_cli.html
+report_mock.json
+report_mock.html
+report_live.json
+report_live.html
+report_gen2.json
+report_gen2.html
+
+# Root-level report JSON files (catch-all for any run variant)
+/report_*.json
+/report_*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment files
+.env
+.env.*
+
+# Editor
+.idea/
+.vscode/
+*.swp
