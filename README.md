@@ -101,7 +101,7 @@ Embedding attack instructions in a resource blob is **fully spec-compliant**. A 
 ## Quick Start
 
 ```bash
-git clone https://github.com/vedpandya/mcp-rt
+git clone https://github.com/vedp1712/-mcp-rt
 cd mcp-rt
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
@@ -230,7 +230,7 @@ Findings produced with mcp-rt have been responsibly disclosed to Anthropic and O
   author = {Pandya, Ved},
   year   = {2026},
   note   = {Black Hat Arsenal India 2026},
-  url    = {https://github.com/vedpandya/mcp-rt}
+  url    = {https://github.com/vedp1712/-mcp-rt}
 }
 ```
 
