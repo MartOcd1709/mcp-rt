@@ -31,7 +31,34 @@ Binary verdict: **VULNERABLE** or **RESILIENT**.
 
 ---
 
-## The Scanner Blind Spot
+## Supply Chain Scanner
+
+Before an agent is even connected, mcp-rt audits the npm packages you're about to install:
+
+```
+python tools/supply_chain_scan.py figma-mcp fastmcp kubernetes-mcp-server
+
+figma-mcp  v0.1.4
+  Downloads/week : 2,912
+  Maintainers    : 1 (mjd)
+  Last publish   : 421d ago
+  Code signing   : none
+  Risk           : CRITICAL — single maintainer · 421d stale · event-stream pattern
+
+fastmcp  v4.3.2
+  Downloads/week : 416,506
+  Maintainers    : 1 (punkpeye)
+  Last publish   : 7d ago
+  Risk           : HIGH — single maintainer · 416,506/wk — high blast radius if compromised
+```
+
+`figma-mcp` has had 2,912 weekly installs for 14 months with one dormant maintainer. One npm credential compromise publishes a malicious version. Every installer gets a payload. No user makes a bad security decision — they installed a package from a curated list.
+
+This is the **event-stream attack** (2018: 8M downloads/week, one compromised maintainer) reproduced in the MCP ecosystem, with a worse blast radius: MCP servers run as persistent processes with tool access to your filesystem and credentials.
+
+---
+
+## The Runtime Attack: Scanner Blind Spot
 
 Our `server_side_workflow` attack has **zero malicious content** in any agent-visible artifact:
 
@@ -105,6 +132,10 @@ git clone https://github.com/vedp1712/-mcp-rt
 cd mcp-rt
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
+
+# Supply chain audit — check npm MCP packages for risk before installing
+python tools/supply_chain_scan.py fastmcp figma-mcp kubernetes-mcp-server
+python tools/supply_chain_scan.py --top20
 
 # Mock clients — no API keys needed (demonstrates attack flow)
 python attacks/run_demo.py
