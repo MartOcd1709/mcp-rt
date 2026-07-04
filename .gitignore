@@ -8,6 +8,21 @@ OPERATING_PLAYBOOK.md
 PLAN.md
 TEAM_AND_TIMELINE.md
 BUILD_LOG.md
+CSI_TASK_FRONTIER.md
+
+# Conference submission / pitch material (kept local, never published)
+# Contains speaker bios and competitive framing that do not belong in the tool repo.
+docs/ARSENAL_PROPOSAL.md
+docs/ARSENAL_PROPOSAL_INDIA.md
+docs/ARSENAL_TRACK_AIML.md
+docs/ARSENAL_TRACK_EXPLOIT.md
+docs/ARSENAL_TRACK_VULNASSESS.md
+docs/ARSENAL_TRACK_THREATHUNT.md
+docs/DEMO_RUNBOOK.md
+
+# Internal strategy / planning memos (analysis content lives in the public research report)
+docs/SECURITY_AND_SCOPE.md
+docs/ATTACK_SURFACE_ANALYSIS.md
 
 # Root-level disclosure drafts
 anthropic_disclosure.md

@@ -28,17 +28,38 @@ The attack required: one social engineering attempt, one npm account transfer, o
 
 The npm registry has no mandatory code signing. Package ownership is controlled by a username and password (hardware MFA is optional and rarely enforced). A dormant maintainer account — no recent logins, potentially weak credentials, possibly reused password in a known breach database — is an open door.
 
-### Confirmed High-Risk Packages (Live Data, June 30 2026)
+### Full Top-20 MCP Package Audit (Live Data, June 30 2026)
 
-All figures pulled from npm registry API and npm downloads API at time of research.
+All figures pulled from npm registry API and npm downloads API at time of research. Covers the 20 most-downloaded MCP packages.
 
-| Package | Downloads/week | Total Installs (Jan 2025–Jun 2026) | Maintainers | Last Publish | Risk |
-|---|---|---|---|---|---|
-| **figma-mcp** | 2,912 | **87,556** | **1 (mjd)** | **421 days ago** | **CRITICAL** |
-| **fastmcp** | 416,506 | **10,550,283** | **1 (punkpeye)** | 7 days ago | **HIGH** |
-| **kubernetes-mcp-server** | 36,994 | — | **1 (manusa)** | 6 days ago | HIGH |
-| **mcp-searxng** | 32,594 | — | **1 (ihor-sokoliuk)** | 6 days ago | HIGH |
-| **@benborla29/mcp-server-mysql** | 20,919 | — | **1 (benborla29)** | 6 days ago | HIGH |
+| Package | Downloads/week | Maintainers | Last Publish | Risk |
+|---|---|---|---|---|
+| @modelcontextprotocol/sdk | 40,893,994 | 6 (Anthropic org) | 91d ago | LOW |
+| chrome-devtools-mcp | 3,090,449 | 3 (Google) | 6d ago | LOW |
+| @upstash/context7-mcp | 1,044,045 | 8 | 7d ago | LOW |
+| **fastmcp** | **416,506** | **1 (punkpeye)** | 7d ago | **HIGH** |
+| @modelcontextprotocol/server-filesystem | 390,693 | 6 (Anthropic org) | 166d ago | LOW |
+| @notionhq/notion-mcp-server | 167,192 | 22 (Notion org) | 7d ago | LOW |
+| @azure/mcp | 106,675 | 3 (Microsoft org) | 6d ago | LOW |
+| @sentry/mcp-server | 69,897 | 1 (sentry-bot) | 21d ago | MEDIUM |
+| @cap-js/mcp-server | 63,528 | 3 (SAP org) | 63d ago | LOW |
+| @supabase/mcp-server-supabase | 62,008 | 2 | 21d ago | LOW |
+| @modelcontextprotocol/server-everything | 57,750 | 6 (Anthropic org) | 153d ago | LOW |
+| @penpot/mcp | 22,981 | 8 | 27d ago | LOW |
+| @eslint/mcp | 25,173 | 2 (OpenJS Foundation) | 0d ago | LOW |
+| **kubernetes-mcp-server** | **36,994** | **1 (manusa)** | 6d ago | **MEDIUM** |
+| **mcp-searxng** | **32,594** | **1 (ihor-sokoliuk)** | 6d ago | **MEDIUM** |
+| **@benborla29/mcp-server-mysql** | **20,919** | **1 (benborla29)** | 11d ago | **MEDIUM** |
+| **@winor30/mcp-server-datadog** | **20,053** | **1 (winor30)** | 7d ago | **MEDIUM** |
+| @hubspot/mcp-server | 12,222 | 47 (HubSpot org) | **376d ago** | MEDIUM |
+| **slite-mcp-server** | **1,706** | **1 (prenaudin)** | **159d ago** | **HIGH** |
+| **figma-mcp** | **2,912** | **1 (mjd)** | **421d ago** | **CRITICAL** |
+
+**Summary: 1 CRITICAL, 2 HIGH, 6 MEDIUM across top 20. Code signing absent on all 20.**
+
+**New finding — slite-mcp-server:** Single maintainer `prenaudin`, 159 days stale, 1,706 weekly installs. Approaching the event-stream pattern threshold (180 days). If the maintainer account remains inactive, this crosses to CRITICAL within 3 weeks. Slite is an AI note-taking platform — users connecting their AI coding agents to Slite have document content and API credentials at risk.
+
+**fastmcp total installs since Jan 2025: 10,550,283.** Framework-level risk: compromise cascades to every downstream server built on fastmcp simultaneously.
 
 ### figma-mcp: The Event-Stream Pattern Confirmed
 
