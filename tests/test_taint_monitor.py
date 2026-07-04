@@ -27,9 +27,9 @@ from mcp_rt.detect import (
     trace_from_report_record,
 )
 
-_ROOT = Path(__file__).resolve().parents[1]
-_RUN2 = _ROOT / "report_cc_hunt.json"
-_RUN1 = _ROOT / "evidence" / "report_cc_hunt_run1_20260703_121620.json"
+_DATA = Path(__file__).resolve().parent / "data"
+_RUN1 = _DATA / "cc_hunt_run1.json"
+_RUN2 = _DATA / "cc_hunt_run2.json"
 
 _RESILIENT = {"resource_split_nway", "cross_channel_split", "authority_resource_combo"}
 _VULNERABLE = "workflow_scaffold_exfil"
