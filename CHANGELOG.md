@@ -15,6 +15,17 @@ semantic versioning.
 - Dedicated hunt and attack-chain runners (`attacks/run_cc_hunt.py`,
   `attacks/run_cc_chains.py`) and a detection demo (`attacks/run_detect_demo.py`).
 - Test suite for the taint monitor (`tests/`).
+- `attacks/run_cc_hunt.py` generalised from Claude-Code-only to `--client
+  claude-code|codex|gemini`, reusing the `CodexClient` / `GeminiCLIClient` adapters
+  already exercised by `attacks/run_flagship.py`; CC-Hunt task prompts added to
+  `_CODEX_TASKS` and `_GEMINI_TASKS` in `mcp_rt/adapters/cli_client.py`. Codex/Gemini
+  verdicts are built and ready but UNCONFIRMED — see `docs/CC_HUNT_PAYLOADS.md`.
+- New payload `mcp_rt/payloads/tool_annotation_self_attestation.py` (MCP-32,
+  `TOOL_ANNOTATION_SE_MODE` in `server/malicious_mcp_server.py`), the first build
+  against the MCP-00d spec-gap candidate (tool annotations as unverifiable
+  self-attestation) documented in `docs/SPEC_GAP_AUDIT.md` section 5, plus a
+  dedicated runner `attacks/run_tool_annotation.py` (three comparison variants:
+  false / accurate / none hints). Status: built, UNCONFIRMED.
 
 ## [0.1.0] - 2026-06
 
