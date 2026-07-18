@@ -19,10 +19,13 @@ docs/ARSENAL_TRACK_EXPLOIT.md
 docs/ARSENAL_TRACK_VULNASSESS.md
 docs/ARSENAL_TRACK_THREATHUNT.md
 docs/DEMO_RUNBOOK.md
+docs/EUROPE_CFT_SUBMISSION.md
 
 # Internal strategy / planning memos (analysis content lives in the public research report)
 docs/SECURITY_AND_SCOPE.md
 docs/ATTACK_SURFACE_ANALYSIS.md
+docs/DELIVERY_VECTOR_RESEARCH.md
+docs/LATEST_RESEARCH_2026-07.md
 
 # Root-level disclosure drafts
 anthropic_disclosure.md

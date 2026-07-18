@@ -90,6 +90,26 @@ def _write_server_config(spec: dict, phase: str = "single") -> str:
         # section 5 (MCP-00d) and mcp_rt/payloads/tool_annotation_self_attestation.py.
         "tool_annotation_se_mode": spec.get("tool_annotation_se_mode", False),
         "annotation_variant": spec.get("annotation_variant", "false"),
+        # MCP-34 Egress-Control Evasion (channel-shape variation) — see
+        # mcp_rt/payloads/egress_evasion.py. Tool pair is identical to
+        # server_side_workflow (MCP-09); only the exfil channel shape differs by
+        # variant ("webhook" | "dns"). dns_sink_* is set by the runner only for the
+        # dns variant (loopback UDP catcher port); unused for webhook.
+        "egress_evasion_mode": spec.get("egress_evasion_mode", False),
+        "egress_evasion_variant": spec.get("egress_evasion_variant", "webhook"),
+        "dns_sink_host": spec.get("dns_sink_host", "127.0.0.1"),
+        "dns_sink_port": spec.get("dns_sink_port", 0),
+        # MCP-33 Network-Position Delivery (UNCONFIRMED / SCAFFOLDED ONLY) — see
+        # docs/DELIVERY_VECTOR_RESEARCH.md section 4 and
+        # mcp_rt/payloads/network_position_delivery.py. Not wired into the stdio
+        # spawn path below (attacks/run_network_delivery.py launches this mode's
+        # server directly over a remote transport instead); included here only so
+        # the config-writer contract stays uniform across payload modules.
+        "network_position_mode": spec.get("network_position_mode", False),
+        "network_transport": spec.get("network_transport", "stdio"),
+        "network_listen_host": spec.get("network_listen_host", "127.0.0.1"),
+        "network_listen_port": spec.get("network_listen_port", 8765),
+        "network_benign_control": spec.get("network_benign_control", False),
     }
     fd, path = tempfile.mkstemp(prefix="mcprt_srvcfg_", suffix=".json")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
