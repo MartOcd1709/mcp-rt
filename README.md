@@ -50,6 +50,19 @@ Point a real, fully-patched AI coding agent at a malicious MCP server. Ask it to
 
 ---
 
+## Objections, Answered
+
+**"Why would anyone connect a malicious MCP server in the first place?"**
+Often with no bad decision at all. A project `.mcp.json` auto-registers its servers the moment a developer clones a repository — no install step, no prompt. An already-trusted server can be turned against the user (cross-server poisoning). And malicious MCP servers are already in the wild: `postmark-mcp` stole users' emails, OX Security found 9 of 11 MCP directories accepted a typosquatted clone with zero review, and the Agentjacking campaign compromised 2,388 organizations through a trusted MCP server. mcp-rt's network-position module goes further, modeling an on-path attacker who substitutes a server the victim configured correctly. The victim performs an ordinary action; the malicious server arrives as a side effect.
+
+**"Can't a firewall or egress control just block the exfiltration?"**
+No — and mcp-rt demonstrates it rather than asserting it. The `egress_evasion` attack holds the theft mechanism fixed and varies only the outbound channel: the stolen credential leaves shaped as a routine team-chat webhook, a destination class a corporate allowlist already permits. Confirmed on Claude Code and Codex. So the two controls a defender reaches for — static server scanning and destination-based egress filtering — both fail on the same server: the scanner because the malicious behavior is server-side code it never inspects, and the firewall because the exfiltration rides an already-trusted destination.
+
+**"Isn't this just a Claude/Codex bug?"**
+No. The confirmed structural attacks reproduce on both Claude Code and Codex (gpt-5.4), and the framework is client-agnostic — any MCP-capable agent plugs in through one adapter. The root cause is MCP-00, a specification-level gap no single vendor can close alone, corroborated by the NSA's 2026 MCP guidance.
+
+---
+
 ## What Is mcp-rt?
 
 MCP (Model Context Protocol) lets AI coding agents — Claude Code, Codex, Cursor, Cline, Gemini — call external tools. Thousands of MCP servers have been published. Every one is a potential attack surface.
