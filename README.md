@@ -325,7 +325,7 @@ Drop it in `mcp_rt/payloads/`, import it in your runner — it appears in the ma
 
 ## Responsible Disclosure
 
-Findings produced with mcp-rt have been responsibly disclosed to Anthropic and OpenAI (June 2026). Full technical details are embargoed pending presentation at Black Hat Arsenal 2026.
+mcp-rt is for testing agents and MCP configurations you own or are explicitly authorized to test. Any client vulnerability you discover with it should be reported privately to the affected vendor before public discussion — the same responsible process followed for the findings behind this tool.
 
 ---
 
@@ -336,7 +336,6 @@ Findings produced with mcp-rt have been responsibly disclosed to Anthropic and O
   title  = {mcp-rt: MCP Client Red-Team Framework},
   author = {Pandya, Ved},
   year   = {2026},
-  note   = {Black Hat Arsenal 2026},
   url    = {https://github.com/vedp1712/mcp-rt}
 }
 ```
