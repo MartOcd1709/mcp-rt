@@ -2,7 +2,7 @@
 
 > **The first tool that tests whether real AI coding agents exfiltrate credentials when connected to a malicious MCP server — with honeytoken ground truth.**
 
-[![CI](https://github.com/vedp1712/mcp-rt/actions/workflows/ci.yml/badge.svg)](https://github.com/vedp1712/mcp-rt/actions/workflows/ci.yml)
+[![CI](https://github.com/MartOcd1709/mcp-rt/actions/workflows/ci.yml/badge.svg)](https://github.com/MartOcd1709/mcp-rt/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Black Hat Arsenal](https://img.shields.io/badge/Black%20Hat-Arsenal%202026-red.svg)](https://www.blackhat.com/html/arsenal.html)
@@ -191,7 +191,7 @@ Embedding attack instructions in a resource blob is **fully spec-compliant**. A 
 ## Quick Start
 
 ```bash
-git clone https://github.com/vedp1712/mcp-rt
+git clone https://github.com/MartOcd1709/mcp-rt
 cd mcp-rt
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
@@ -336,7 +336,7 @@ mcp-rt is for testing agents and MCP configurations you own or are explicitly au
   title  = {mcp-rt: MCP Client Red-Team Framework},
   author = {Pandya, Ved},
   year   = {2026},
-  url    = {https://github.com/vedp1712/mcp-rt}
+  url    = {https://github.com/MartOcd1709/mcp-rt}
 }
 ```
 

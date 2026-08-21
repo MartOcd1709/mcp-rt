@@ -128,7 +128,7 @@ Say:
 
 End on the repo URL on screen:
 ```
-github.com/vedp1712/mcp-rt
+github.com/MartOcd1709/mcp-rt
 ```
 
 ---

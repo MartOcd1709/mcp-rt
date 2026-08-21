@@ -3,7 +3,7 @@
 
 **Author:** Ved Pandya
 **Contact:** pandyaved96@gmail.com
-**Repository:** https://github.com/vedp1712/mcp-rt
+**Repository:** https://github.com/MartOcd1709/mcp-rt
 **Presented at:** Black Hat Arsenal India 2026
 
 ---

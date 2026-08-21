@@ -6,7 +6,7 @@ adapters.
 ## Development Setup
 
 ```bash
-git clone https://github.com/vedp1712/mcp-rt
+git clone https://github.com/MartOcd1709/mcp-rt
 cd mcp-rt
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
