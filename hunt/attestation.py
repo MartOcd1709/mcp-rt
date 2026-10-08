@@ -64,6 +64,8 @@ def main(argv=None) -> int:
     p.add_argument("--key", default=str(attest._DEFAULT_KEY), metavar="PEM",
                    help="signing key path (created on first use)")
     p.add_argument("--no-badge", action="store_true", help="skip writing the SVG badge")
+    p.add_argument("--no-verify-page", action="store_true",
+                   help="skip copying the self-contained HTML verify page")
     p.add_argument("--json", action="store_true", help="print the signed attestation to stdout")
     args = p.parse_args(argv)
 
@@ -84,6 +86,9 @@ def main(argv=None) -> int:
     rep_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if not args.no_badge:
         (out / f"{slug}.badge.svg").write_text(attest.make_badge(envelope), encoding="utf-8")
+    if not args.no_verify_page:
+        src = Path(__file__).with_name("verify.html")   # self-contained, host-anywhere
+        (out / "verify.html").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
     if args.json:
         print(json.dumps(envelope, indent=2))
@@ -93,6 +98,8 @@ def main(argv=None) -> int:
         print(f"evidence report:    {rep_path}")
         if not args.no_badge:
             print(f"badge:              {out / f'{slug}.badge.svg'}")
+        if not args.no_verify_page:
+            print(f"verify page:        {out / 'verify.html'}  (open in a browser, drop the .json)")
         print(f"verify offline:     mcp-rt attest --verify {att_path}")
     return 0
 
