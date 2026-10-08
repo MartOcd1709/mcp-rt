@@ -29,7 +29,8 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parent / "findings.db"
 
 VERDICTS = {"LEAKED", "CLEAN", "UNOBSERVABLE_BY_DESIGN", "INCONCLUSIVE", "RESILIENT",
-            "VULNERABLE", "SKIPPED"}  # VULNERABLE = an impl-bug probe (hunt.probes) fired
+            "VULNERABLE", "SKIPPED", "SETUP_FAILED"}  # VULNERABLE = an impl-bug probe (hunt.probes) fired;
+#                                                       SETUP_FAILED = target never ran (install/config/bad pkg)
 DISCLOSURE_STATES = {"none", "draft", "reported", "triaged", "published", "patched", "duplicate"}
 # Hunting-harness output (MCP-00 legs) lives HERE, apart from `scans`. A hypothesis is a surfaced
 # anomaly/lead — NEVER a finding, never counted as confirmed — until a planted canary fires and it is

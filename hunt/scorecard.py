@@ -45,8 +45,8 @@ def _gather() -> dict:
             pub_findings.append(targets[tid])
         elif has_vuln:
             disclosing += 1                       # DO NOT name — coordinated disclosure in progress
-        elif all(v == "INCONCLUSIVE" for v in vs):
-            inconclusive += 1
+        elif all(v in ("INCONCLUSIVE", "SETUP_FAILED") for v in vs):
+            inconclusive += 1        # never reached a verdict (incl. servers that never ran) — NOT clean
         else:
             clean.append(targets[tid])
     db.close()

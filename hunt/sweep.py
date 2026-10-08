@@ -208,6 +208,19 @@ def _resolve_launch(cmd: str) -> str:
     return cmd                                              # none worked; leave bare (will be INCONCLUSIVE, classified)
 
 
+# Categories where the TARGET never ran — a setup problem, not our scanner failing to verdict a
+# working server. Recorded as the SETUP_FAILED verdict (see _verdict_for) and kept OUT of the
+# INCONCLUSIVE denominator, so reliability reads honestly: "of servers that actually ran, what % did
+# we reach a verdict on". SCAN_TIMEOUT and OTHER stay INCONCLUSIVE (the server did start / unknown).
+_SETUP_FAIL_CATS = {"NEEDS_CONFIG", "INSTALL_FAILED", "ENTRYPOINT_NOT_FOUND",
+                    "NEEDS_SUBCOMMAND", "BROKEN_PACKAGE"}
+
+
+def _verdict_for(cat: str) -> str:
+    """Map an INCONCLUSIVE category to its verdict: SETUP_FAILED (never ran) vs INCONCLUSIVE."""
+    return "SETUP_FAILED" if cat in _SETUP_FAIL_CATS else "INCONCLUSIVE"
+
+
 def _classify(reason: str) -> str:
     """Bucket an INCONCLUSIVE reason so the denominator is honest (recoverable vs not-a-target)."""
     r = reason.lower()
@@ -216,9 +229,16 @@ def _classify(reason: str) -> str:
     if any(x in r for x in ("required environment", "client_id", "api key", "missing env",
                             "must be set", "not configured", "credentials")):
         return "NEEDS_CONFIG"
+    # Broken/incompatible package: Node module-resolution failures AND Python import failures
+    # (e.g. "No module named 'mcp.server.fastmcp'" — a server pinned to the mcp 1.x API in our 2.x env).
     if any(x in r for x in ("syntaxerror", "does not provide an export", "cannot find module",
-                            "err_module", "unexpected token")):
+                            "err_module", "unexpected token",
+                            "no module named", "modulenotfounderror", "importerror")):
         return "BROKEN_PACKAGE"
+    # npm package exposing multiple/ambiguous bins ("The following executables are available:") —
+    # npx can't pick an entrypoint; a launch-resolution failure, not a verdict on the server.
+    if "following executables are available" in r or "could not determine executable" in r:
+        return "ENTRYPOINT_NOT_FOUND"
     if any(x in r for x in ("npm err", "404", "etarget", "install")):
         return "INSTALL_FAILED"
     if "not found" in r:
@@ -280,10 +300,11 @@ def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
             except Exception:  # noqa: BLE001
                 rep = None
         if rep is None:
+            verdict = _verdict_for(cat)
             tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-            db.add_scan(tid, mode="sweep", verdict="INCONCLUSIVE", agent="n/a", notes=f"[{cat}] {why}")
-            print(f"   -> INCONCLUSIVE [{cat}] ({why[:70]})")
-            return {"name": t["name"], "verdict": "INCONCLUSIVE", "cat": cat, "why": why}
+            db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}")
+            print(f"   -> {verdict} [{cat}] ({why[:70]})")
+            return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
     rdir = preserve(rep)
     record(rep, rdir)
     b = grade_report(rep)
@@ -395,22 +416,29 @@ def main(argv=None) -> int:
     print(f"sweep: {len(targets)} target(s)\n")
 
     db = DB()
-    grades, classes, inconclusive, incat = Counter(), Counter(), 0, Counter()
+    grades, classes, inconclusive, setup_failed, incat = Counter(), Counter(), 0, 0, Counter()
     for t in targets:
         r = scan_one(t, db, timeout=args.timeout, source="npm")
-        if r["verdict"] == "INCONCLUSIVE":
-            inconclusive += 1
+        if r["verdict"] in ("INCONCLUSIVE", "SETUP_FAILED"):
             incat[r["cat"]] += 1
+            if r["verdict"] == "SETUP_FAILED":
+                setup_failed += 1      # server never ran — excluded from the reliability denominator
+            else:
+                inconclusive += 1
         else:
             grades[r["grade"]] += 1
             for f in r["findings"]:
                 classes[f["cls"]] += 1
     db.close()
 
+    graded = sum(grades.values())
+    ran = graded + inconclusive          # servers that actually started (setup_failed never did)
     print("\n=== sweep summary ===")
-    print(f"servers tested:   {sum(grades.values())}  (+{inconclusive} inconclusive)")
+    print(f"servers tested:   {graded}  (+{inconclusive} inconclusive, +{setup_failed} setup-failed)")
+    if ran:
+        print(f"verdict rate:     {graded}/{ran} = {100*graded//ran}% of servers that ran reached a verdict")
     if incat:
-        print(f"inconclusive by cause: {dict(incat)}")
+        print(f"non-verdict by cause: {dict(incat)}")
     print(f"grade distribution: {dict(grades)}")
     print(f"findings by class:  {dict(classes)}")
     print(f"total findings:     {sum(classes.values())}")

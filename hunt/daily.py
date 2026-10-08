@@ -82,7 +82,7 @@ def _write_run_log(date: str, results: list[dict], incat: Counter, classes: Coun
          f"- findings by class: {dict(classes) or '{}'}", "",
          "| server | verdict | detail |", "|---|---|---|"]
     for r in results:
-        if r["verdict"] == "INCONCLUSIVE":
+        if r["verdict"] in ("INCONCLUSIVE", "SETUP_FAILED"):
             detail = f"[{r['cat']}] {r['why'][:80]}"
         elif r["findings"]:
             detail = ", ".join(f"{f['cls']}:{f['tool']}" for f in r["findings"])
@@ -116,7 +116,7 @@ def run(do_top: bool, top_only: bool, cap: int, retest_days: float, timeout: int
     for t in targets:
         r = scan_one(t, db, timeout=timeout, source=t["_kind"])   # ledger source = lane
         results.append(r)
-        if r["verdict"] == "INCONCLUSIVE":
+        if r["verdict"] in ("INCONCLUSIVE", "SETUP_FAILED"):
             incat[r["cat"]] += 1
         else:
             for f in r["findings"]:
