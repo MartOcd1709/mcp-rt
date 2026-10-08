@@ -12,11 +12,38 @@ Requires the ``capture`` extra; import is lazy so the core package works without
 from __future__ import annotations
 
 import http.server
+import os
+import socket
 import socketserver
 import threading
 from urllib.parse import urlparse
 
 from .base import CaptureBackend, CaptureRecord
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port   # ponytail: tiny bind-close-rebind race; fine for a local test proxy
+
+
+def default_capture() -> CaptureBackend:
+    """Choose the capture backend for a scan.
+
+    TLS-intercepting mitmproxy when enabled AND installed — set ``MCPRT_TLS_CAPTURE=1`` (the
+    packaged container does this) so HTTPS egress is seen, not just plaintext HTTP. Otherwise
+    the hermetic loopback proxy. ponytail: env-gated so the in-process default stays the tested
+    loopback backend; mitmproxy (async, optional heavy dep) is opt-in for production.
+    """
+    if os.getenv("MCPRT_TLS_CAPTURE"):
+        try:
+            import mitmproxy  # noqa: F401  (availability probe)
+            return MitmproxyBackend(listen_port=_free_port())
+        except ImportError:
+            pass   # requested but not installed — fall back, honestly plaintext-only
+    return LoopbackProxyBackend()
 
 
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -95,6 +122,7 @@ class MitmproxyBackend(CaptureBackend):
     """
 
     name = "mitmproxy"
+    tls = True
 
     def __init__(self, listen_host: str = "127.0.0.1", listen_port: int = 0):
         self.listen_host = listen_host

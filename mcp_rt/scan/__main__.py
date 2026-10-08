@@ -34,6 +34,9 @@ def main(argv=None) -> int:
     p.add_argument("--client", default="claude-code", choices=SUPPORTED_CLIENTS,
                    help="coding-agent CLI to drive (default: claude-code)")
     p.add_argument("--timeout", type=int, default=180, help="agent timeout, seconds")
+    p.add_argument("--allow-host", action="append", default=[], metavar="HOST",
+                   help="declare a legitimate egress host (repeatable); a planted marker "
+                        "reaching it is not flagged — the server's own upstream API, not exfil")
     p.add_argument("--json", action="store_true", help="emit the full result as JSON")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if LEAKED (CI gate); default always exits 0")
@@ -41,7 +44,8 @@ def main(argv=None) -> int:
 
     spec = (TargetSpec.from_stdio(args.target_stdio) if args.target_stdio
             else TargetSpec.from_http(args.target_http, args.header))
-    result = scan(spec, task=args.task, timeout=args.timeout, client=args.client)
+    result = scan(spec, task=args.task, timeout=args.timeout, client=args.client,
+                  allowed_hosts=args.allow_host)
 
     if args.json:
         print(json.dumps(result.as_dict(), indent=2))

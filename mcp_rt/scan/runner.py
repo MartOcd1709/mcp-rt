@@ -25,13 +25,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from mcp_rt.capture import CaptureBackend
-from mcp_rt.capture.proxy import LoopbackProxyBackend
+from mcp_rt.capture.proxy import default_capture
 from mcp_rt.scan.clients import SUPPORTED as SUPPORTED_CLIENTS, run_client
 from mcp_rt.detect.taint_monitor import (
     DetectionResult,
     Egress,
     SessionTrace,
     ToolCall,
+    ToolManifest,
     analyze_session,
 )
 from mcp_rt.honeytoken import HoneytokenBattery
@@ -85,7 +86,7 @@ def _default_task(server_name: str) -> str:
     )
 
 
-def verdict_from_capture(tokens, records, manifests=None) -> tuple[str, DetectionResult]:
+def verdict_from_capture(tokens, records, manifests=None, allowed_hosts=None) -> tuple[str, DetectionResult]:
     """Pure verdict: did any planted marker leave the host? (No agent, no I/O.)
 
     Reuses ``analyze_session`` by synthesising the source side from ground truth — we
@@ -94,15 +95,22 @@ def verdict_from_capture(tokens, records, manifests=None) -> tuple[str, Detectio
     is globally unique and random, so a match in an egress payload is zero-false-positive
     proof that a specific decoy's secret physically left the host.
 
-    ``manifests`` (declared egress hosts) defaults to empty: with nothing declared, any
-    host carrying a planted secret is undeclared and fires. Populating it from the target's
-    ``tools/list`` is M2 — until then a benign server simply never egresses our decoys, so
-    empty-declared is the correct conservative default, not an over-flag.
+    ``allowed_hosts`` (M2) are egress hosts the operator declares legitimate for this target
+    (e.g. the server's real upstream API). A planted marker reaching a declared host is NOT
+    flagged — that's the server doing its job, not exfiltration. With nothing declared, any
+    host carrying a planted secret is undeclared and fires; a benign server simply never
+    egresses our decoys, so empty-declared stays the correct conservative default.
+    ponytail: allowlist is operator-supplied; auto-populating declared hosts from the target's
+    tools/list is the remaining M2 half, deferred (needs tools/list enumeration in the scan path).
     """
+    manifests = list(manifests or [])
+    if allowed_hosts:
+        manifests.append(ToolManifest("operator-allowlist",
+                                      declared_hosts={h.lower() for h in allowed_hosts}))
     trace = SessionTrace(
         tool_calls=[ToolCall(tool=f"planted:{t.filename}", returns=t.marker) for t in tokens],
         egress=[Egress(host=r.host, url=r.url, payload=r.payload, tool=r.channel) for r in records],
-        manifests=list(manifests or []),
+        manifests=manifests,
     )
     det = analyze_session(trace)
     return (VERDICT_LEAKED if det.flagged else VERDICT_CLEAN), det
@@ -124,6 +132,7 @@ def scan(
     capture: CaptureBackend | None = None,
     server_name: str = "target",
     client: str = "claude-code",
+    allowed_hosts: list | None = None,
 ) -> ScanResult:
     """Run one agent session against ``spec`` and verdict whether a planted secret left.
 
@@ -147,7 +156,7 @@ def scan(
         )
 
     battery = HoneytokenBattery()
-    capture = capture or LoopbackProxyBackend()
+    capture = capture or default_capture()
     try:
         tokens = battery.plant()
         capture.start()
@@ -161,8 +170,13 @@ def scan(
             return ScanResult(VERDICT_INCONCLUSIVE, transcript=transcript, tokens=tokens,
                               egress=records, note="Agent did not run to completion.")
 
-        verdict, det = verdict_from_capture(tokens, records)
-        return ScanResult(verdict, det, transcript=transcript, egress=records, tokens=tokens)
+        verdict, det = verdict_from_capture(tokens, records, allowed_hosts=allowed_hosts)
+        note = ""
+        if verdict == VERDICT_CLEAN and not capture.tls:
+            note = (f"CLEAN over the {capture.name} tap (plaintext HTTP only). HTTPS egress is "
+                    f"NOT intercepted here — enable TLS capture (MCPRT_TLS_CAPTURE=1, needs the "
+                    f"'capture' extra) for an HTTPS-complete verdict.")
+        return ScanResult(verdict, det, transcript=transcript, egress=records, tokens=tokens, note=note)
     finally:
         capture.stop()
         battery.cleanup()

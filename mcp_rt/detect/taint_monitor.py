@@ -43,7 +43,9 @@ does not fire when no egress carries the tainted value (the RESILIENT cases).
 from __future__ import annotations
 
 import json
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -109,6 +111,34 @@ class DetectionResult:
     rationale: str = ""
 
 
+def _shannon_bits_per_char(s: str) -> float:
+    """Shannon entropy (bits/char) of ``s`` — high for random secrets, low for words/paths."""
+    if not s:
+        return 0.0
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in Counter(s).values())
+
+
+def _secret_like(tok: str) -> bool:
+    """Is a bare file-read token random enough to be a real secret (vs a word/path/version)?
+
+    Gate for the generic file-read taint path: a credential-shaped source only counts if it is
+    long AND high-entropy, so an incidental English word or path fragment that happens to land
+    in a benign egress payload can't manufacture a false LEAKED. Planted honeytoken markers and
+    structured secrets are matched separately (_HONEYTOKEN_RE / _SECRET_KEY_RE / _PRIVATE_KEY_RE)
+    and are never subject to this gate.
+    ponytail: length + entropy + mixed digit/letter heuristic. Real keys/tokens (AWS AKIA…,
+    sk-proj-…, hex/base64, UUIDs) carry digits AND letters; English-word filenames
+    ("deployment-guide-readme") usually don't, and entropy alone can't tell them apart (both ~3.6).
+    Misses a rare pure-alpha or short secret in exchange for the zero-false-positive guarantee;
+    tighten the floors if a real miss shows up.
+    """
+    has_digit = any(c.isdigit() for c in tok)
+    has_alpha = any(c.isalpha() for c in tok)
+    return (len(tok) >= 16 and has_digit and has_alpha
+            and _shannon_bits_per_char(tok) >= 3.5)
+
+
 def _extract_credential_tokens(text: str) -> set:
     """Return credential-shaped tokens found in ``text``.
 
@@ -162,7 +192,8 @@ def analyze_session(trace: SessionTrace) -> DetectionResult:
             sources.setdefault(tok, tc)
         if tc.reads_file:
             for tok in re.findall(r"[A-Za-z0-9._\-]{8,}", tc.returns or ""):
-                sources.setdefault(tok, tc)
+                if _secret_like(tok):        # only high-entropy tokens — protects zero-FP
+                    sources.setdefault(tok, tc)
 
     if not sources:
         return DetectionResult(

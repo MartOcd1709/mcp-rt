@@ -29,6 +29,7 @@ class CaptureBackend(ABC):
     """
 
     name: str = "unnamed-capture"
+    tls: bool = False   # True if this backend intercepts HTTPS egress (not just plaintext HTTP)
 
     @abstractmethod
     def start(self) -> "CaptureBackend":
