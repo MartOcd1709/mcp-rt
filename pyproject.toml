@@ -8,6 +8,20 @@ version = "0.2.0"
 description = "Ground-truth MCP server security engine — VAPT probes, benchmark, and compliance"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ved Pandya" }]
+keywords = ["mcp", "security", "vulnerability-scanner", "vapt", "ai-agents", "llm-security", "owasp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Security",
+  "Topic :: Software Development :: Testing",
+]
 dependencies = [
   "mcp",
   "rich",
@@ -20,6 +34,11 @@ dependencies = [
 [project.optional-dependencies]
 capture = ["mitmproxy"]      # TLS egress interception for remote/http targets
 pdf = ["weasyprint"]         # branded PDF deliverable (hunt.report.to_pdf); needs system libs (pango/cairo)
+
+[project.urls]
+Homepage = "https://github.com/MartOcd1709/mcp-rt"
+Repository = "https://github.com/MartOcd1709/mcp-rt"
+Issues = "https://github.com/MartOcd1709/mcp-rt/issues"
 
 [project.scripts]
 mcp-rt = "hunt.cli:main"
