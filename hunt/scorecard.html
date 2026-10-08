@@ -1,0 +1,51 @@
+<title>mcp-rt Security Scorecard</title>
+<style>
+ :root{color-scheme:dark;--bg:#0a0d11;--panel:#121823;--bd:#202a36;--fg:#dce4ee;--mut:#8a99a9;
+   --ac:#22d3ee;--good:#34d399;--mono:'JetBrains Mono',ui-monospace,monospace;
+   --sans:'IBM Plex Sans',system-ui,sans-serif}
+ *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6}
+ .wrap{max-width:900px;margin:0 auto;padding:28px 20px 60px}
+ h1{font-size:clamp(26px,5vw,38px);margin:0 0 6px;letter-spacing:-.02em} h1 .rt{color:var(--ac)}
+ .sub{color:var(--mut);max-width:62ch;margin:0 0 22px}
+ .tiles{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:28px}
+ .tile{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:14px 18px;min-width:0}
+ .tile .n{font-family:var(--mono);font-size:26px;color:var(--ac);font-weight:600}
+ .tile .l{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.07em;margin-top:2px}
+ h2{font-size:19px;margin:30px 0 10px;border-bottom:1px solid var(--bd);padding-bottom:6px}
+ table{width:100%;border-collapse:collapse;font-size:13.5px} th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--bd)}
+ th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+ .mono{font-family:var(--mono)} td.mono{color:var(--ac);font-size:12px}
+ .chip{display:inline-block;background:rgba(52,211,153,.12);color:var(--good);border:1px solid rgba(52,211,153,.3);
+   border-radius:6px;padding:3px 9px;margin:3px 4px 0 0;font-family:var(--mono);font-size:12px}
+ .muted{color:var(--mut)} ul{padding-left:18px} li{margin:4px 0}
+ footer{margin-top:36px;color:var(--mut);font-size:12px;border-top:1px solid var(--bd);padding-top:14px}
+ .wrap>div.tiles{}
+</style>
+<div class="wrap">
+ <h1>mcp<span class="rt">-rt</span> Security Scorecard</h1>
+ <p class="sub">Ground-truth security posture for MCP servers — every verdict is proven by a planted
+  honeytoken, sentinel, canary, or captured response, not a heuristic. Generated 2026-10-06.</p>
+ <div class="tiles"><div class="tile"><div class="n">11</div><div class="l">Detection classes</div></div><div class="tile"><div class="n">151</div><div class="l">Servers tested</div></div><div class="tile"><div class="n">23/26</div><div class="l">Agent exfils (research)</div></div><div class="tile"><div class="n">92</div><div class="l">Candidates triaged out</div></div></div>
+
+ <h2>Detection coverage — 11 ground-truth classes</h2>
+ <table><tr><th>Finding class</th><th>CWE</th><th>OWASP MCP</th><th>probe</th></tr><tr><td>Argument Injection / CLI Flag Smuggling</td><td class="mono">CWE-88</td><td class="mono">MCP05</td><td class="mono">arg_injection</td></tr><tr><td>Command / Code Injection</td><td class="mono">CWE-78</td><td class="mono">MCP05</td><td class="mono">command_injection</td></tr><tr><td>DNS Rebinding / Missing Origin Validation</td><td class="mono">CWE-346</td><td class="mono">MCP07</td><td class="mono">dns_rebinding</td></tr><tr><td>Dynamic Tool Redefinition (Rug Pull)</td><td class="mono">CWE-494</td><td class="mono">MCP03</td><td class="mono">rug_pull</td></tr><tr><td>Insecure Deserialization</td><td class="mono">CWE-502</td><td class="mono">MCP05</td><td class="mono">deserialization</td></tr><tr><td>Path Traversal / Arbitrary File Access</td><td class="mono">CWE-22</td><td class="mono">MCP05, MCP02</td><td class="mono">path_traversal</td></tr><tr><td>SQL Injection</td><td class="mono">CWE-89</td><td class="mono">MCP05</td><td class="mono">sql_injection</td></tr><tr><td>Server-Side Request Forgery</td><td class="mono">CWE-918</td><td class="mono">MCP05, MCP02</td><td class="mono">ssrf</td></tr><tr><td>Server-Side Template Injection</td><td class="mono">CWE-1336</td><td class="mono">MCP05</td><td class="mono">ssti</td></tr><tr><td>Token Passthrough / Confused Deputy</td><td class="mono">CWE-287</td><td class="mono">MCP01, MCP07</td><td class="mono">token_passthrough</td></tr><tr><td>Tool-Metadata Concealment (Tool Poisoning)</td><td class="mono">CWE-74</td><td class="mono">MCP03</td><td class="mono">tool_poisoning</td></tr></table>
+
+ <h2>OWASP MCP Top 10 — actively tested</h2>
+ <table><tr><th>Control</th><th>Title</th><th>Status</th></tr><tr><td class="mono">MCP01</td><td>Token Mismanagement and Secret Exposure</td><td>✅ tested</td></tr><tr><td class="mono">MCP02</td><td>Privilege Escalation via Scope Creep</td><td>✅ tested</td></tr><tr><td class="mono">MCP03</td><td>Tool Poisoning</td><td>✅ tested</td></tr><tr><td class="mono">MCP04</td><td>Supply Chain Attacks and Dependency Tampering</td><td>— not tested</td></tr><tr><td class="mono">MCP05</td><td>Command Injection and Execution</td><td>✅ tested</td></tr><tr><td class="mono">MCP06</td><td>Intent Flow Subversion (Prompt Injection via Context)</td><td>— not tested</td></tr><tr><td class="mono">MCP07</td><td>Insufficient Authentication and Authorization</td><td>✅ tested</td></tr><tr><td class="mono">MCP08</td><td>Lack of Audit and Telemetry</td><td>— not tested</td></tr><tr><td class="mono">MCP09</td><td>Shadow MCP Servers</td><td>— not tested</td></tr><tr><td class="mono">MCP10</td><td>Context Injection and Over Sharing</td><td>— not tested</td></tr></table>
+
+ <h2>Servers tested clean (68)</h2>
+ <div><span class="chip">@achmadya-dev/mcp-mysql-query@0.3.2</span><span class="chip">@achmadya-dev/mcp-sqlite-query</span><span class="chip">@ahmetbarut/mcp-database-server@1.2.0</span><span class="chip">@bensons/mcp-exec</span><span class="chip">@cynosure-mcp/file-access</span><span class="chip">@dev.saqibaziz/mcp-pdf-reader@1.1.0</span><span class="chip">@devzhou/mcp-mysql</span><span class="chip">@exoticknight/mcp-file-merger@1.0.1</span><span class="chip">@huzhihui_c/mcp-postgres</span><span class="chip">@huzhihui_c/mcp-ssh</span><span class="chip">@iflow-mcp/basit-devbe-local-mcp-server</span><span class="chip">@iflow-mcp/mcp-ssh-manager</span><span class="chip">@iflow-mcp/mcp-terminal</span><span class="chip">@jadchene/mcp-ssh-service</span><span class="chip">@jahrulnr/mcp-ssh-agentic</span><span class="chip">@m_sea_bass/relpath-filesystem-mcp</span><span class="chip">@modelcontextprotocol/server-everything</span><span class="chip">@modelcontextprotocol/server-filesystem</span><span class="chip">@modelcontextprotocol/server-memory</span><span class="chip">@modelcontextprotocol/server-sequential-thinking</span><span class="chip">@mseep/mcp-mongodb-mysql-server</span><span class="chip">@nam088/mcp-database-server</span><span class="chip">@neonlightdev/mcp-server-filesystem-ignore</span><span class="chip">@objekt.sh/mcp-upload@0.1.5</span><span class="chip">@omniboard/mcp</span><span class="chip">@pyrokine/mcp-ssh</span><span class="chip">@redf0x1/mcp-server-filesystem</span><span class="chip">@rog0x/mcp-file-tools</span><span class="chip">@rootpilot/mcp-ssh-diagnose</span><span class="chip">@rturv/mcp-pdf-reader@1.0.0</span><span class="chip">@sajithrw/mcp-mysql@1.0.0</span><span class="chip">@seepine/mcp-terminal</span><span class="chip">@sylphlab/tools-filesystem-mcp</span><span class="chip">agentfetch-mcp</span><span class="chip">agentic-terminal-mcp-shubham96@0.1.0</span><span class="chip">agentic_mcp_terminal@0.1.0</span><span class="chip">agentic_terminal_mcp@0.1.0</span><span class="chip">agentic_terminal_mcp_sayani@0.1.1</span><span class="chip">agentic_terminal_mcp_sk@0.1.0</span><span class="chip">alibabacloud-dms-mcp-server-inner@0.1.9</span><span class="chip">alibabacloud-dms-mcp-server@0.1.23</span><span class="chip">codepage-bridge-mcp</span><span class="chip">douban-mcp-cli@1.0.0-alpha.0</span><span class="chip">hostinger-api-mcp</span><span class="chip">mcp-code-context</span><span class="chip">mcp-fetch-server</span><span class="chip">mcp-pdf-server</span><span class="chip">mcp-server-commands</span><span class="chip">mcp-server-fetch</span><span class="chip">mcp-server-filesystem</span><span class="chip">mcp-server-filesystem-smart</span><span class="chip">mcp-server-git</span><span class="chip">mcp-shell-execute</span><span class="chip">mcp-simple-memory</span><span class="chip">mcp-sqlite-tools-plus</span><span class="chip">mcp-ssh-ops</span><span class="chip">mcp-ssh-persistent</span><span class="chip">mcp-ssh-terminal</span><span class="chip">metamcp-filesystem-server-downloads</span><span class="chip">npx -y @m_sea_bass/relpath-filesystem-mcp /tmp/fs_allowed</span><span class="chip">npx -y @zhxblcdx/mcp-ssh</span><span class="chip">onestep-mcp-filesystem-server</span><span class="chip">server-filesystem</span><span class="chip">smarter-faster-better-mcp</span><span class="chip">ssh-mcp-pro</span><span class="chip">terminal-driver-mcp</span><span class="chip">terminal-history-mcp</span><span class="chip">zenith-mcp</span></div>
+ <p class="muted" style="font-size:12.5px;margin-top:10px">+ 81 not conclusively testable in this run ·
+  2 under coordinated disclosure (not named until published).</p>
+
+ <h2>Findings — ground truth, in context</h2>
+ <p>Across <strong>151 servers</strong> tested over 11 classes:
+ <strong>2 confirmed</strong> (CVE-class) · 2 in coordinated disclosure ·
+ 68 clean · <strong>92 candidates triaged out</strong> (by-design / false-positive,
+ never counted). <strong>Zero false positives</strong> in reported findings — that discipline is why a
+ confirmed finding here is believable.</p>
+ <ul><li class="muted">2 confirmed (CVE-class) · coordinated disclosure in progress — named here once published</li></ul>
+
+ <footer>mcp-rt · ground-truth MCP VAPT + benchmark · responsible disclosure before any public listing ·
+  scores reflect the actively-tested OWASP controls (see the benchmark spec).</footer>
+</div>

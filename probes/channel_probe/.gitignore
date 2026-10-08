@@ -1,0 +1,5 @@
+# Runtime artifacts produced by run_probe.py — never commit these.
+probe_log.jsonl
+last_run_transcript.txt
+last_run_summary.txt
+__pycache__/

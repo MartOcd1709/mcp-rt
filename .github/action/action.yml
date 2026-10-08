@@ -1,0 +1,34 @@
+name: 'mcp-rt MCP Security Scan'
+description: 'Ground-truth security scan of the MCP servers declared in your repo, on every PR. SARIF output.'
+author: 'Ved Pandya'
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  fail-on:
+    description: 'Fail the build on: any | critical | high | none'
+    required: false
+    default: 'critical'
+  sarif-path:
+    description: 'Where to write the SARIF report'
+    required: false
+    default: 'mcp-rt.sarif'
+  config:
+    description: 'Optional explicit MCP config path(s); default auto-discovers .mcp.json / mcp_settings.json'
+    required: false
+    default: ''
+
+outputs:
+  findings-count:
+    description: 'Number of findings'
+  sarif-path:
+    description: 'Path to the generated SARIF report'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.fail-on }}
+    - ${{ inputs.sarif-path }}
+    - ${{ inputs.config }}

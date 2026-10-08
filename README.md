@@ -23,6 +23,11 @@ pip install -e .
 mcp-rt report --target-stdio "npx -y @modelcontextprotocol/server-filesystem /tmp"
 ```
 
+> **Prerequisite:** the scan drives a real agent against the target, and today that agent is the
+> [Claude Code](https://claude.com/claude-code) CLI (`claude`) — install it and have it on your `PATH`.
+> Without it the scan can't exercise the server and returns `INCONCLUSIVE`, never a false verdict.
+> Multi-client support (Cursor / Cline / Codex / Gemini) is in development.
+
 You get a per-finding report (severity, CWE, OWASP MCP control, evidence, remediation) and a verdict:
 **VULNERABLE** (with a reproduced proof) or **CLEAN** (an attestation across every tested class).
 Use `--exit-code` to gate CI. JSON output for pipelines; `mcp-rt scorecard` for a shareable HTML posture page.
@@ -39,12 +44,12 @@ the answer:
 - **By-design ≠ vulnerability.** A fetch tool fetching, a SQL tool running SQL, a shell tool running a
   command — that's the tool's job, not a finding. We only report a *restricted* control bypassed or a
   *non-executor* made to execute. That discipline is why a finding from mcp-rt is believable.
-- **Honest denominator.** Clean and inconclusive results are recorded, not hidden. Across **62 MCP
+- **Honest denominator.** Clean and inconclusive results are recorded, not hidden. Across **154 MCP
   servers tested to date, zero false positives** in reported findings.
 
 ---
 
-## What it tests — 10 ground-truth classes + OWASP MCP Top 10
+## What it tests — 11 ground-truth classes + OWASP MCP Top 10
 
 | Class | CWE | What "VULNERABLE" means (proven) |
 |---|---|---|
@@ -52,6 +57,7 @@ the answer:
 | Path traversal / write-escape | CWE-22 | a read/write tool escaped its root (out-of-root canary returned) |
 | SSRF | CWE-918 | a non-fetch tool reached a loopback/internal sink we own |
 | SQL injection | CWE-89 | a parser error surfaced from concatenated input (FTS5 excluded) |
+| Insecure deserialization | CWE-502 | a `yaml.load`/`pickle` payload executed code (sentinel-confirmed RCE) |
 | Tool poisoning | CWE-74 | invisible Unicode (TAG/zero-width/bidi/ANSI) hidden in tool metadata |
 | Token passthrough / confused deputy | CWE-287 | the client's bearer token forwarded downstream |
 | Missing auth enforcement | CWE-287 | a credential-free session accepted despite auth being configured |

@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-07T20:54:56",
+  "class_count": 13,
+  "detection_classes": [
+    {
+      "id": "arg_injection",
+      "title": "Argument Injection / CLI Flag Smuggling",
+      "severity": "High",
+      "cwe": "CWE-88",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "command_injection",
+      "title": "Command / Code Injection",
+      "severity": "Critical",
+      "cwe": "CWE-78",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "context_oversharing",
+      "title": "Context Oversharing / Environment Leak",
+      "severity": "High",
+      "cwe": "CWE-200",
+      "owasp": [
+        "MCP10"
+      ]
+    },
+    {
+      "id": "dns_rebinding",
+      "title": "DNS Rebinding / Missing Origin Validation",
+      "severity": "High",
+      "cwe": "CWE-346",
+      "owasp": [
+        "MCP07"
+      ]
+    },
+    {
+      "id": "rug_pull",
+      "title": "Dynamic Tool Redefinition (Rug Pull)",
+      "severity": "Medium",
+      "cwe": "CWE-494",
+      "owasp": [
+        "MCP03"
+      ]
+    },
+    {
+      "id": "deserialization",
+      "title": "Insecure Deserialization",
+      "severity": "Critical",
+      "cwe": "CWE-502",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "path_traversal",
+      "title": "Path Traversal / Arbitrary File Access",
+      "severity": "High",
+      "cwe": "CWE-22",
+      "owasp": [
+        "MCP05",
+        "MCP02"
+      ]
+    },
+    {
+      "id": "sql_injection",
+      "title": "SQL Injection",
+      "severity": "High",
+      "cwe": "CWE-89",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "ssrf",
+      "title": "Server-Side Request Forgery",
+      "severity": "High",
+      "cwe": "CWE-918",
+      "owasp": [
+        "MCP05",
+        "MCP02"
+      ]
+    },
+    {
+      "id": "ssti",
+      "title": "Server-Side Template Injection",
+      "severity": "High",
+      "cwe": "CWE-1336",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "supply_chain",
+      "title": "Supply Chain / Install-Time Code Execution",
+      "severity": "High",
+      "cwe": "CWE-829",
+      "owasp": [
+        "MCP04"
+      ]
+    },
+    {
+      "id": "token_passthrough",
+      "title": "Token Passthrough / Confused Deputy",
+      "severity": "High",
+      "cwe": "CWE-287",
+      "owasp": [
+        "MCP01",
+        "MCP07"
+      ]
+    },
+    {
+      "id": "tool_poisoning",
+      "title": "Tool-Metadata Concealment (Tool Poisoning)",
+      "severity": "High",
+      "cwe": "CWE-74",
+      "owasp": [
+        "MCP03"
+      ]
+    }
+  ],
+  "research_agent_exfils": "23/26",
+  "owasp_top10": [
+    {
+      "id": "MCP01",
+      "title": "Token Mismanagement and Secret Exposure",
+      "tested": true
+    },
+    {
+      "id": "MCP02",
+      "title": "Privilege Escalation via Scope Creep",
+      "tested": true
+    },
+    {
+      "id": "MCP03",
+      "title": "Tool Poisoning",
+      "tested": true
+    },
+    {
+      "id": "MCP04",
+      "title": "Supply Chain Attacks and Dependency Tampering",
+      "tested": true
+    },
+    {
+      "id": "MCP05",
+      "title": "Command Injection and Execution",
+      "tested": true
+    },
+    {
+      "id": "MCP06",
+      "title": "Intent Flow Subversion (Prompt Injection via Context)",
+      "tested": false
+    },
+    {
+      "id": "MCP07",
+      "title": "Insufficient Authentication and Authorization",
+      "tested": true
+    },
+    {
+      "id": "MCP08",
+      "title": "Lack of Audit and Telemetry",
+      "tested": false
+    },
+    {
+      "id": "MCP09",
+      "title": "Shadow MCP Servers",
+      "tested": false
+    },
+    {
+      "id": "MCP10",
+      "title": "Context Injection and Over Sharing",
+      "tested": true
+    }
+  ],
+  "ledger": {
+    "servers_tested": 152,
+    "confirmed": 2,
+    "clean": 69,
+    "inconclusive": 81,
+    "under_coordinated_disclosure": 2,
+    "candidates_triaged_out": 92,
+    "clean_named": [
+      "@achmadya-dev/mcp-mysql-query@0.3.2",
+      "@achmadya-dev/mcp-sqlite-query",
+      "@ahmetbarut/mcp-database-server@1.2.0",
+      "@bensons/mcp-exec",
+      "@cynosure-mcp/file-access",
+      "@dev.saqibaziz/mcp-pdf-reader@1.1.0",
+      "@devzhou/mcp-mysql",
+      "@exoticknight/mcp-file-merger@1.0.1",
+      "@huzhihui_c/mcp-postgres",
+      "@huzhihui_c/mcp-ssh",
+      "@iflow-mcp/basit-devbe-local-mcp-server",
+      "@iflow-mcp/mcp-ssh-manager",
+      "@iflow-mcp/mcp-terminal",
+      "@jadchene/mcp-ssh-service",
+      "@jahrulnr/mcp-ssh-agentic",
+      "@m_sea_bass/relpath-filesystem-mcp",
+      "@modelcontextprotocol/server-everything",
+      "@modelcontextprotocol/server-filesystem",
+      "@modelcontextprotocol/server-filesystem@latest",
+      "@modelcontextprotocol/server-memory",
+      "@modelcontextprotocol/server-sequential-thinking",
+      "@mseep/mcp-mongodb-mysql-server",
+      "@nam088/mcp-database-server",
+      "@neonlightdev/mcp-server-filesystem-ignore",
+      "@objekt.sh/mcp-upload@0.1.5",
+      "@omniboard/mcp",
+      "@pyrokine/mcp-ssh",
+      "@redf0x1/mcp-server-filesystem",
+      "@rog0x/mcp-file-tools",
+      "@rootpilot/mcp-ssh-diagnose",
+      "@rturv/mcp-pdf-reader@1.0.0",
+      "@sajithrw/mcp-mysql@1.0.0",
+      "@seepine/mcp-terminal",
+      "@sylphlab/tools-filesystem-mcp",
+      "agentfetch-mcp",
+      "agentic-terminal-mcp-shubham96@0.1.0",
+      "agentic_mcp_terminal@0.1.0",
+      "agentic_terminal_mcp@0.1.0",
+      "agentic_terminal_mcp_sayani@0.1.1",
+      "agentic_terminal_mcp_sk@0.1.0",
+      "alibabacloud-dms-mcp-server-inner@0.1.9",
+      "alibabacloud-dms-mcp-server@0.1.23",
+      "codepage-bridge-mcp",
+      "douban-mcp-cli@1.0.0-alpha.0",
+      "hostinger-api-mcp",
+      "mcp-code-context",
+      "mcp-fetch-server",
+      "mcp-pdf-server",
+      "mcp-server-commands",
+      "mcp-server-fetch",
+      "mcp-server-filesystem",
+      "mcp-server-filesystem-smart",
+      "mcp-server-git",
+      "mcp-shell-execute",
+      "mcp-simple-memory",
+      "mcp-sqlite-tools-plus",
+      "mcp-ssh-ops",
+      "mcp-ssh-persistent",
+      "mcp-ssh-terminal",
+      "metamcp-filesystem-server-downloads",
+      "npx -y @m_sea_bass/relpath-filesystem-mcp /tmp/fs_allowed",
+      "npx -y @zhxblcdx/mcp-ssh",
+      "onestep-mcp-filesystem-server",
+      "server-filesystem",
+      "smarter-faster-better-mcp",
+      "ssh-mcp-pro",
+      "terminal-driver-mcp",
+      "terminal-history-mcp",
+      "zenith-mcp"
+    ],
+    "published_findings": []
+  },
+  "false_positive_policy": "zero \u2014 every reported finding is ground-truth confirmed; unpublished findings are counted but never named until coordinated disclosure completes"
+}

@@ -63,3 +63,20 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Hunt ledger — may contain UN-DISCLOSED findings; never publish
+hunt/findings.db
+hunt/__pycache__/
+hunt/logs/
+hunt/reports/
+hunt/benchmark_results/
+
+# stray probe payload artifacts (should never land in repo)
+*DROP TABLE*
+*canary.txt
+\\tmp\\*
+
+# Scratch / generated tooling caches (not source)
+.scout-cache/
+.project_map.json
+backups/

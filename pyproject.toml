@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mcp-rt"
-version = "0.1.0"
-description = "MCP client red-team framework"
+version = "0.2.0"
+description = "Ground-truth MCP server security engine — VAPT probes, benchmark, and compliance"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,11 +13,26 @@ dependencies = [
   "rich",
   "anthropic",
   "google-genai",
+  "pyyaml",      # deserialization fixtures/probe + real yaml-config servers
+  "markdown",    # HTML/PDF report deliverable (hunt.report.render_html)
 ]
+
+[project.optional-dependencies]
+capture = ["mitmproxy"]      # TLS egress interception for remote/http targets
+pdf = ["weasyprint"]         # branded PDF deliverable (hunt.report.to_pdf); needs system libs (pango/cairo)
+
+[project.scripts]
+mcp-rt = "hunt.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["mcp_rt*"]
+include = ["mcp_rt*", "hunt*"]
+
+[tool.pytest.ini_options]
+# deepeval's pytest11 plugin eager-imports eventlet, which monkey-patches and then
+# crashes on py3.13+trio (GreenSocket.sendmsg) at collection. We don't use it — disable it.
+addopts = "-p no:deepeval"
+testpaths = ["tests"]
 

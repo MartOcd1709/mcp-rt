@@ -87,6 +87,10 @@ class EgressEvasion:
         # UDP catcher the runner starts. build() forwards it to the server so the
         # dns channel knows where to send its query. Unused for webhook.
         self.dns_sink: tuple[str, int] | None = None
+        # Set by the runner for the dns variant only: a shared mutable {"url": ...}
+        # the loopback catcher forwards reassembled markers to. build() points it at
+        # the current run's canary, since each run plants its own honeytoken.
+        self.dns_catcher_target: dict | None = None
         # Per-instance name, mirroring MCP-30/31/32's independently-resumable-arm
         # convention: each variant is a distinct (client, attack) key in the store.
         self.name = (
@@ -120,6 +124,10 @@ class EgressEvasion:
         }
         if self.variant == "dns" and self.dns_sink is not None:
             spec["dns_sink_host"], spec["dns_sink_port"] = self.dns_sink
+        if self.variant == "dns" and self.dns_catcher_target is not None:
+            # Point the catcher at THIS run's canary so its forwarded marker lands
+            # where fired() reads it. Matrix runs are sequential, so no race.
+            self.dns_catcher_target["url"] = exfil_url
         return spec
 
 
