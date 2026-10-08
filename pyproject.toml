@@ -29,6 +29,7 @@ dependencies = [
   "google-genai",
   "pyyaml",      # deserialization fixtures/probe + real yaml-config servers
   "markdown",    # HTML/PDF report deliverable (hunt.report.render_html)
+  "cryptography", # Ed25519 signing/verify for ground-truth attestations (mcp_rt.attest)
 ]
 
 [project.optional-dependencies]

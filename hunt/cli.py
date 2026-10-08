@@ -6,6 +6,7 @@ Installed via `pip install -e .` (see pyproject [project.scripts]), then:
     mcp-rt probe     --target-stdio "..."                     # the 5 impl-bug probes
     mcp-rt token     --target-stdio "..."                     # token passthrough / confused deputy
     mcp-rt report    --target-stdio "..." [--exit-code] [--pdf]  # full VAPT + OWASP report (+PDF deliverable)
+    mcp-rt attest    --target-stdio "..."                     # signed ground-truth attestation + badge (verify offline)
     mcp-rt diff      --target-stdio "..."                     # re-test: RESOLVED / NEW / UNCHANGED vs last scan
     mcp-rt benchmark --target-stdio "..."                     # grade + scorecard
     mcp-rt sweep     [--cap N] [--max-downloads N]            # discover + benchmark the long tail
@@ -30,6 +31,7 @@ _COMMANDS = {
     "probe": ("hunt.probes", "main"),
     "token": ("hunt.family_b", "main"),
     "report": ("hunt.report", "main"),
+    "attest": ("hunt.attestation", "main"),      # scan -> signed, offline-verifiable attestation (+badge)
     "hunt": ("hunt.report", "main"),
     "diff": ("hunt.diff", "main"),
     "monitor": ("hunt.monitor", "main"),
