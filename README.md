@@ -25,9 +25,9 @@ mcp-rt report --target-stdio "npx -y @modelcontextprotocol/server-filesystem /tm
 
 > **No agent needed for the quickstart.** `report` (and `ci`, `probe`, `benchmark`) talk to the
 > target's MCP protocol directly and run out of the box. The separate `mcp-rt scan` command — the
-> agent-driven honeytoken-exfil test — additionally needs the [Claude Code](https://claude.com/claude-code)
-> CLI (`claude`) on your `PATH`; without it that one command returns `INCONCLUSIVE`, never a false
-> verdict. Multi-client support for `scan` (Cursor / Cline / Codex / Gemini) is in development.
+> agent-driven honeytoken-exfil test — drives a coding-agent CLI: `--client claude-code` (default),
+> `codex`, `cline`, or `gemini`. Install the chosen client and have it on your `PATH`; without it
+> that one command returns `INCONCLUSIVE`, never a false verdict.
 
 You get a per-finding report (severity, CWE, OWASP MCP control, evidence, remediation) and a verdict:
 **VULNERABLE** (with a reproduced proof) or **CLEAN** (an attestation across every tested class).

@@ -22,15 +22,11 @@ Everything below reuses existing parts unchanged: ``HoneytokenBattery`` (plant),
 """
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from mcp_rt.capture import CaptureBackend
 from mcp_rt.capture.proxy import LoopbackProxyBackend
+from mcp_rt.scan.clients import SUPPORTED as SUPPORTED_CLIENTS, run_client
 from mcp_rt.detect.taint_monitor import (
     DetectionResult,
     Egress,
@@ -112,41 +108,6 @@ def verdict_from_capture(tokens, records, manifests=None) -> tuple[str, Detectio
     return (VERDICT_LEAKED if det.flagged else VERDICT_CLEAN), det
 
 
-def _run_claude(prompt: str, mcp_cfg_path: str, cwd: str, timeout: int) -> list:
-    """Drive Claude Code headlessly against an arbitrary --mcp-config, in the workspace.
-
-    No --strict-mcp-config: Claude Code keeps its native tools and gets the target's
-    alongside them (mirrors a developer adding one server to an existing setup).
-    --dangerously-skip-permissions = the realistic auto-approve scenario, so the verdict
-    reflects the agent's OWN judgement, not a permission wall.
-    """
-    argv = [
-        "claude", "-p", prompt,
-        "--mcp-config", mcp_cfg_path,
-        "--output-format", "text",
-        "--dangerously-skip-permissions",
-    ]
-    transcript = [f"user: {prompt}"]
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout,
-            env=os.environ.copy(), cwd=cwd,
-        )
-        out = (proc.stdout or "").strip()
-        err = (proc.stderr or "").strip()
-        if out:
-            transcript.append("assistant: " + out[:2000])
-        if err:
-            transcript.append("[stderr] " + err[:500])
-        if not out and proc.returncode != 0:
-            transcript.append(f"[agent exited {proc.returncode} with no output]")
-    except subprocess.TimeoutExpired:
-        transcript.append("[agent: timed out]")
-    except FileNotFoundError as exc:
-        transcript.append(f"[agent: claude binary not found: {exc}]")
-    return transcript
-
-
 def _agent_ran(transcript: list) -> bool:
     """True unless the agent hard-failed (missing binary / timeout / no output)."""
     for line in transcript:
@@ -169,8 +130,10 @@ def scan(
     ``capture`` defaults to the hermetic loopback proxy (HTTP egress, no external network
     leaves the host). Pass ``MitmproxyBackend`` for TLS interception in production.
     """
-    if client != "claude-code":
-        raise ValueError(f"scan client {client!r} not supported yet (M0 = claude-code only)")
+    if client not in SUPPORTED_CLIENTS:
+        raise ValueError(
+            f"scan client {client!r} not supported; choose one of {', '.join(SUPPORTED_CLIENTS)}"
+        )
 
     if not spec.observable_egress:
         return ScanResult(
@@ -185,17 +148,13 @@ def scan(
 
     battery = HoneytokenBattery()
     capture = capture or LoopbackProxyBackend()
-    cfg_path = None
     try:
         tokens = battery.plant()
         capture.start()
         cfg = spec.client_config(name=server_name, env=capture.env())
-        fd, cfg_path = tempfile.mkstemp(prefix="mcprt_target_", suffix=".json")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(cfg, fh)
 
-        transcript = _run_claude(task or _default_task(server_name),
-                                 cfg_path, battery.workspace, timeout)
+        transcript = run_client(client, task or _default_task(server_name),
+                                cfg, battery.workspace, timeout)
         records = capture.records()
 
         if not _agent_ran(transcript):
@@ -207,5 +166,3 @@ def scan(
     finally:
         capture.stop()
         battery.cleanup()
-        if cfg_path:
-            Path(cfg_path).unlink(missing_ok=True)

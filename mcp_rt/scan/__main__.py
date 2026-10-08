@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 
+from mcp_rt.scan.clients import SUPPORTED as SUPPORTED_CLIENTS
 from mcp_rt.scan.runner import VERDICT_LEAKED, VERDICT_UNOBSERVABLE, scan
 from mcp_rt.target import TargetSpec
 
@@ -30,6 +31,8 @@ def main(argv=None) -> int:
     p.add_argument("--header", action="append", default=[], metavar="'K: V'",
                    help="header for --target-http (repeatable)")
     p.add_argument("--task", help="override the benign task given to the agent")
+    p.add_argument("--client", default="claude-code", choices=SUPPORTED_CLIENTS,
+                   help="coding-agent CLI to drive (default: claude-code)")
     p.add_argument("--timeout", type=int, default=180, help="agent timeout, seconds")
     p.add_argument("--json", action="store_true", help="emit the full result as JSON")
     p.add_argument("--exit-code", action="store_true",
@@ -38,7 +41,7 @@ def main(argv=None) -> int:
 
     spec = (TargetSpec.from_stdio(args.target_stdio) if args.target_stdio
             else TargetSpec.from_http(args.target_http, args.header))
-    result = scan(spec, task=args.task, timeout=args.timeout)
+    result = scan(spec, task=args.task, timeout=args.timeout, client=args.client)
 
     if args.json:
         print(json.dumps(result.as_dict(), indent=2))
