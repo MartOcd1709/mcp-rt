@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp-rt — Attestation Dashboard</title>
+<style>
+  /* Palette: warm charcoal + a single warm-stone accent (inspired by mate.security's direction,
+     not copied) — deliberately not the usual SaaS blue. Semantic verdict colors tuned for the dark. */
+  :root{
+    --bg:#16191b; --surface:#1d2123; --surface-2:#23282a; --sunken:#121416;
+    --border:#2b3134; --border-soft:#232829;
+    --fg:#f2efe9; --muted:#9c9488; --faint:#6f6a62;
+    --accent:#c0b092; --accent-strong:#9c907f; --accent-ink:#16191b;
+    --clean:#74c285; --vuln:#e5655c; --warn:#d6a94a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;
+    font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  a{color:var(--accent);text-decoration:none} a:hover{color:var(--fg)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace} .muted{color:var(--muted)}
+  /* top bar */
+  header{display:flex;align-items:center;gap:16px;padding:16px 28px;border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg,#1b1f21,var(--bg))}
+  .brand{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:600;letter-spacing:.2px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(192,176,146,.15)}
+  header .tag{color:var(--muted);font-size:12.5px;border-left:1px solid var(--border);padding-left:16px}
+  .authbar{margin-left:auto;display:flex;gap:8px;align-items:center}
+  #whoami{font-size:12.5px;color:var(--muted);margin-right:4px}
+  #whoami b{color:var(--fg)}
+  /* layout */
+  main{max-width:1120px;margin:0 auto;padding:26px 24px 60px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin-bottom:26px}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;
+    position:relative;overflow:hidden}
+  .tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--faint)}
+  .tile.clean::before{background:var(--clean)} .tile.vuln::before{background:var(--vuln)}
+  .tile.inc::before{background:var(--warn)} .tile.proof::before{background:var(--accent)}
+  .tile .n{font-size:30px;font-weight:700;letter-spacing:-.5px}
+  .tile .l{color:var(--muted);font-size:11.5px;margin-top:3px;text-transform:uppercase;letter-spacing:.6px}
+  .tile.clean .n{color:var(--clean)} .tile.vuln .n{color:var(--vuln)} .tile.inc .n{color:var(--warn)} .tile.proof .n{color:var(--accent)}
+  /* cards */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px 22px;margin-bottom:22px}
+  .card h2{font-size:12px;margin:0 0 16px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:600}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  /* controls */
+  input,select{background:var(--sunken);color:var(--fg);border:1px solid var(--border);border-radius:9px;
+    padding:10px 12px;font-size:14px;outline:none;transition:border-color .15s}
+  input:focus{border-color:var(--accent-strong)}
+  input[type=text]{flex:1;min-width:280px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+  label.ck{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer}
+  button{background:var(--accent);color:var(--accent-ink);border:0;border-radius:9px;padding:10px 20px;
+    font-size:14px;font-weight:600;cursor:pointer;transition:filter .15s}
+  button:hover:not(:disabled){filter:brightness(1.08)} button:disabled{opacity:.45;cursor:default}
+  .btn-ghost{background:transparent;color:var(--fg);border:1px solid var(--border)}
+  .btn-ghost:hover{border-color:var(--accent-strong)}
+  /* table */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:12px 14px;text-align:left;border-top:1px solid var(--border-soft);vertical-align:top}
+  th{color:var(--muted);font-weight:600;border-top:0;font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  tr.srv{cursor:pointer;transition:background .12s} tr.srv:hover td{background:var(--surface-2)}
+  .v-CLEAN{color:var(--clean);font-weight:600} .v-VULNERABLE{color:var(--vuln);font-weight:600} .v-INCONCLUSIVE{color:var(--warn);font-weight:600}
+  .pill{display:inline-block;background:var(--sunken);border:1px solid var(--border);border-radius:999px;
+    padding:2px 9px;margin:2px 3px 0 0;font-size:11px;color:var(--muted)}
+  .pill.ran{color:var(--clean);border-color:rgba(116,194,133,.3)} .pill.skip{color:var(--faint)}
+  .detail{background:var(--sunken)} .detail td{padding:16px 20px}
+  .jobline{font-size:13px;margin-top:12px} .badgeimg{height:20px;vertical-align:middle}
+  .note{color:var(--muted);font-size:12px;margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><span class="dot"></span> mcp-rt</span>
+  <span class="tag">Ground-truth MCP attestation — every verdict is proof, not a guess. Runs in your environment; nothing leaves.</span>
+  <span class="authbar">
+    <span id="whoami"></span>
+    <a class="btn-ghost" href="/auth/login" id="ssoBtn" style="padding:9px 14px;display:none">Sign in with SSO</a>
+    <input type="password" id="token" placeholder="API token" style="width:190px;font-size:12px">
+    <button id="saveTok" style="padding:9px 14px">Sign in</button>
+  </span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2>Scan a server</h2>
+    <div class="row">
+      <input type="text" id="target" placeholder='npx -y @modelcontextprotocol/server-filesystem /tmp'>
+      <label class="ck"><input type="checkbox" id="deep"> deep (MCP-00)</label>
+      <button id="go">Scan &amp; attest</button>
+    </div>
+    <div class="jobline muted" id="jobs"></div>
+    <div class="note">The scan runs here on this host; it signs an attestation you can verify offline. Deep tier adds the MCP-00 undeclared-capability hunt (needs strace).</div>
+  </div>
+
+  <div class="card">
+    <h2>Attested servers <span class="muted" id="count"></span></h2>
+    <table>
+      <thead><tr><th>Server</th><th>Verdict</th><th>Tier</th><th>Findings</th><th>Scanned</th><th>Attestation</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</main>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+let openSlug=null;
+const getTok=()=>{try{return localStorage.getItem("mcprt_token")||""}catch(e){return ""}};
+function api(path,opts){ opts=opts||{}; opts.headers=Object.assign({}, opts.headers, {Authorization:"Bearer "+getTok()});
+  return fetch(path,opts); }
+$("#token").value=getTok();
+$("#saveTok").onclick=()=>{ try{localStorage.setItem("mcprt_token",$("#token").value.trim())}catch(e){}; refresh(); };
+
+function tile(n,l,cls){return `<div class="tile ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
+
+async function refresh(){
+  const resp=await api("/api/servers");
+  if(resp.status===401){ $("#rows").innerHTML='<tr><td colspan="6" class="muted">Sign in with your API token (printed when the server started) to see your org\'s attestations.</td></tr>'; $("#tiles").innerHTML=""; return; }
+  const d=await resp.json();
+  const t=d.tiles||{};
+  const cleanPct = d.total ? Math.round(100*(t.CLEAN||0)/d.total) : 0;
+  $("#tiles").innerHTML =
+    tile(t.CLEAN||0,"Verified CLEAN (proven)","clean")+
+    tile(t.VULNERABLE||0,"Vulnerable (reproduced)","vuln")+
+    tile(d.regressed||0,"Regressed (rug-pull/drift)","vuln")+
+    tile(d.total||0,"Servers attested","proof")+
+    tile(cleanPct+"%","Clean rate","proof");
+  $("#count").textContent = d.total?`(${d.total})`:"";
+  const rows=d.servers||[];
+  $("#rows").innerHTML = rows.length ? rows.map(r=>{
+    const find = Object.keys(r.findings||{}).length ? Object.entries(r.findings).map(([k,v])=>k+":"+v).join(", ") : "none";
+    const sig = r.signed_valid ? '✓ signed' : '✗ INVALID';
+    const pid = esc(r.public_id);
+    const chg = {regressed:' <span style="color:#ff8f8f" title="was CLEAN, now VULNERABLE">▲ regressed</span>',
+                 fixed:' <span style="color:#7ee096">▼ fixed</span>', new:' <span class="muted">• new</span>',
+                 changed:' <span style="color:#b58900">● changed</span>', unchanged:''}[r.change]||'';
+    const main=`<tr class="srv" data-id="${pid}">
+      <td class="mono">${esc(r.target)}</td>
+      <td class="v-${esc(r.verdict)}">${esc(r.verdict)}${chg}</td>
+      <td>${esc(r.tier)}</td><td>${esc(find)}</td><td class="muted">${esc(r.scanned)}</td>
+      <td><a href="/a/${pid}" target="_blank">verify ↗</a>
+          · <a href="/a/${pid}.json" download>json</a>
+          · <a href="#" class="rescan" data-id="${pid}">rescan</a>
+          · <span class="muted">${sig}</span></td></tr>`;
+    let det="";
+    if(openSlug===r.public_id){
+      const comps = Object.entries(r.components||{}).map(([k,v])=>`<span class="pill ${v==="ran"?"ran":"skip"}">${esc(k)}: ${esc(v)}</span>`).join("")||'<span class="muted">basic tier</span>';
+      const cls = (r.classes||[]).map(c=>`<span class="pill">${esc(c)}</span>`).join("")||"—";
+      det=`<tr class="detail"><td colspan="6">
+        <div><b>Classes tested:</b> ${cls}</div>
+        <div style="margin-top:8px"><b>Deep coverage:</b> ${comps}</div>
+        <div style="margin-top:10px"><img class="badgeimg" src="/a/${pid}.svg" alt="badge">
+          &nbsp; <a href="/a/${pid}" target="_blank">open shareable proof page ↗</a></div>
+      </td></tr>`;
+    }
+    return main+det;
+  }).join("") : '<tr><td colspan="6" class="muted">No servers scanned yet — run one above.</td></tr>';
+  document.querySelectorAll("tr.srv").forEach(tr=>tr.onclick=()=>{
+    const s=tr.getAttribute("data-id"); openSlug = openSlug===s?null:s; refresh();
+  });
+  document.querySelectorAll("a.rescan").forEach(a=>a.onclick=async e=>{
+    e.preventDefault(); e.stopPropagation();
+    const r=await api("/api/rescan/"+a.getAttribute("data-id"),{method:"POST"}).then(r=>r.json());
+    if(r.job_id) poll(r.job_id, "rescan");
+  });
+}
+
+async function poll(jobId,target){
+  const j=await api("/api/jobs/"+jobId).then(r=>r.json());
+  if(j.status==="running"){ $("#jobs").innerHTML=`⏳ scanning <span class="mono">${esc(target)}</span>… (this can take ~30–90s)`; setTimeout(()=>poll(jobId,target),2000); }
+  else if(j.status==="done"){ $("#jobs").innerHTML=`✅ <span class="mono">${esc(target)}</span> → <span class="v-${esc(j.verdict)}">${esc(j.verdict)}</span> (${esc(j.tier)})`; $("#go").disabled=false; refresh(); }
+  else if(j.status==="error"){ $("#jobs").innerHTML=`❌ ${esc(j.error||"scan failed")}`; $("#go").disabled=false; }
+}
+
+$("#go").onclick=async()=>{
+  const target=$("#target").value.trim(); if(!target) return;
+  $("#go").disabled=true; $("#jobs").textContent="submitting…";
+  const resp=await api("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({target, deep:$("#deep").checked})});
+  if(resp.status===401){ $("#jobs").textContent="sign in with your API token first"; $("#go").disabled=false; return; }
+  const r=await resp.json();
+  if(r.job_id) poll(r.job_id,target); else { $("#jobs").textContent=r.error||"error"; $("#go").disabled=false; }
+};
+async function whoami(){
+  try{
+    const m = await api("/api/me").then(r=>r.json());
+    $("#ssoBtn").style.display = m.sso_enabled ? "inline-block" : "none";
+    if(m.authenticated){
+      $("#whoami").innerHTML = (m.email?`<b>${esc(m.email)}</b> · `:"") + `role: <b>${esc(m.role||"")}</b>`;
+    } else {
+      $("#whoami").textContent = "not signed in";
+    }
+  }catch(e){ $("#whoami").textContent=""; }
+}
+whoami(); refresh(); setInterval(()=>{whoami();refresh();}, 15000);
+</script>
+</body>
+</html>

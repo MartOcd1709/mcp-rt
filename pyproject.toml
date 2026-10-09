@@ -29,9 +29,12 @@ dependencies = [
   "google-genai",
   "pyyaml",      # deserialization fixtures/probe + real yaml-config servers
   "markdown",    # HTML/PDF report deliverable (hunt.report.render_html)
+  "cryptography", # Ed25519 signing/verify for ground-truth attestations (mcp_rt.attest)
 ]
 
 [project.optional-dependencies]
+serve = ["fastapi", "uvicorn", "sqlalchemy", "authlib", "itsdangerous"]   # multi-tenant scan service + dashboard + SSO (mcp-rt serve)
+postgres = ["psycopg"]       # Postgres driver for the VPS/SaaS deployment (DATABASE_URL)
 capture = ["mitmproxy"]      # TLS egress interception for remote/http targets
 pdf = ["weasyprint"]         # branded PDF deliverable (hunt.report.to_pdf); needs system libs (pango/cairo)
 

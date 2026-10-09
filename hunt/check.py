@@ -19,6 +19,53 @@ _C = {"Critical": "\033[31m", "High": "\033[31m", "Medium": "\033[33m", "Low": "
 _R = "\033[0m"
 
 
+def deep_scan(target: str, *, do_cap: bool = True, do_agent: bool = False) -> dict:
+    """Run the complete assessment and return STRUCTURED results (for signing, not printing).
+
+    Base = run_full_scan (direct-probe classes + supply chain + mcp06 + OWASP). Deep adds the
+    MCP-00 undeclared-capability hunt (MCP-CAP, needs strace) and, when explicitly requested, the
+    agent-in-the-loop red-team (needs API keys — may cost money, so opt-in). Every component records
+    ran|skipped honestly, so a signed attestation can prove exactly how deep the scan went and never
+    over-claims a component that could not run. The CLI `check` prints; this is what `attest` signs.
+    """
+    cmd = shlex.split(target)
+    out: dict = {"base": None, "mcp_cap": None, "agent_redteam": None, "components": {}}
+
+    # 1) base detection scan (may fail to start -> recorded, never a dead end)
+    try:
+        out["base"] = asyncio.run(run_full_scan(cmd))
+        out["components"]["direct_probe"] = "ran"
+    except ScanError as e:
+        out["components"]["direct_probe"] = f"skipped: {str(e)[:80]}"
+
+    # 2) MCP-00 undeclared-capability hunt (MCP-CAP) — strace sensor
+    if do_cap:
+        from .hunt_cap import run_cap_hunt, strace_available
+        if strace_available():
+            status, hyps = run_cap_hunt(cmd)
+            out["mcp_cap"] = {"status": status,
+                              "findings": [{"tool": h.tool, "observation": h.observation} for h in hyps]}
+            out["components"]["mcp_cap"] = "ran"
+        else:
+            out["mcp_cap"] = {"status": "SKIPPED", "reason": "strace not installed"}
+            out["components"]["mcp_cap"] = "skipped: strace not installed"
+    else:
+        out["components"]["mcp_cap"] = "not requested"
+
+    # 3) agent-in-the-loop red-team (MCP-00 leg 2) — needs API keys, opt-in (may cost money)
+    if do_agent:
+        from .hunt_agent import run_agent_hunt
+        status, hyps = run_agent_hunt()
+        out["agent_redteam"] = {"status": status,
+                                "findings": [{"tool": getattr(h, "tool", ""),
+                                              "observation": getattr(h, "observation", "")} for h in hyps]}
+        out["components"]["agent_redteam"] = "ran" if status == "OK" else f"skipped: {status.lower()}"
+    else:
+        out["components"]["agent_redteam"] = "not requested"
+
+    return out
+
+
 def _run_full_check(target: str, do_cap: bool = True) -> int:
     cmd = shlex.split(target)
     print(f"\n━━ mcp-rt check ━━ {target}\n")

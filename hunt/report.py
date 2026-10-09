@@ -430,6 +430,8 @@ def main(argv=None) -> int:
     p.add_argument("--exit-code", action="store_true", help="exit 1 if any finding (CI gate)")
     p.add_argument("--html", action="store_true", help="also write a branded HTML report deliverable")
     p.add_argument("--pdf", action="store_true", help="also write a branded PDF report deliverable (client-facing)")
+    p.add_argument("--json", action="store_true",
+                   help="emit the raw report dict to stdout (used by isolated/containerised scans)")
     args = p.parse_args(argv)
     import shlex
     try:
@@ -437,6 +439,9 @@ def main(argv=None) -> int:
     except ScanError as e:   # degrade gracefully instead of dumping a traceback
         print(f"INCONCLUSIVE — could not probe target: {e}", file=sys.stderr)
         return 2
+    if args.json:                         # machine-readable path for run_isolated (no files, no markdown)
+        print(json.dumps(rep, default=str))
+        return 1 if (args.exit_code and rep["findings"]) else 0
     report_dir = preserve(rep)
     record(rep, report_dir)
     print(render_markdown(rep))
