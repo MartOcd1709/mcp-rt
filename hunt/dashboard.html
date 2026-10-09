@@ -88,7 +88,7 @@ async function refresh(){
   $("#tiles").innerHTML =
     tile(t.CLEAN||0,"Verified CLEAN (proven)","clean")+
     tile(t.VULNERABLE||0,"Vulnerable (reproduced)","vuln")+
-    tile(t.INCONCLUSIVE||0,"Inconclusive","inc")+
+    tile(d.regressed||0,"Regressed (rug-pull/drift)","vuln")+
     tile(d.total||0,"Servers attested","proof")+
     tile(cleanPct+"%","Clean rate","proof");
   $("#count").textContent = d.total?`(${d.total})`:"";
@@ -97,9 +97,12 @@ async function refresh(){
     const find = Object.keys(r.findings||{}).length ? Object.entries(r.findings).map(([k,v])=>k+":"+v).join(", ") : "none";
     const sig = r.signed_valid ? '✓ signed' : '✗ INVALID';
     const pid = esc(r.public_id);
+    const chg = {regressed:' <span style="color:#ff8f8f" title="was CLEAN, now VULNERABLE">▲ regressed</span>',
+                 fixed:' <span style="color:#7ee096">▼ fixed</span>', new:' <span class="muted">• new</span>',
+                 changed:' <span style="color:#b58900">● changed</span>', unchanged:''}[r.change]||'';
     const main=`<tr class="srv" data-id="${pid}">
       <td class="mono">${esc(r.target)}</td>
-      <td class="v-${esc(r.verdict)}">${esc(r.verdict)}</td>
+      <td class="v-${esc(r.verdict)}">${esc(r.verdict)}${chg}</td>
       <td>${esc(r.tier)}</td><td>${esc(find)}</td><td class="muted">${esc(r.scanned)}</td>
       <td><a href="/a/${pid}" target="_blank">verify ↗</a>
           · <a href="/a/${pid}.json" download>json</a>

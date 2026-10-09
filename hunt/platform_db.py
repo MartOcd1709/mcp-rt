@@ -59,12 +59,38 @@ class Attestation(Base):
     target: Mapped[str] = mapped_column(Text)
     verdict: Mapped[str] = mapped_column(String(20))
     tier: Mapped[str] = mapped_column(String(20))
+    change: Mapped[str] = mapped_column(String(16), default="new")   # new|regressed|fixed|unchanged vs prior scan
     envelope: Mapped[str] = mapped_column(Text)    # signed attestation JSON
     report: Mapped[str] = mapped_column(Text)      # evidence JSON
     badge: Mapped[str] = mapped_column(Text)       # badge SVG
     scanned_at: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
     __table_args__ = (UniqueConstraint("org_id", "slug", name="uq_org_slug"),)   # latest per server per org
+
+
+class ScanRun(Base):
+    """Append-only history of every scan — powers trend + rug-pull/drift detection over time."""
+    __tablename__ = "scan_runs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
+    slug: Mapped[str] = mapped_column(String(80), index=True)
+    verdict: Mapped[str] = mapped_column(String(20))
+    tier: Mapped[str] = mapped_column(String(20))
+    change: Mapped[str] = mapped_column(String(16))
+    scanned_at: Mapped[str] = mapped_column(String(40))
+
+
+def _change(prev: str | None, new: str) -> str:
+    """Classify a verdict transition. CLEAN->VULNERABLE is a rug-pull/drift regression."""
+    if prev is None:
+        return "new"
+    if prev == new:
+        return "unchanged"
+    if new == "VULNERABLE" and prev == "CLEAN":
+        return "regressed"
+    if new == "CLEAN" and prev == "VULNERABLE":
+        return "fixed"
+    return "changed"
 
 
 class Store:
@@ -111,16 +137,21 @@ class Store:
 
     # ---- attestations (org-scoped) ----------------------------------------------------
     def save(self, org_id: int, *, slug: str, target: str, verdict: str, tier: str,
-             envelope: str, report: str, badge: str, scanned_at: str) -> str:
-        """Upsert the latest attestation for (org, slug); return its public share id."""
+             envelope: str, report: str, badge: str, scanned_at: str) -> tuple[str, str]:
+        """Upsert the latest attestation for (org, slug) + append history. Returns (public_id, change)."""
         public_id = secrets.token_urlsafe(12).replace("_", "").replace("-", "")[:16]
         with Session(self.engine) as s:
+            prev = s.scalar(select(Attestation.verdict).where(Attestation.org_id == org_id,
+                                                              Attestation.slug == slug))
+            change = _change(prev, verdict)
             s.execute(delete(Attestation).where(Attestation.org_id == org_id, Attestation.slug == slug))
             s.add(Attestation(org_id=org_id, public_id=public_id, slug=slug, target=target,
-                              verdict=verdict, tier=tier, envelope=envelope, report=report,
-                              badge=badge, scanned_at=scanned_at))
+                              verdict=verdict, tier=tier, change=change, envelope=envelope,
+                              report=report, badge=badge, scanned_at=scanned_at))
+            s.add(ScanRun(org_id=org_id, slug=slug, verdict=verdict, tier=tier, change=change,
+                          scanned_at=scanned_at))
             s.commit()
-        return public_id
+        return public_id, change
 
     def list(self, org_id: int) -> list[Attestation]:
         with Session(self.engine) as s:
@@ -136,3 +167,17 @@ class Store:
         """Fetch by the unguessable public share id (cross-org — this is the shareable proof link)."""
         with Session(self.engine) as s:
             return s.scalar(select(Attestation).where(Attestation.public_id == public_id))
+
+    def history(self, org_id: int, slug: str) -> list[ScanRun]:
+        """Every scan of one server, newest first — the per-server trend."""
+        with Session(self.engine) as s:
+            return list(s.scalars(select(ScanRun).where(ScanRun.org_id == org_id, ScanRun.slug == slug)
+                                  .order_by(ScanRun.id.desc())))
+
+    def recent_changes(self, org_id: int, limit: int = 20) -> list[ScanRun]:
+        """Latest scans whose verdict changed (regressions/fixes) — the monitoring feed."""
+        with Session(self.engine) as s:
+            return list(s.scalars(
+                select(ScanRun).where(ScanRun.org_id == org_id,
+                                      ScanRun.change.in_(("regressed", "fixed", "changed")))
+                .order_by(ScanRun.id.desc()).limit(limit)))

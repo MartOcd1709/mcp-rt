@@ -28,8 +28,8 @@ def _setup(tmp_path):
     tok = store.create_org("acme")
     org = store.org_for_token(tok)
     env = _signed()
-    pid = store.save(org, slug="demo", target="npx -y demo-mcp", verdict="CLEAN", tier="basic",
-                     envelope=json.dumps(env), report="{}", badge=attest.make_badge(env), scanned_at="t")
+    pid, _ = store.save(org, slug="demo", target="npx -y demo-mcp", verdict="CLEAN", tier="basic",
+                        envelope=json.dumps(env), report="{}", badge=attest.make_badge(env), scanned_at="t")
     return TestClient(webapp.create_app(store)), tok, pid, store
 
 

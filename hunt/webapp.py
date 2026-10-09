@@ -59,12 +59,13 @@ def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, age
             claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
             evidence = attest.evidence_object(report)
         env = attest.sign(claim, attest.load_or_create_key())
-        public_id = store.save(org_id, slug=_slug(target), target=target,
-                               verdict=claim["scan"]["verdict"], tier=tier,
-                               envelope=json.dumps(env), report=json.dumps(evidence),
-                               badge=attest.make_badge(env), scanned_at=claim.get("scanned_at", ""))
+        public_id, change = store.save(org_id, slug=_slug(target), target=target,
+                                       verdict=claim["scan"]["verdict"], tier=tier,
+                                       envelope=json.dumps(env), report=json.dumps(evidence),
+                                       badge=attest.make_badge(env), scanned_at=claim.get("scanned_at", ""))
         _JOBS[job_id] = {"status": "done", "org_id": org_id, "target": target,
-                         "verdict": claim["scan"]["verdict"], "tier": tier, "public_id": public_id}
+                         "verdict": claim["scan"]["verdict"], "tier": tier,
+                         "public_id": public_id, "change": change}
     except Exception as exc:  # noqa: BLE001 — surface to the dashboard, never crash the server
         _JOBS[job_id] = {"status": "error", "org_id": org_id, "target": target, "error": str(exc)[:300]}
 
@@ -117,17 +118,32 @@ def create_app(store: Store):
     def servers(authorization: str | None = Header(None)):
         org_id = require_org(authorization)
         rows, tiles = [], {"CLEAN": 0, "VULNERABLE": 0, "INCONCLUSIVE": 0}
+        regressed = 0
         for a in store.list(org_id):
             env = json.loads(a.envelope)
             ok, _ = attest.verify(env)
             s = env.get("claim", {}).get("scan", {})
             tiles[a.verdict] = tiles.get(a.verdict, 0) + 1
+            if a.change == "regressed":
+                regressed += 1
             rows.append({"public_id": a.public_id, "target": a.target, "verdict": a.verdict,
-                         "tier": a.tier, "classes": s.get("classes_tested", []),
+                         "tier": a.tier, "change": a.change, "classes": s.get("classes_tested", []),
                          "components": s.get("components", {}),
                          "findings": env.get("claim", {}).get("finding_summary", {}),
                          "scanned": a.scanned_at, "signed_valid": ok})
-        return {"servers": rows, "tiles": tiles, "total": len(rows)}
+        changes = [{"target": r.slug, "verdict": r.verdict, "change": r.change, "scanned": r.scanned_at}
+                   for r in store.recent_changes(org_id)]
+        return {"servers": rows, "tiles": tiles, "total": len(rows),
+                "regressed": regressed, "changes": changes}
+
+    @app.get("/api/history/{public_id}")
+    def history(public_id: str, authorization: str | None = Header(None)):
+        org_id = require_org(authorization)
+        a = store.get_public(public_id)
+        if not a or a.org_id != org_id:        # org-scoped even though lookup is by public id
+            return {"history": []}
+        return {"history": [{"verdict": r.verdict, "tier": r.tier, "change": r.change,
+                             "scanned": r.scanned_at} for r in store.history(org_id, a.slug)]}
 
     # ---- public proof links (unguessable id; an attestation is meant to be shared) ---------
     # Suffix routes are declared BEFORE the catch-all page route so ".json"/".svg" aren't
