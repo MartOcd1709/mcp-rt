@@ -1,16 +1,18 @@
-"""`mcp-rt serve` — the hosted scan service + dashboard (localhost now, same code on a VPS).
+"""`mcp-rt serve` — the multi-tenant scan service + dashboard (localhost now, same code on a VPS).
 
-A thin FastAPI app over the existing engine: submit a target, it scans (basic or deep) in a
-background thread, signs an attestation, and the dashboard shows a Wiz/Snyk-style overview
-(severity tiles + a server table + per-server finding detail) — but every verdict is GROUND
-TRUTH (the attack fired or it didn't, zero false positives), and every row carries a signed,
-offline-verifiable attestation no competitor's dashboard produces.
+A FastAPI app over the engine. Enterprise shape:
+  * **Private management API** — `/api/*` requires a Bearer API token and is scoped to that org,
+    so one deployment serves many tenants with no cross-tenant leakage.
+  * **Public proof links** — `/a/{public_id}` share an attestation by an unguessable id (an
+    attestation is signed proof meant to be shared and verified; listing/scanning is private).
+  * **Durable store** — hunt.platform_db (SQLAlchemy): SQLite locally, Postgres on the VPS via
+    DATABASE_URL, no code change.
 
-    mcp-rt serve                       # http://127.0.0.1:8900   (data in ./mcprt_data)
-    mcp-rt serve --port 9000 --data /srv/mcprt/data
+Every verdict is GROUND TRUTH (the attack fired or it didn't, zero false positives) and every
+row carries a signed, offline-verifiable attestation no competitor's dashboard produces.
 
-Storage is a plain folder of attestations for now (host-anywhere, no DB). Postgres + org_id +
-multi-tenant auth is the next step, for the VPS/SaaS deployment — this is the local test rig.
+    mcp-rt serve                       # http://127.0.0.1:8900 ; prints a dev API token
+    DATABASE_URL=postgresql+psycopg://… mcp-rt serve --host 0.0.0.0   # VPS
 """
 from __future__ import annotations
 
@@ -21,10 +23,9 @@ import uuid
 from pathlib import Path
 
 from mcp_rt import attest
+from hunt.platform_db import Store
 
-# Jobs live in memory (single-process local rig); a real deployment moves these to the DB/queue.
 _JOBS: dict[str, dict] = {}
-_DATA = Path("mcprt_data")
 
 
 def _version() -> str:
@@ -40,8 +41,8 @@ def _slug(target: str) -> str:
     return (re.sub(r"[^a-zA-Z0-9]+", "-", target).strip("-").lower() or "target")[:60]
 
 
-def _run_job(job_id: str, target: str, tier: str, agent: bool) -> None:
-    """Background worker: scan -> sign -> persist. Updates _JOBS[job_id] in place."""
+def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, agent: bool) -> None:
+    """Background worker: scan -> sign -> persist to the org. Updates _JOBS in place."""
     import shlex
     import asyncio
     from hunt.report import run_full_scan
@@ -57,48 +58,29 @@ def _run_job(job_id: str, target: str, tier: str, agent: bool) -> None:
             report = asyncio.run(run_full_scan(shlex.split(target)))
             claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
             evidence = attest.evidence_object(report)
-        key = attest.load_or_create_key()
-        env = attest.sign(claim, key)
-        slug = _slug(target)
-        _DATA.mkdir(parents=True, exist_ok=True)
-        (_DATA / f"{slug}.attestation.json").write_text(json.dumps(env, indent=2), encoding="utf-8")
-        (_DATA / f"{slug}.report.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-        (_DATA / f"{slug}.badge.svg").write_text(attest.make_badge(env), encoding="utf-8")
-        _JOBS[job_id] = {"status": "done", "target": target, "slug": slug,
-                         "verdict": claim["scan"]["verdict"], "tier": tier}
-    except Exception as exc:  # noqa: BLE001 — surface the failure to the dashboard, don't crash the server
-        _JOBS[job_id] = {"status": "error", "target": target, "error": str(exc)[:300]}
+        env = attest.sign(claim, attest.load_or_create_key())
+        public_id = store.save(org_id, slug=_slug(target), target=target,
+                               verdict=claim["scan"]["verdict"], tier=tier,
+                               envelope=json.dumps(env), report=json.dumps(evidence),
+                               badge=attest.make_badge(env), scanned_at=claim.get("scanned_at", ""))
+        _JOBS[job_id] = {"status": "done", "org_id": org_id, "target": target,
+                         "verdict": claim["scan"]["verdict"], "tier": tier, "public_id": public_id}
+    except Exception as exc:  # noqa: BLE001 — surface to the dashboard, never crash the server
+        _JOBS[job_id] = {"status": "error", "org_id": org_id, "target": target, "error": str(exc)[:300]}
 
 
-def _server_rows() -> list[dict]:
-    """Verify every stored attestation and return dashboard rows (ground-truth verdicts)."""
-    rows = []
-    for f in sorted(_DATA.glob("*.attestation.json")):
-        try:
-            env = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        ok, _ = attest.verify(env)
-        c = env.get("claim", {}); s = c.get("scan", {})
-        rows.append({
-            "slug": f.name[:-len(".attestation.json")],
-            "target": c.get("target", {}).get("spec", "?"),
-            "verdict": s.get("verdict", "?"), "tier": s.get("tier", "basic"),
-            "classes": s.get("classes_tested", []), "components": s.get("components", {}),
-            "findings": c.get("finding_summary", {}), "scanned": c.get("scanned_at", "?"),
-            "signed_valid": ok,
-        })
-    return rows
-
-
-def create_app(data_dir: Path):
-    from fastapi import FastAPI
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-    global _DATA
-    _DATA = data_dir
-    _DATA.mkdir(parents=True, exist_ok=True)
+def create_app(store: Store):
+    from fastapi import FastAPI, Header, HTTPException
+    from fastapi.responses import HTMLResponse, JSONResponse, Response
     app = FastAPI(title="mcp-rt", docs_url="/api/docs")
     here = Path(__file__).parent
+
+    def require_org(authorization: str | None = Header(None)) -> int:
+        token = authorization.split(" ", 1)[1] if authorization and " " in authorization else (authorization or "")
+        org_id = store.org_for_token(token.strip())
+        if org_id is None:
+            raise HTTPException(status_code=401, detail="invalid or missing API token")
+        return org_id
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard():
@@ -108,36 +90,67 @@ def create_app(data_dir: Path):
     def verify_page():
         return (here / "verify.html").read_text(encoding="utf-8")
 
+    # ---- private management API (Bearer token, org-scoped) --------------------------------
     @app.post("/api/scan")
-    async def start_scan(body: dict):
+    def start_scan(body: dict, authorization: str | None = Header(None)):
+        org_id = require_org(authorization)
         target = (body or {}).get("target", "").strip()
         if not target:
             return JSONResponse({"error": "target required"}, status_code=400)
         tier = "deep" if (body or {}).get("deep") else "basic"
         agent = bool((body or {}).get("agent_redteam"))
         job_id = uuid.uuid4().hex[:12]
-        _JOBS[job_id] = {"status": "running", "target": target, "tier": tier}
-        threading.Thread(target=_run_job, args=(job_id, target, tier, agent), daemon=True).start()
+        _JOBS[job_id] = {"status": "running", "org_id": org_id, "target": target, "tier": tier}
+        threading.Thread(target=_run_job, args=(store, job_id, org_id, target, tier, agent),
+                         daemon=True).start()
         return {"job_id": job_id}
 
     @app.get("/api/jobs/{job_id}")
-    def job_status(job_id: str):
-        return _JOBS.get(job_id, {"status": "unknown"})
+    def job_status(job_id: str, authorization: str | None = Header(None)):
+        org_id = require_org(authorization)
+        j = _JOBS.get(job_id)
+        if not j or j.get("org_id") != org_id:        # never reveal another org's job
+            return {"status": "unknown"}
+        return j
 
     @app.get("/api/servers")
-    def servers():
-        rows = _server_rows()
-        tiles = {"CLEAN": 0, "VULNERABLE": 0, "INCONCLUSIVE": 0}
-        for r in rows:
-            tiles[r["verdict"]] = tiles.get(r["verdict"], 0) + 1
+    def servers(authorization: str | None = Header(None)):
+        org_id = require_org(authorization)
+        rows, tiles = [], {"CLEAN": 0, "VULNERABLE": 0, "INCONCLUSIVE": 0}
+        for a in store.list(org_id):
+            env = json.loads(a.envelope)
+            ok, _ = attest.verify(env)
+            s = env.get("claim", {}).get("scan", {})
+            tiles[a.verdict] = tiles.get(a.verdict, 0) + 1
+            rows.append({"public_id": a.public_id, "target": a.target, "verdict": a.verdict,
+                         "tier": a.tier, "classes": s.get("classes_tested", []),
+                         "components": s.get("components", {}),
+                         "findings": env.get("claim", {}).get("finding_summary", {}),
+                         "scanned": a.scanned_at, "signed_valid": ok})
         return {"servers": rows, "tiles": tiles, "total": len(rows)}
 
-    @app.get("/data/{name}")
-    def data_file(name: str):
-        f = (_DATA / name).resolve()
-        if _DATA.resolve() not in f.parents or not f.exists():   # no path escape
+    # ---- public proof links (unguessable id; an attestation is meant to be shared) ---------
+    # Suffix routes are declared BEFORE the catch-all page route so ".json"/".svg" aren't
+    # swallowed by the {public_id} path param (which otherwise matches dots).
+    @app.get("/a/{public_id}.json")
+    def share_json(public_id: str):
+        a = store.get_public(public_id)
+        if not a:
             return JSONResponse({"error": "not found"}, status_code=404)
-        return FileResponse(f)
+        return JSONResponse(json.loads(a.envelope))
+
+    @app.get("/a/{public_id}.svg")
+    def share_badge(public_id: str):
+        a = store.get_public(public_id)
+        if not a:
+            return Response("not found", status_code=404)
+        return Response(a.badge, media_type="image/svg+xml")
+
+    @app.get("/a/{public_id}", response_class=HTMLResponse)
+    def share_page(public_id: str):
+        # the verify page auto-loads ?att=<json url>; point it at the public json endpoint
+        return (here / "verify.html").read_text(encoding="utf-8").replace(
+            "</head>", f"<script>location.search||history.replaceState(0,'', '?att=/a/{public_id}.json')</script></head>", 1)
 
     return app
 
@@ -147,11 +160,14 @@ def main(argv=None) -> int:
                                 description="Run the mcp-rt scan service + dashboard (localhost or VPS).")
     p.add_argument("--port", type=int, default=8900)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--data", default="mcprt_data", help="folder for stored attestations")
+    p.add_argument("--db", default=None, help="DB url (default: $DATABASE_URL or sqlite:///mcprt_platform.db)")
     args = p.parse_args(argv)
     import uvicorn
-    app = create_app(Path(args.data))
-    print(f"mcp-rt dashboard → http://{args.host}:{args.port}   (data: {Path(args.data).resolve()})")
+    store = Store(args.db)
+    token = store.ensure_default_org()
+    app = create_app(store)
+    print(f"mcp-rt dashboard → http://{args.host}:{args.port}", flush=True)
+    print(f"dev API token (paste into the dashboard login):\n    {token}\n", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 

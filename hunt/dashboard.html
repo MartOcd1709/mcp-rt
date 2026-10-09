@@ -41,6 +41,10 @@
 <header>
   <h1>🛡️ mcp-rt</h1>
   <span class="tag">Ground-truth MCP attestation — every verdict is proof, not a guess · runs locally, nothing leaves</span>
+  <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+    <input type="password" id="token" placeholder="API token" style="width:200px;font-size:12px">
+    <button id="saveTok" style="padding:7px 12px">Sign in</button>
+  </span>
 </header>
 <main>
   <div class="tiles" id="tiles"></div>
@@ -67,11 +71,18 @@
 <script>
 const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 let openSlug=null;
+const getTok=()=>{try{return localStorage.getItem("mcprt_token")||""}catch(e){return ""}};
+function api(path,opts){ opts=opts||{}; opts.headers=Object.assign({}, opts.headers, {Authorization:"Bearer "+getTok()});
+  return fetch(path,opts); }
+$("#token").value=getTok();
+$("#saveTok").onclick=()=>{ try{localStorage.setItem("mcprt_token",$("#token").value.trim())}catch(e){}; refresh(); };
 
 function tile(n,l,cls){return `<div class="tile ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
 
 async function refresh(){
-  const d=await fetch("/api/servers").then(r=>r.json());
+  const resp=await api("/api/servers");
+  if(resp.status===401){ $("#rows").innerHTML='<tr><td colspan="6" class="muted">Sign in with your API token (printed when the server started) to see your org\'s attestations.</td></tr>'; $("#tiles").innerHTML=""; return; }
+  const d=await resp.json();
   const t=d.tiles||{};
   const cleanPct = d.total ? Math.round(100*(t.CLEAN||0)/d.total) : 0;
   $("#tiles").innerHTML =
@@ -85,33 +96,34 @@ async function refresh(){
   $("#rows").innerHTML = rows.length ? rows.map(r=>{
     const find = Object.keys(r.findings||{}).length ? Object.entries(r.findings).map(([k,v])=>k+":"+v).join(", ") : "none";
     const sig = r.signed_valid ? '✓ signed' : '✗ INVALID';
-    const main=`<tr class="srv" data-slug="${esc(r.slug)}">
+    const pid = esc(r.public_id);
+    const main=`<tr class="srv" data-id="${pid}">
       <td class="mono">${esc(r.target)}</td>
       <td class="v-${esc(r.verdict)}">${esc(r.verdict)}</td>
       <td>${esc(r.tier)}</td><td>${esc(find)}</td><td class="muted">${esc(r.scanned)}</td>
-      <td><a href="/verify?att=/data/${esc(r.slug)}.attestation.json" target="_blank">verify ↗</a>
-          · <a href="/data/${esc(r.slug)}.attestation.json" download>json</a>
+      <td><a href="/a/${pid}" target="_blank">verify ↗</a>
+          · <a href="/a/${pid}.json" download>json</a>
           · <span class="muted">${sig}</span></td></tr>`;
     let det="";
-    if(openSlug===r.slug){
+    if(openSlug===r.public_id){
       const comps = Object.entries(r.components||{}).map(([k,v])=>`<span class="pill ${v==="ran"?"ran":"skip"}">${esc(k)}: ${esc(v)}</span>`).join("")||'<span class="muted">basic tier</span>';
       const cls = (r.classes||[]).map(c=>`<span class="pill">${esc(c)}</span>`).join("")||"—";
       det=`<tr class="detail"><td colspan="6">
         <div><b>Classes tested:</b> ${cls}</div>
         <div style="margin-top:8px"><b>Deep coverage:</b> ${comps}</div>
-        <div style="margin-top:10px"><img class="badgeimg" src="/data/${esc(r.slug)}.badge.svg" alt="badge">
-          &nbsp; <a href="/data/${esc(r.slug)}.report.json" download>download evidence report</a></div>
+        <div style="margin-top:10px"><img class="badgeimg" src="/a/${pid}.svg" alt="badge">
+          &nbsp; <a href="/a/${pid}" target="_blank">open shareable proof page ↗</a></div>
       </td></tr>`;
     }
     return main+det;
   }).join("") : '<tr><td colspan="6" class="muted">No servers scanned yet — run one above.</td></tr>';
   document.querySelectorAll("tr.srv").forEach(tr=>tr.onclick=()=>{
-    const s=tr.getAttribute("data-slug"); openSlug = openSlug===s?null:s; refresh();
+    const s=tr.getAttribute("data-id"); openSlug = openSlug===s?null:s; refresh();
   });
 }
 
 async function poll(jobId,target){
-  const j=await fetch("/api/jobs/"+jobId).then(r=>r.json());
+  const j=await api("/api/jobs/"+jobId).then(r=>r.json());
   if(j.status==="running"){ $("#jobs").innerHTML=`⏳ scanning <span class="mono">${esc(target)}</span>… (this can take ~30–90s)`; setTimeout(()=>poll(jobId,target),2000); }
   else if(j.status==="done"){ $("#jobs").innerHTML=`✅ <span class="mono">${esc(target)}</span> → <span class="v-${esc(j.verdict)}">${esc(j.verdict)}</span> (${esc(j.tier)})`; $("#go").disabled=false; refresh(); }
   else if(j.status==="error"){ $("#jobs").innerHTML=`❌ ${esc(j.error||"scan failed")}`; $("#go").disabled=false; }
@@ -120,8 +132,10 @@ async function poll(jobId,target){
 $("#go").onclick=async()=>{
   const target=$("#target").value.trim(); if(!target) return;
   $("#go").disabled=true; $("#jobs").textContent="submitting…";
-  const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({target, deep:$("#deep").checked})}).then(r=>r.json());
+  const resp=await api("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({target, deep:$("#deep").checked})});
+  if(resp.status===401){ $("#jobs").textContent="sign in with your API token first"; $("#go").disabled=false; return; }
+  const r=await resp.json();
   if(r.job_id) poll(r.job_id,target); else { $("#jobs").textContent=r.error||"error"; $("#go").disabled=false; }
 };
 refresh(); setInterval(refresh, 15000);
