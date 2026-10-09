@@ -92,3 +92,25 @@ def test_all_targets_is_the_monitor_worklist(tmp_path):
     _, _, _, store = _setup(tmp_path)
     targets = store.all_targets()
     assert len(targets) == 1 and targets[0][2] == "npx -y demo-mcp"
+
+
+def test_rbac_viewer_cannot_scan_but_can_read(tmp_path, monkeypatch):
+    c, owner_tok, _, store = _setup(tmp_path)
+    org_id = store.org_for_token(owner_tok)
+    viewer = store.create_token(org_id, "viewer")
+    monkeypatch.setattr(webapp, "_run_job", lambda *a, **k: None)
+    assert c.get("/api/servers", headers=_auth(viewer)).status_code == 200          # read ok
+    assert c.post("/api/scan", json={"target": "npx x"}, headers=_auth(viewer)).status_code == 403  # write denied
+
+
+def test_rbac_member_can_scan_admin_manages_users(tmp_path, monkeypatch):
+    c, owner_tok, _, store = _setup(tmp_path)
+    org_id = store.org_for_token(owner_tok)
+    member = store.create_token(org_id, "member")
+    monkeypatch.setattr(webapp, "_run_job", lambda *a, **k: None)
+    assert "job_id" in c.post("/api/scan", json={"target": "npx x"}, headers=_auth(member)).json()
+    assert c.get("/api/users", headers=_auth(member)).status_code == 403            # member can't admin
+    assert c.get("/api/users", headers=_auth(owner_tok)).status_code == 200         # owner can
+    r = c.post("/api/users", json={"email": "x@a.com", "role": "admin"}, headers=_auth(owner_tok))
+    assert r.json()["role"] == "admin"
+    assert c.post("/api/tokens", json={"role": "viewer"}, headers=_auth(owner_tok)).json()["role"] == "viewer"

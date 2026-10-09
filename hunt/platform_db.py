@@ -42,12 +42,32 @@ class Org(Base):
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
 
 
+# Role ranks for RBAC: a token/user with rank >= the required rank may act.
+ROLES = ("viewer", "member", "admin", "owner")
+_RANK = {r: i + 1 for i, r in enumerate(ROLES)}
+
+
+def role_ok(role: str, minimum: str) -> bool:
+    return _RANK.get(role, 0) >= _RANK.get(minimum, 99)
+
+
 class ApiToken(Base):
     __tablename__ = "api_tokens"
     id: Mapped[int] = mapped_column(primary_key=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
     token_hash: Mapped[str] = mapped_column(String(64), index=True)   # sha256, never the plaintext
+    role: Mapped[str] = mapped_column(String(16), default="owner")    # viewer|member|admin|owner
     created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
+    email: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(16), default="member")
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+    __table_args__ = (UniqueConstraint("org_id", "email", name="uq_org_email"),)
 
 
 class Attestation(Base):
@@ -100,40 +120,75 @@ class Store:
         self.engine = create_engine(url, **kw)
         Base.metadata.create_all(self.engine)
 
-    # ---- tenancy ----------------------------------------------------------------------
+    # ---- tenancy + RBAC ---------------------------------------------------------------
     def create_org(self, name: str) -> str:
-        """Create an org and return a fresh plaintext API token (shown once, stored hashed)."""
+        """Create an org and return a fresh owner API token (shown once, stored hashed)."""
         with Session(self.engine) as s:
             org = Org(name=name)
             s.add(org)
             s.flush()
-            token = self._mint(s, org.id)
+            token = self._mint(s, org.id, "owner")
             s.commit()
             return token
 
     def ensure_default_org(self, name: str = "default") -> str:
-        """Dev convenience: ensure an org exists and return a NEW usable token for it."""
+        """Dev convenience: ensure an org exists and return a NEW owner token for it."""
         with Session(self.engine) as s:
             org = s.scalar(select(Org).where(Org.name == name))
             if org is None:
                 org = Org(name=name)
                 s.add(org)
                 s.flush()
-            token = self._mint(s, org.id)
+            token = self._mint(s, org.id, "owner")
             s.commit()
             return token
 
-    def _mint(self, s: Session, org_id: int) -> str:
+    def _mint(self, s: Session, org_id: int, role: str) -> str:
         token = secrets.token_urlsafe(24)
-        s.add(ApiToken(org_id=org_id, token_hash=_hash(token)))
+        s.add(ApiToken(org_id=org_id, token_hash=_hash(token), role=role))
         return token
 
+    def create_token(self, org_id: int, role: str = "member") -> str:
+        """Mint an additional API token for an org with a given role."""
+        with Session(self.engine) as s:
+            token = self._mint(s, org_id, role)
+            s.commit()
+            return token
+
     def org_for_token(self, token: str) -> int | None:
+        org_id, _ = self.token_role(token)
+        return org_id
+
+    def token_role(self, token: str) -> tuple[int | None, str | None]:
+        """Resolve a token to (org_id, role) — the basis for every RBAC check."""
         if not token:
-            return None
+            return None, None
         with Session(self.engine) as s:
             row = s.scalar(select(ApiToken).where(ApiToken.token_hash == _hash(token)))
-            return row.org_id if row else None
+            return (row.org_id, row.role) if row else (None, None)
+
+    # ---- users (org-scoped directory; roles drive RBAC) -------------------------------
+    def add_user(self, org_id: int, email: str, role: str = "member") -> int:
+        with Session(self.engine) as s:
+            u = User(org_id=org_id, email=email, role=role if role in ROLES else "member")
+            s.add(u)
+            s.commit()
+            return u.id
+
+    def list_users(self, org_id: int) -> list[User]:
+        with Session(self.engine) as s:
+            return list(s.scalars(select(User).where(User.org_id == org_id).order_by(User.id)))
+
+    def set_role(self, org_id: int, email: str, role: str) -> bool:
+        if role not in ROLES:
+            return False
+        with Session(self.engine) as s:
+            u = s.scalar(select(User).where(User.org_id == org_id, User.email == email))
+            if not u:
+                return False
+            u.role = role
+            s.commit()
+            return True
 
     # ---- attestations (org-scoped) ----------------------------------------------------
     def save(self, org_id: int, *, slug: str, target: str, verdict: str, tier: str,

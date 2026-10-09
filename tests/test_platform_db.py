@@ -3,7 +3,27 @@
 The core enterprise guarantee: a token resolves to exactly one org, and one org can never read
 another's attestations. Public ids are the only cross-org lookup (the shareable proof link).
 """
-from hunt.platform_db import Store
+from hunt.platform_db import Store, role_ok
+
+
+def test_role_ranking():
+    assert role_ok("owner", "admin") and role_ok("admin", "member") and role_ok("member", "viewer")
+    assert not role_ok("viewer", "member") and not role_ok("member", "admin")
+
+
+def test_token_role_and_user_admin(tmp_path):
+    s = Store(f"sqlite:///{tmp_path}/t.db")
+    owner_tok = s.create_org("acme")
+    org_id, role = s.token_role(owner_tok)
+    assert role == "owner"
+    member_tok = s.create_token(org_id, "member")
+    assert s.token_role(member_tok) == (org_id, "member")
+    s.add_user(org_id, "a@acme.com", "admin")
+    s.add_user(org_id, "b@acme.com", "viewer")
+    assert {u.email: u.role for u in s.list_users(org_id)} == {"a@acme.com": "admin", "b@acme.com": "viewer"}
+    assert s.set_role(org_id, "b@acme.com", "member") is True
+    assert s.list_users(org_id)[1].role == "member"
+    assert s.set_role(org_id, "b@acme.com", "bogus") is False      # invalid role rejected
 
 
 def _store(tmp_path):

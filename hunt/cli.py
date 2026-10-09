@@ -34,6 +34,7 @@ _COMMANDS = {
     "attest": ("hunt.attestation", "main"),      # scan -> signed, offline-verifiable attestation (+badge)
     "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder
     "serve": ("hunt.webapp", "main"),            # scan service + dashboard (localhost or VPS)
+    "org": ("hunt.orgadmin", "main"),            # platform tenant admin: create orgs, mint tokens
     "hunt": ("hunt.report", "main"),
     "diff": ("hunt.diff", "main"),
     "monitor": ("hunt.monitor", "main"),

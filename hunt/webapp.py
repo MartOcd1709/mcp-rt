@@ -23,7 +23,7 @@ import uuid
 from pathlib import Path
 
 from mcp_rt import attest
-from hunt.platform_db import Store
+from hunt.platform_db import ROLES, Store, role_ok
 
 _JOBS: dict[str, dict] = {}
 
@@ -76,12 +76,18 @@ def create_app(store: Store):
     app = FastAPI(title="mcp-rt", docs_url="/api/docs")
     here = Path(__file__).parent
 
-    def require_org(authorization: str | None = Header(None)) -> int:
+    def auth(authorization: str | None, minimum: str = "viewer") -> int:
+        """Resolve the Bearer token to an org and enforce the minimum role (RBAC)."""
         token = authorization.split(" ", 1)[1] if authorization and " " in authorization else (authorization or "")
-        org_id = store.org_for_token(token.strip())
+        org_id, role = store.token_role(token.strip())
         if org_id is None:
             raise HTTPException(status_code=401, detail="invalid or missing API token")
+        if not role_ok(role, minimum):
+            raise HTTPException(status_code=403, detail=f"requires '{minimum}' role (token is '{role}')")
         return org_id
+
+    def require_org(authorization: str | None = Header(None)) -> int:   # viewer+ (read)
+        return auth(authorization, "viewer")
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard():
@@ -94,7 +100,7 @@ def create_app(store: Store):
     # ---- private management API (Bearer token, org-scoped) --------------------------------
     @app.post("/api/scan")
     def start_scan(body: dict, authorization: str | None = Header(None)):
-        org_id = require_org(authorization)
+        org_id = auth(authorization, "member")          # scanning is a write -> member+
         target = (body or {}).get("target", "").strip()
         if not target:
             return JSONResponse({"error": "target required"}, status_code=400)
@@ -138,7 +144,7 @@ def create_app(store: Store):
 
     @app.post("/api/rescan/{public_id}")
     def rescan(public_id: str, authorization: str | None = Header(None)):
-        org_id = require_org(authorization)
+        org_id = auth(authorization, "member")          # rescan is a write -> member+
         a = store.get_public(public_id)
         if not a or a.org_id != org_id:
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -156,6 +162,39 @@ def create_app(store: Store):
             return {"history": []}
         return {"history": [{"verdict": r.verdict, "tier": r.tier, "change": r.change,
                              "scanned": r.scanned_at} for r in store.history(org_id, a.slug)]}
+
+    # ---- org/user admin + token minting (admin+) ------------------------------------------
+    @app.get("/api/users")
+    def list_users(authorization: str | None = Header(None)):
+        org_id = auth(authorization, "admin")
+        return {"users": [{"email": u.email, "role": u.role} for u in store.list_users(org_id)],
+                "roles": list(ROLES)}
+
+    @app.post("/api/users")
+    def add_user(body: dict, authorization: str | None = Header(None)):
+        org_id = auth(authorization, "admin")
+        email = (body or {}).get("email", "").strip()
+        role = (body or {}).get("role", "member")
+        if not email:
+            return JSONResponse({"error": "email required"}, status_code=400)
+        if role not in ROLES:
+            return JSONResponse({"error": f"role must be one of {list(ROLES)}"}, status_code=400)
+        store.add_user(org_id, email, role)
+        return {"ok": True, "email": email, "role": role}
+
+    @app.post("/api/users/role")
+    def set_role(body: dict, authorization: str | None = Header(None)):
+        org_id = auth(authorization, "admin")
+        ok = store.set_role(org_id, (body or {}).get("email", ""), (body or {}).get("role", ""))
+        return JSONResponse({"ok": ok}, status_code=200 if ok else 400)
+
+    @app.post("/api/tokens")
+    def mint_token(body: dict, authorization: str | None = Header(None)):
+        org_id = auth(authorization, "admin")
+        role = (body or {}).get("role", "member")
+        if role not in ROLES:
+            return JSONResponse({"error": f"role must be one of {list(ROLES)}"}, status_code=400)
+        return {"token": store.create_token(org_id, role), "role": role}   # shown once
 
     # ---- public proof links (unguessable id; an attestation is meant to be shared) ---------
     # Suffix routes are declared BEFORE the catch-all page route so ".json"/".svg" aren't
