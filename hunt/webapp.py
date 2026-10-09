@@ -46,18 +46,25 @@ def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, age
     """Background worker: scan -> sign -> persist to the org. Updates _JOBS in place."""
     import shlex
     import asyncio
+    import os
     from hunt.report import run_full_scan
     from hunt.check import deep_scan
+    backend = os.getenv("MCPRT_SCAN_BACKEND", "inproc")   # inproc | subprocess | docker | auto
     try:
         if tier == "deep":
+            # deep tier runs the MCP-00 strace hunt in-process (harder to containerise); isolate later.
             ds = deep_scan(target, do_cap=True, do_agent=agent)
             report = ds["base"] or {}
             claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version(),
                                        tier="deep", deep=ds)
             evidence = attest.evidence_object(report, ds)
         else:
-            report = asyncio.run(run_full_scan(shlex.split(target)))
-            claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
+            if backend in ("subprocess", "docker", "auto"):
+                from hunt.sandbox import run_isolated      # fresh env/container per scan -> reliable at scale
+                report = run_isolated(target, backend=backend)
+            else:
+                report = asyncio.run(run_full_scan(shlex.split(target)))
+            claim = attest.build_claim(report, capture=f"direct-probe/{backend}", mcp_rt_version=_version())
             evidence = attest.evidence_object(report)
         env = attest.sign(claim, attest.load_or_create_key())
         verdict = claim["scan"]["verdict"]
@@ -273,7 +280,13 @@ def main(argv=None) -> int:
     p.add_argument("--monitor-interval", type=int, default=0, metavar="SEC",
                    help="continuous monitoring: rescan every tracked server every SEC seconds "
                         "(0 = off). Rescans surface rug-pull/drift automatically.")
+    p.add_argument("--scan-backend", choices=["inproc", "subprocess", "docker", "auto"],
+                   default="subprocess",
+                   help="per-scan isolation: subprocess (default, fresh env per scan, no Docker) | "
+                        "docker (fresh container per scan, VPS/production) | auto | inproc (no isolation)")
     args = p.parse_args(argv)
+    import os as _os
+    _os.environ["MCPRT_SCAN_BACKEND"] = args.scan_backend   # read by _run_job + hunt.sandbox
     import uvicorn
     store = Store(args.db)
     token = store.ensure_default_org()
