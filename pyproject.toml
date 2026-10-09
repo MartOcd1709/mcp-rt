@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-serve = ["fastapi", "uvicorn", "sqlalchemy"]   # multi-tenant scan service + dashboard (mcp-rt serve)
+serve = ["fastapi", "uvicorn", "sqlalchemy", "authlib", "itsdangerous"]   # multi-tenant scan service + dashboard + SSO (mcp-rt serve)
 postgres = ["psycopg"]       # Postgres driver for the VPS/SaaS deployment (DATABASE_URL)
 capture = ["mitmproxy"]      # TLS egress interception for remote/http targets
 pdf = ["weasyprint"]         # branded PDF deliverable (hunt.report.to_pdf); needs system libs (pango/cairo)

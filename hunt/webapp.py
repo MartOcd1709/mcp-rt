@@ -14,8 +14,9 @@ row carries a signed, offline-verifiable attestation no competitor's dashboard p
     mcp-rt serve                       # http://127.0.0.1:8900 ; prints a dev API token
     DATABASE_URL=postgresql+psycopg://… mcp-rt serve --host 0.0.0.0   # VPS
 """
-from __future__ import annotations
-
+# NOTE: deliberately NOT using `from __future__ import annotations` — FastAPI resolves route
+# param annotations via module globals, and `Request` is imported inside create_app(), so lazy
+# string annotations would make FastAPI mis-read `request` as a query param (422). Eager wins here.
 import argparse
 import json
 import threading
@@ -71,23 +72,34 @@ def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, age
 
 
 def create_app(store: Store):
-    from fastapi import FastAPI, Header, HTTPException
+    import os
+    import secrets as _secrets
+    from fastapi import FastAPI, Header, HTTPException, Request
     from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from starlette.middleware.sessions import SessionMiddleware
+    from hunt.sso import configure_sso, sso_config
     app = FastAPI(title="mcp-rt", docs_url="/api/docs")
+    # Signed-cookie sessions (for SSO logins). Set SESSION_SECRET in prod so sessions survive restarts.
+    app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET") or _secrets.token_urlsafe(32))
+    sso_enabled = configure_sso(app, store)
     here = Path(__file__).parent
 
-    def auth(authorization: str | None, minimum: str = "viewer") -> int:
-        """Resolve the Bearer token to an org and enforce the minimum role (RBAC)."""
+    def _identity(request: Request, authorization: str | None) -> tuple[int | None, str | None]:
+        """Who is calling: an SSO session (browser login) OR a Bearer API token. Session wins."""
+        sess = getattr(request, "session", {}) or {}
+        if sess.get("org_id") is not None:
+            return sess["org_id"], sess.get("role", "viewer")
         token = authorization.split(" ", 1)[1] if authorization and " " in authorization else (authorization or "")
-        org_id, role = store.token_role(token.strip())
-        if org_id is None:
-            raise HTTPException(status_code=401, detail="invalid or missing API token")
-        if not role_ok(role, minimum):
-            raise HTTPException(status_code=403, detail=f"requires '{minimum}' role (token is '{role}')")
-        return org_id
+        return store.token_role(token.strip())
 
-    def require_org(authorization: str | None = Header(None)) -> int:   # viewer+ (read)
-        return auth(authorization, "viewer")
+    def auth(request: Request, authorization: str | None, minimum: str = "viewer") -> int:
+        """Resolve the caller (session or token) and enforce the minimum role (RBAC)."""
+        org_id, role = _identity(request, authorization)
+        if org_id is None:
+            raise HTTPException(status_code=401, detail="sign in (SSO) or send a valid API token")
+        if not role_ok(role, minimum):
+            raise HTTPException(status_code=403, detail=f"requires '{minimum}' role (you are '{role}')")
+        return org_id
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard():
@@ -99,8 +111,8 @@ def create_app(store: Store):
 
     # ---- private management API (Bearer token, org-scoped) --------------------------------
     @app.post("/api/scan")
-    def start_scan(body: dict, authorization: str | None = Header(None)):
-        org_id = auth(authorization, "member")          # scanning is a write -> member+
+    def start_scan(body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "member")          # scanning is a write -> member+
         target = (body or {}).get("target", "").strip()
         if not target:
             return JSONResponse({"error": "target required"}, status_code=400)
@@ -113,16 +125,16 @@ def create_app(store: Store):
         return {"job_id": job_id}
 
     @app.get("/api/jobs/{job_id}")
-    def job_status(job_id: str, authorization: str | None = Header(None)):
-        org_id = require_org(authorization)
+    def job_status(job_id: str, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization)
         j = _JOBS.get(job_id)
         if not j or j.get("org_id") != org_id:        # never reveal another org's job
             return {"status": "unknown"}
         return j
 
     @app.get("/api/servers")
-    def servers(authorization: str | None = Header(None)):
-        org_id = require_org(authorization)
+    def servers(request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization)
         rows, tiles = [], {"CLEAN": 0, "VULNERABLE": 0, "INCONCLUSIVE": 0}
         regressed = 0
         for a in store.list(org_id):
@@ -143,8 +155,8 @@ def create_app(store: Store):
                 "regressed": regressed, "changes": changes}
 
     @app.post("/api/rescan/{public_id}")
-    def rescan(public_id: str, authorization: str | None = Header(None)):
-        org_id = auth(authorization, "member")          # rescan is a write -> member+
+    def rescan(public_id: str, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "member")          # rescan is a write -> member+
         a = store.get_public(public_id)
         if not a or a.org_id != org_id:
             return JSONResponse({"error": "not found"}, status_code=404)
@@ -155,8 +167,8 @@ def create_app(store: Store):
         return {"job_id": job_id}
 
     @app.get("/api/history/{public_id}")
-    def history(public_id: str, authorization: str | None = Header(None)):
-        org_id = require_org(authorization)
+    def history(public_id: str, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization)
         a = store.get_public(public_id)
         if not a or a.org_id != org_id:        # org-scoped even though lookup is by public id
             return {"history": []}
@@ -165,14 +177,14 @@ def create_app(store: Store):
 
     # ---- org/user admin + token minting (admin+) ------------------------------------------
     @app.get("/api/users")
-    def list_users(authorization: str | None = Header(None)):
-        org_id = auth(authorization, "admin")
+    def list_users(request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
         return {"users": [{"email": u.email, "role": u.role} for u in store.list_users(org_id)],
                 "roles": list(ROLES)}
 
     @app.post("/api/users")
-    def add_user(body: dict, authorization: str | None = Header(None)):
-        org_id = auth(authorization, "admin")
+    def add_user(body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
         email = (body or {}).get("email", "").strip()
         role = (body or {}).get("role", "member")
         if not email:
@@ -183,18 +195,25 @@ def create_app(store: Store):
         return {"ok": True, "email": email, "role": role}
 
     @app.post("/api/users/role")
-    def set_role(body: dict, authorization: str | None = Header(None)):
-        org_id = auth(authorization, "admin")
+    def set_role(body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
         ok = store.set_role(org_id, (body or {}).get("email", ""), (body or {}).get("role", ""))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 400)
 
     @app.post("/api/tokens")
-    def mint_token(body: dict, authorization: str | None = Header(None)):
-        org_id = auth(authorization, "admin")
+    def mint_token(body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
         role = (body or {}).get("role", "member")
         if role not in ROLES:
             return JSONResponse({"error": f"role must be one of {list(ROLES)}"}, status_code=400)
         return {"token": store.create_token(org_id, role), "role": role}   # shown once
+
+    @app.get("/api/me")
+    def me(request: Request, authorization: str | None = Header(None)):
+        org_id, role = _identity(request, authorization)
+        sess = getattr(request, "session", {}) or {}
+        return {"authenticated": org_id is not None, "org_id": org_id, "role": role,
+                "email": sess.get("email"), "sso_enabled": sso_enabled}
 
     # ---- public proof links (unguessable id; an attestation is meant to be shared) ---------
     # Suffix routes are declared BEFORE the catch-all page route so ".json"/".svg" aren't
