@@ -19,6 +19,7 @@ from pathlib import Path
 
 from mcp_rt import attest
 from hunt.report import run_full_scan
+from hunt.check import deep_scan
 
 
 def _version() -> str:
@@ -46,7 +47,9 @@ def _do_verify(path: str) -> int:
     if ok:
         scan = claim.get("scan", {})
         print(f"  target : {claim.get('target', {}).get('spec', '?')}")
-        print(f"  verdict: {scan.get('verdict', '?')}  (mcp-rt {scan.get('mcp_rt_version', '?')})")
+        print(f"  verdict: {scan.get('verdict', '?')}  (tier: {scan.get('tier', 'basic')}, mcp-rt {scan.get('mcp_rt_version', '?')})")
+        if scan.get("components"):
+            print(f"  coverage: {scan['components']}")
         print(f"  scanned: {claim.get('scanned_at', '?')}  ·  issued: {claim.get('issued_at', '?')}")
         print(f"  signer : {envelope.get('sig', {}).get('public_key', '?')[:16]}…")
     return 0 if ok else 1
@@ -66,14 +69,27 @@ def main(argv=None) -> int:
     p.add_argument("--no-badge", action="store_true", help="skip writing the SVG badge")
     p.add_argument("--no-verify-page", action="store_true",
                    help="skip copying the self-contained HTML verify page")
+    p.add_argument("--deep", action="store_true",
+                   help="deep tier: also run the MCP-00 undeclared-capability hunt (needs strace); "
+                        "the signed claim records exactly which components ran vs skipped")
+    p.add_argument("--agent-redteam", action="store_true",
+                   help="with --deep, also run the agent-in-the-loop red-team (needs API keys — may cost money)")
     p.add_argument("--json", action="store_true", help="print the signed attestation to stdout")
     args = p.parse_args(argv)
 
     if args.verify:
         return _do_verify(args.verify)
 
-    report = asyncio.run(run_full_scan(shlex.split(args.target_stdio)))
-    claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
+    if args.deep:
+        ds = deep_scan(args.target_stdio, do_cap=True, do_agent=args.agent_redteam)
+        report = ds["base"] or {}
+        claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version(),
+                                   tier="deep", deep=ds)
+        evidence = attest.evidence_object(report, ds)
+    else:
+        report = asyncio.run(run_full_scan(shlex.split(args.target_stdio)))
+        claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
+        evidence = attest.evidence_object(report)
     key = attest.load_or_create_key(args.key)
     envelope = attest.sign(claim, key)
 
@@ -83,7 +99,7 @@ def main(argv=None) -> int:
     att_path = out / f"{slug}.attestation.json"
     rep_path = out / f"{slug}.report.json"        # the evidence the attestation digests
     att_path.write_text(json.dumps(envelope, indent=2), encoding="utf-8")
-    rep_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    rep_path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")   # exactly what evidence_sha256 digests
     if not args.no_badge:
         (out / f"{slug}.badge.svg").write_text(attest.make_badge(envelope), encoding="utf-8")
     if not args.no_verify_page:
@@ -93,7 +109,9 @@ def main(argv=None) -> int:
     if args.json:
         print(json.dumps(envelope, indent=2))
     else:
-        print(f"verdict: {report['verdict']}")
+        print(f"verdict: {claim['scan']['verdict']}  (tier: {claim['scan']['tier']})")
+        if args.deep:
+            print(f"coverage: {claim['scan'].get('components', {})}")
         print(f"signed attestation: {att_path}")
         print(f"evidence report:    {rep_path}")
         if not args.no_badge:

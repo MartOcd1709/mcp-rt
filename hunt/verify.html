@@ -89,10 +89,16 @@ function render(ok, env, err){
   if(err){vt.textContent="Could not verify — "+err;return;}
   vt.textContent = ok ? "VALID — signature matches this attestation" : "INVALID — signature does NOT match (tampered or wrong key)";
   const c=env.claim, s=c.scan||{}, t=c.target||{};
+  const comps = s.components ? Object.entries(s.components).map(([k,v])=>{
+      const ok = v==="ran"; const col = ok?"#7ee096":"var(--muted)";
+      return '<span class="pill" style="color:'+col+'">'+esc(k)+": "+esc(v)+"</span>";
+    }).join("") : "";
   const rows=[
     ["Target", esc(t.spec||"—")],
     ["Verdict", '<span class="verdict-'+esc(s.verdict||"")+'">'+esc(s.verdict||"—")+"</span>"],
+    ["Scan tier", esc(s.tier||"basic")+(s.tier==="deep"?" (deep — MCP-00 + full engine)":" (direct probes)")],
     ["Classes tested", (s.classes_tested||[]).map(x=>'<span class="pill">'+esc(x)+"</span>").join("")||"—"],
+    ...(comps ? [["Deep coverage", comps]] : []),
     ["Findings", Object.keys(c.finding_summary||{}).length ? Object.entries(c.finding_summary).map(([k,v])=>esc(k)+": "+esc(v)).join(", ") : "none"],
     ["Scanned at", esc(c.scanned_at||"—")],
     ["Issued at", esc(c.issued_at||"—")],

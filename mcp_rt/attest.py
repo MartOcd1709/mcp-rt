@@ -44,33 +44,70 @@ def _sha256(obj: dict) -> str:
     return hashlib.sha256(canonical_bytes(obj)).hexdigest()
 
 
-def build_claim(report: dict, *, client: str = "n/a", capture: str = "n/a",
-                mcp_rt_version: str = "", artifact_sha256: str = "") -> dict:
-    """Build the signable claim from a run_full_scan/scan report.
+def evidence_object(report: dict, deep: dict | None = None) -> dict:
+    """The exact object the attestation digests. Basic = the report; deep = report + deep results.
+    The `attest` CLI writes THIS beside the attestation so evidence_sha256 is reproducible."""
+    return report if deep is None else {"report": report, "deep": deep}
 
-    Carries verdict + what-was-tested + a digest of the full report (evidence_sha256), plus a
-    severity-count summary — never the raw finding bodies, so a signed/badged attestation can't
-    leak a vulnerability's specifics ahead of disclosure. The full report stays beside it.
+
+def _combined_verdict(report: dict, deep: dict | None) -> str:
+    """Worst verdict across every component that ran. Undeclared-capability or agent exfil => VULNERABLE."""
+    seen = []
+    if report:
+        seen.append(report.get("verdict", ""))
+    if deep:
+        if (deep.get("mcp_cap") or {}).get("findings"):
+            seen.append("VULNERABLE")
+        if (deep.get("agent_redteam") or {}).get("findings"):
+            seen.append("VULNERABLE")
+    if "VULNERABLE" in seen:
+        return "VULNERABLE"
+    if "CLEAN" in seen:
+        return "CLEAN"
+    return "INCONCLUSIVE"
+
+
+def build_claim(report: dict, *, client: str = "n/a", capture: str = "n/a",
+                mcp_rt_version: str = "", artifact_sha256: str = "",
+                tier: str = "basic", deep: dict | None = None) -> dict:
+    """Build the signable claim from a scan report (+ optional deep-scan results).
+
+    Carries the combined verdict, what-was-tested AND how-deep (tier + per-component ran/skipped so
+    a deep attestation never over-claims), a digest of the full evidence, and severity/finding
+    counts — never raw finding bodies, so a signed/badged attestation can't leak a vulnerability's
+    specifics ahead of disclosure. The full evidence stays beside it (see evidence_object).
     """
-    findings = report.get("findings", []) or []
+    report = report or {}
     counts: dict[str, int] = {}
-    for f in findings:
+    for f in (report.get("findings", []) or []):
         sev = f.get("sev", "") if isinstance(f, dict) else ""
         if sev:
             counts[sev] = counts.get(sev, 0) + 1
     classes = sorted({c.get("cls", "") for c in (report.get("coverage", []) or []) if c.get("cls")})
+
+    scan = {
+        "verdict": _combined_verdict(report, deep) if deep is not None else report.get("verdict", ""),
+        "tier": tier,
+        "classes_tested": classes,
+        "client": client,
+        "capture": capture,
+        "mcp_rt_version": mcp_rt_version,
+    }
+    if deep is not None:
+        scan["components"] = deep.get("components", {})
+        mc = (deep.get("mcp_cap") or {}).get("findings") or []
+        ar = (deep.get("agent_redteam") or {}).get("findings") or []
+        if mc:
+            counts["mcp_cap_undeclared"] = len(mc)
+        if ar:
+            counts["agent_exfil"] = len(ar)
+
     return {
         "schema": SCHEMA,
         "target": {"spec": report.get("target", ""), "artifact_sha256": artifact_sha256},
-        "scan": {
-            "verdict": report.get("verdict", ""),
-            "classes_tested": classes,
-            "client": client,
-            "capture": capture,
-            "mcp_rt_version": mcp_rt_version,
-        },
+        "scan": scan,
         "finding_summary": counts,
-        "evidence_sha256": _sha256(report),
+        "evidence_sha256": _sha256(evidence_object(report, deep)),
         "scanned_at": report.get("scanned_at", ""),
         "issued_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
     }

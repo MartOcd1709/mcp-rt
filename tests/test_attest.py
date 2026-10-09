@@ -69,3 +69,39 @@ def test_keypair_roundtrip_persists(tmp_path):
     k1 = attest.load_or_create_key(p)
     k2 = attest.load_or_create_key(p)      # second call loads the same key
     assert attest.public_key_hex(k1) == attest.public_key_hex(k2)
+
+
+# ---- deep tier -------------------------------------------------------------------------
+_DEEP_CLEAN = {
+    "base": _REPORT,
+    "mcp_cap": {"status": "OK", "findings": []},
+    "agent_redteam": {"status": "INCONCLUSIVE", "findings": []},
+    "components": {"direct_probe": "ran", "mcp_cap": "ran", "agent_redteam": "skipped: inconclusive"},
+}
+
+
+def test_deep_claim_records_tier_and_components():
+    claim = attest.build_claim(_REPORT, tier="deep", deep=_DEEP_CLEAN)
+    assert claim["scan"]["tier"] == "deep"
+    assert claim["scan"]["components"]["mcp_cap"] == "ran"
+    assert claim["scan"]["verdict"] == "CLEAN"   # base CLEAN, no deep findings
+
+
+def test_deep_mcp_cap_finding_forces_vulnerable():
+    deep = {**_DEEP_CLEAN,
+            "mcp_cap": {"status": "OK", "findings": [{"tool": "x", "observation": "opened /etc/shadow"}]}}
+    claim = attest.build_claim(_REPORT, tier="deep", deep=deep)   # base CLEAN but MCP-00 fired
+    assert claim["scan"]["verdict"] == "VULNERABLE"
+    assert claim["finding_summary"]["mcp_cap_undeclared"] == 1
+
+
+def test_deep_evidence_digests_the_full_bundle():
+    # evidence_sha256 must bind base+deep, not just base: changing a deep finding must break it.
+    claim = attest.build_claim(_REPORT, tier="deep", deep=_DEEP_CLEAN)
+    assert attest.verify_evidence(claim_env(claim), attest.evidence_object(_REPORT, _DEEP_CLEAN)) is True
+    mutated = {**_DEEP_CLEAN, "mcp_cap": {"status": "OK", "findings": [{"tool": "y", "observation": "z"}]}}
+    assert attest.verify_evidence(claim_env(claim), attest.evidence_object(_REPORT, mutated)) is False
+
+
+def claim_env(claim):   # helper: wrap a claim so verify_evidence can read evidence_sha256
+    return {"claim": claim}
