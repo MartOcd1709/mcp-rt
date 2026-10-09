@@ -32,6 +32,7 @@ _COMMANDS = {
     "token": ("hunt.family_b", "main"),
     "report": ("hunt.report", "main"),
     "attest": ("hunt.attestation", "main"),      # scan -> signed, offline-verifiable attestation (+badge)
+    "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder
     "hunt": ("hunt.report", "main"),
     "diff": ("hunt.diff", "main"),
     "monitor": ("hunt.monitor", "main"),

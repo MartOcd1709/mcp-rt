@@ -120,12 +120,15 @@ file.onchange=e=>{const f=e.target.files[0];if(f)f.text().then(run);};
 ["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("hot");}));
 drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0];if(f)f.text().then(run);});
 
-// Ed25519 WebCrypto support probe
+// Ed25519 WebCrypto support probe + permalink auto-load (?att=<url> → fetch & verify on open).
 (async()=>{
   const sup=document.getElementById("support");
   try{ await crypto.subtle.importKey("raw", new Uint8Array(32), {name:"Ed25519"}, false, ["verify"]);
     sup.innerHTML="Browser Ed25519 support: <b style='color:#7ee096'>available</b>.";
   }catch(e){ sup.innerHTML="⚠️ This browser lacks WebCrypto Ed25519. Use <code>mcp-rt attest --verify FILE</code> to verify offline, or a current Chrome/Firefox/Safari."; }
+  const att=new URLSearchParams(location.search).get("att");   // permalink: verify.html?att=<same-origin url>
+  if(att){ try{ const txt=await fetch(att).then(r=>r.text()); document.getElementById("paste").value=txt; await run(txt);
+    }catch(e){ render(false,null,"could not load attestation from ?att= ("+e.message+")"); } }
 })();
 </script>
 </body>
