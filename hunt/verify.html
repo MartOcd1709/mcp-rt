@@ -6,8 +6,8 @@
 <title>mcp-rt — Verify Attestation</title>
 <style>
   :root{
-    --bg:#0e1116; --panel:#161b22; --border:#2a313c; --fg:#e6edf3; --muted:#9aa7b4;
-    --green:#2e9e3f; --red:#c62828; --amber:#b58900; --accent:#4c8bf5;
+    --bg:#16191b; --panel:#1d2123; --border:#2b3134; --fg:#f2efe9; --muted:#9c9488;
+    --green:#74c285; --red:#e5655c; --amber:#d6a94a; --accent:#c0b092;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
@@ -21,19 +21,19 @@
   .drop input{display:none}
   textarea{width:100%;min-height:120px;margin-top:14px;background:#0b0e13;color:var(--fg);
     border:1px solid var(--border);border-radius:8px;padding:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-  button{margin-top:12px;background:var(--accent);color:#fff;border:0;border-radius:8px;
+  button{margin-top:12px;background:var(--accent);color:var(--bg);border:0;border-radius:8px;
     padding:10px 18px;font-size:14px;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
   .result{margin-top:24px;border:1px solid var(--border);border-radius:12px;overflow:hidden;display:none}
   .banner{padding:16px 20px;font-weight:600;display:flex;align-items:center;gap:10px}
-  .banner.ok{background:rgba(46,158,63,.14);color:#7ee096}
-  .banner.bad{background:rgba(198,40,40,.16);color:#ff8f8f}
+  .banner.ok{background:rgba(116,194,133,.14);color:var(--green)}
+  .banner.bad{background:rgba(229,101,92,.16);color:var(--red)}
   .dot{width:10px;height:10px;border-radius:50%}
   .dot.ok{background:var(--green)} .dot.bad{background:var(--red)}
   table{width:100%;border-collapse:collapse;font-size:13px}
   td{padding:9px 20px;border-top:1px solid var(--border);vertical-align:top}
   td.k{color:var(--muted);width:150px} td.v{font-family:ui-monospace,Menlo,monospace;word-break:break-word}
-  .verdict-CLEAN{color:#7ee096} .verdict-VULNERABLE{color:#ff8f8f} .verdict-SETUP_FAILED{color:var(--muted)}
+  .verdict-CLEAN{color:var(--green)} .verdict-VULNERABLE{color:var(--red)} .verdict-SETUP_FAILED{color:var(--muted)}
   .pill{display:inline-block;background:#0b0e13;border:1px solid var(--border);border-radius:6px;padding:1px 7px;margin:2px 3px 0 0;font-size:11px}
   .note{color:var(--muted);font-size:12px;margin-top:18px;line-height:1.5}
   code{background:#0b0e13;border:1px solid var(--border);border-radius:5px;padding:1px 5px;font-size:12px}
@@ -90,7 +90,7 @@ function render(ok, env, err){
   vt.textContent = ok ? "VALID — signature matches this attestation" : "INVALID — signature does NOT match (tampered or wrong key)";
   const c=env.claim, s=c.scan||{}, t=c.target||{};
   const comps = s.components ? Object.entries(s.components).map(([k,v])=>{
-      const ok = v==="ran"; const col = ok?"#7ee096":"var(--muted)";
+      const ok = v==="ran"; const col = ok?"var(--green)":"var(--muted)";
       return '<span class="pill" style="color:'+col+'">'+esc(k)+": "+esc(v)+"</span>";
     }).join("") : "";
   const rows=[
@@ -124,7 +124,7 @@ drop.addEventListener("drop",e=>{const f=e.dataTransfer.files[0];if(f)f.text().t
 (async()=>{
   const sup=document.getElementById("support");
   try{ await crypto.subtle.importKey("raw", new Uint8Array(32), {name:"Ed25519"}, false, ["verify"]);
-    sup.innerHTML="Browser Ed25519 support: <b style='color:#7ee096'>available</b>.";
+    sup.innerHTML="Browser Ed25519 support: <b style='color:var(--green)'>available</b>.";
   }catch(e){ sup.innerHTML="⚠️ This browser lacks WebCrypto Ed25519. Use <code>mcp-rt attest --verify FILE</code> to verify offline, or a current Chrome/Firefox/Safari."; }
   const att=new URLSearchParams(location.search).get("att");   // permalink: verify.html?att=<same-origin url>
   if(att){ try{ const txt=await fetch(att).then(r=>r.text()); document.getElementById("paste").value=txt; await run(txt);

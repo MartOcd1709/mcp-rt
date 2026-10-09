@@ -22,7 +22,7 @@ from pathlib import Path
 from mcp_rt import attest
 
 _VERIFY_SRC = Path(__file__).with_name("verify.html")
-_COLOR = {"CLEAN": "#2e9e3f", "VULNERABLE": "#c62828"}
+_COLOR = {"CLEAN": "#74c285", "VULNERABLE": "#e5655c"}
 
 
 def _rows(dir_: Path) -> list[dict]:
@@ -50,8 +50,8 @@ def render(rows: list[dict], title: str) -> str:
     trs = []
     for r in rows:
         vcol = _COLOR.get(r["verdict"], "#8a8a8a")
-        sig = ('<span style="color:#7ee096">✓ valid</span>' if r["valid"]
-               else '<span style="color:#ff8f8f">✗ INVALID</span>')
+        sig = ('<span style="color:#74c285">✓ valid</span>' if r["valid"]
+               else '<span style="color:#e5655c">✗ INVALID</span>')
         link = f'verify.html?att={e(r["file"])}'
         trs.append(
             f'<tr><td><a href="{link}">{e(r["target"])}</a></td>'
@@ -63,18 +63,18 @@ def render(rows: list[dict], title: str) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{e(title)}</title>
 <style>
- body{{margin:0;background:#0e1116;color:#e6edf3;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:32px 16px}}
- main{{max-width:900px;margin:0 auto}} h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#9aa7b4;font-size:13px;margin:0 0 20px}}
- table{{width:100%;border-collapse:collapse;font-size:13px;border:1px solid #2a313c;border-radius:10px;overflow:hidden}}
- th,td{{padding:10px 14px;text-align:left;border-top:1px solid #2a313c}} th{{background:#161b22;color:#9aa7b4;font-weight:600;border-top:0}}
- tr:hover td{{background:#131820}} a{{color:#4c8bf5;text-decoration:none}} a:hover{{text-decoration:underline}}
- .mono{{font-family:ui-monospace,Menlo,monospace}} .foot{{color:#9aa7b4;font-size:12px;margin-top:16px}}
+ body{{margin:0;background:#16191b;color:#f2efe9;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:32px 16px}}
+ main{{max-width:900px;margin:0 auto}} h1{{font-size:20px;margin:0 0 4px}} .sub{{color:#9c9488;font-size:13px;margin:0 0 20px}}
+ table{{width:100%;border-collapse:collapse;font-size:13px;border:1px solid #2b3134;border-radius:10px;overflow:hidden}}
+ th,td{{padding:10px 14px;text-align:left;border-top:1px solid #2b3134}} th{{background:#1d2123;color:#9c9488;font-weight:600;border-top:0}}
+ tr:hover td{{background:#23282a}} a{{color:#c0b092;text-decoration:none}} a:hover{{text-decoration:underline}}
+ .mono{{font-family:ui-monospace,Menlo,monospace}} .foot{{color:#9c9488;font-size:12px;margin-top:16px}}
 </style></head><body><main>
  <h1>🛡️ {e(title)}</h1>
  <p class="sub">{len(rows)} attestation(s) · {clean} verified CLEAN · generated {e(now)}. Each verdict is a
  signed, reproducible proof — click a server to re-verify its Ed25519 signature in your browser.</p>
  <table><thead><tr><th>Server</th><th>Verdict</th><th>Tier</th><th>Scanned</th><th>Signer</th><th>Signature</th></tr></thead>
- <tbody>{''.join(trs) or '<tr><td colspan="6" style="color:#9aa7b4">No attestations in this folder yet.</td></tr>'}</tbody></table>
+ <tbody>{''.join(trs) or '<tr><td colspan="6" style="color:#9c9488">No attestations in this folder yet.</td></tr>'}</tbody></table>
  <p class="foot">Built by <code>mcp-rt registry</code>. Signatures verified at build time. Learn more:
  <a href="https://github.com/MartOcd1709/mcp-rt">github.com/MartOcd1709/mcp-rt</a></p>
 </main></body></html>"""
