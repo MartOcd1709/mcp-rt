@@ -106,6 +106,7 @@ async function refresh(){
       <td>${esc(r.tier)}</td><td>${esc(find)}</td><td class="muted">${esc(r.scanned)}</td>
       <td><a href="/a/${pid}" target="_blank">verify ↗</a>
           · <a href="/a/${pid}.json" download>json</a>
+          · <a href="#" class="rescan" data-id="${pid}">rescan</a>
           · <span class="muted">${sig}</span></td></tr>`;
     let det="";
     if(openSlug===r.public_id){
@@ -122,6 +123,11 @@ async function refresh(){
   }).join("") : '<tr><td colspan="6" class="muted">No servers scanned yet — run one above.</td></tr>';
   document.querySelectorAll("tr.srv").forEach(tr=>tr.onclick=()=>{
     const s=tr.getAttribute("data-id"); openSlug = openSlug===s?null:s; refresh();
+  });
+  document.querySelectorAll("a.rescan").forEach(a=>a.onclick=async e=>{
+    e.preventDefault(); e.stopPropagation();
+    const r=await api("/api/rescan/"+a.getAttribute("data-id"),{method:"POST"}).then(r=>r.json());
+    if(r.job_id) poll(r.job_id, "rescan");
   });
 }
 

@@ -136,6 +136,18 @@ def create_app(store: Store):
         return {"servers": rows, "tiles": tiles, "total": len(rows),
                 "regressed": regressed, "changes": changes}
 
+    @app.post("/api/rescan/{public_id}")
+    def rescan(public_id: str, authorization: str | None = Header(None)):
+        org_id = require_org(authorization)
+        a = store.get_public(public_id)
+        if not a or a.org_id != org_id:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        job_id = uuid.uuid4().hex[:12]
+        _JOBS[job_id] = {"status": "running", "org_id": org_id, "target": a.target, "tier": a.tier}
+        threading.Thread(target=_run_job, args=(store, job_id, org_id, a.target, a.tier, False),
+                         daemon=True).start()
+        return {"job_id": job_id}
+
     @app.get("/api/history/{public_id}")
     def history(public_id: str, authorization: str | None = Header(None)):
         org_id = require_org(authorization)
@@ -177,15 +189,35 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=8900)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--db", default=None, help="DB url (default: $DATABASE_URL or sqlite:///mcprt_platform.db)")
+    p.add_argument("--monitor-interval", type=int, default=0, metavar="SEC",
+                   help="continuous monitoring: rescan every tracked server every SEC seconds "
+                        "(0 = off). Rescans surface rug-pull/drift automatically.")
     args = p.parse_args(argv)
     import uvicorn
     store = Store(args.db)
     token = store.ensure_default_org()
     app = create_app(store)
+    if args.monitor_interval > 0:
+        _start_monitor(store, args.monitor_interval)
+        print(f"continuous monitoring ON — rescanning every {args.monitor_interval}s", flush=True)
     print(f"mcp-rt dashboard → http://{args.host}:{args.port}", flush=True)
     print(f"dev API token (paste into the dashboard login):\n    {token}\n", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
+
+
+def _start_monitor(store: Store, interval: int) -> None:
+    """Background scheduler: periodically rescan every tracked server so drift surfaces on its own."""
+    import time
+
+    def _loop():
+        while True:
+            time.sleep(interval)
+            for org_id, _slug, target, tier in store.all_targets():
+                jid = uuid.uuid4().hex[:12]
+                _JOBS[jid] = {"status": "running", "org_id": org_id, "target": target, "tier": tier}
+                _run_job(store, jid, org_id, target, tier, False)   # serial: don't hammer npx/strace
+    threading.Thread(target=_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

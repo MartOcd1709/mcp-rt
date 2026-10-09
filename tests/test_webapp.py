@@ -77,3 +77,18 @@ def test_scan_returns_job_scoped_to_org(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "_run_job", lambda *a, **k: None)
     jid = c.post("/api/scan", json={"target": "npx -y x"}, headers=_auth(tok)).json()["job_id"]
     assert c.get(f"/api/jobs/{jid}", headers=_auth(tok)).json()["status"] in ("running", "unknown")
+
+
+def test_rescan_endpoint_scoped_and_jobbed(tmp_path, monkeypatch):
+    c, tok, pid, store = _setup(tmp_path)
+    monkeypatch.setattr(webapp, "_run_job", lambda *a, **k: None)
+    assert c.post(f"/api/rescan/{pid}", headers=_auth(tok)).json()["job_id"]
+    assert c.post("/api/rescan/bogus", headers=_auth(tok)).status_code == 404
+    other = store.create_org("other")
+    assert c.post(f"/api/rescan/{pid}", headers=_auth(other)).status_code == 404   # not your server
+
+
+def test_all_targets_is_the_monitor_worklist(tmp_path):
+    _, _, _, store = _setup(tmp_path)
+    targets = store.all_targets()
+    assert len(targets) == 1 and targets[0][2] == "npx -y demo-mcp"

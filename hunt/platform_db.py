@@ -168,6 +168,11 @@ class Store:
         with Session(self.engine) as s:
             return s.scalar(select(Attestation).where(Attestation.public_id == public_id))
 
+    def all_targets(self) -> list[tuple[int, str, str, str]]:
+        """(org_id, slug, target, tier) for every tracked server — the monitor's rescan worklist."""
+        with Session(self.engine) as s:
+            return [(a.org_id, a.slug, a.target, a.tier) for a in s.scalars(select(Attestation))]
+
     def history(self, org_id: int, slug: str) -> list[ScanRun]:
         """Every scan of one server, newest first — the per-server trend."""
         with Session(self.engine) as s:
