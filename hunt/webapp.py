@@ -60,12 +60,20 @@ def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, age
             claim = attest.build_claim(report, capture="direct-probe", mcp_rt_version=_version())
             evidence = attest.evidence_object(report)
         env = attest.sign(claim, attest.load_or_create_key())
+        verdict = claim["scan"]["verdict"]
         public_id, change = store.save(org_id, slug=_slug(target), target=target,
-                                       verdict=claim["scan"]["verdict"], tier=tier,
+                                       verdict=verdict, tier=tier,
                                        envelope=json.dumps(env), report=json.dumps(evidence),
                                        badge=attest.make_badge(env), scanned_at=claim.get("scanned_at", ""))
+        if change == "regressed":      # CLEAN -> VULNERABLE: alert the org's channels (best-effort)
+            import os
+            from hunt.notify import notify_regression
+            base = os.getenv("MCPRT_PUBLIC_URL", "").rstrip("/")
+            proof_url = f"{base}/a/{public_id}" if base else f"/a/{public_id}"
+            notify_regression(store, org_id, target, "CLEAN", verdict, proof_url,
+                              claim.get("finding_summary", {}))
         _JOBS[job_id] = {"status": "done", "org_id": org_id, "target": target,
-                         "verdict": claim["scan"]["verdict"], "tier": tier,
+                         "verdict": verdict, "tier": tier,
                          "public_id": public_id, "change": change}
     except Exception as exc:  # noqa: BLE001 — surface to the dashboard, never crash the server
         _JOBS[job_id] = {"status": "error", "org_id": org_id, "target": target, "error": str(exc)[:300]}
@@ -207,6 +215,21 @@ def create_app(store: Store):
         if role not in ROLES:
             return JSONResponse({"error": f"role must be one of {list(ROLES)}"}, status_code=400)
         return {"token": store.create_token(org_id, role), "role": role}   # shown once
+
+    @app.get("/api/integrations")
+    def list_integrations(request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
+        return {"configured": store.list_integration_kinds(org_id)}   # kinds only, never the secrets
+
+    @app.post("/api/integrations/{kind}")
+    def set_integration(kind: str, body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "admin")
+        if kind not in ("slack", "jira"):
+            return JSONResponse({"error": "kind must be 'slack' or 'jira'"}, status_code=400)
+        if not isinstance(body, dict) or not body:
+            return JSONResponse({"error": "config required"}, status_code=400)
+        store.set_integration(org_id, kind, body)
+        return {"ok": True, "kind": kind}
 
     @app.get("/api/me")
     def me(request: Request, authorization: str | None = Header(None)):

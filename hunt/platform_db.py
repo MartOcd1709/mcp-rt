@@ -88,6 +88,16 @@ class Attestation(Base):
     __table_args__ = (UniqueConstraint("org_id", "slug", name="uq_org_slug"),)   # latest per server per org
 
 
+class Integration(Base):
+    """Per-org notification channel config (Slack webhook / Jira creds), one row per kind."""
+    __tablename__ = "integrations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))        # "slack" | "jira"
+    config: Mapped[str] = mapped_column(Text)            # JSON (webhook url / jira creds)
+    __table_args__ = (UniqueConstraint("org_id", "kind", name="uq_org_kind"),)
+
+
 class ScanRun(Base):
     """Append-only history of every scan — powers trend + rug-pull/drift detection over time."""
     __tablename__ = "scan_runs"
@@ -222,6 +232,25 @@ class Store:
         """Fetch by the unguessable public share id (cross-org — this is the shareable proof link)."""
         with Session(self.engine) as s:
             return s.scalar(select(Attestation).where(Attestation.public_id == public_id))
+
+    # ---- integrations (per-org notification channels) ---------------------------------
+    def set_integration(self, org_id: int, kind: str, config: dict) -> None:
+        import json as _json
+        with Session(self.engine) as s:
+            s.execute(delete(Integration).where(Integration.org_id == org_id, Integration.kind == kind))
+            s.add(Integration(org_id=org_id, kind=kind, config=_json.dumps(config)))
+            s.commit()
+
+    def get_integration(self, org_id: int, kind: str) -> dict | None:
+        import json as _json
+        with Session(self.engine) as s:
+            row = s.scalar(select(Integration).where(Integration.org_id == org_id,
+                                                     Integration.kind == kind))
+            return _json.loads(row.config) if row else None
+
+    def list_integration_kinds(self, org_id: int) -> list[str]:
+        with Session(self.engine) as s:
+            return list(s.scalars(select(Integration.kind).where(Integration.org_id == org_id)))
 
     def all_targets(self) -> list[tuple[int, str, str, str]]:
         """(org_id, slug, target, tier) for every tracked server — the monitor's rescan worklist."""

@@ -103,6 +103,16 @@ def test_rbac_viewer_cannot_scan_but_can_read(tmp_path, monkeypatch):
     assert c.post("/api/scan", json={"target": "npx x"}, headers=_auth(viewer)).status_code == 403  # write denied
 
 
+def test_integrations_are_admin_only_and_secret_safe(tmp_path):
+    c, owner_tok, _, store = _setup(tmp_path)
+    member = store.create_token(store.org_for_token(owner_tok), "member")
+    assert c.post("/api/integrations/slack", json={"webhook_url": "x"}, headers=_auth(member)).status_code == 403
+    assert c.post("/api/integrations/bogus", json={"x": 1}, headers=_auth(owner_tok)).status_code == 400
+    assert c.post("/api/integrations/slack", json={"webhook_url": "https://h/x"}, headers=_auth(owner_tok)).json()["ok"]
+    got = c.get("/api/integrations", headers=_auth(owner_tok)).json()
+    assert got["configured"] == ["slack"]                 # kinds only — the webhook secret is never returned
+
+
 def test_rbac_member_can_scan_admin_manages_users(tmp_path, monkeypatch):
     c, owner_tok, _, store = _setup(tmp_path)
     org_id = store.org_for_token(owner_tok)
