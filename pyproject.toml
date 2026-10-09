@@ -33,6 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+serve = ["fastapi", "uvicorn"]   # hosted scan service + dashboard (mcp-rt serve)
 capture = ["mitmproxy"]      # TLS egress interception for remote/http targets
 pdf = ["weasyprint"]         # branded PDF deliverable (hunt.report.to_pdf); needs system libs (pango/cairo)
 

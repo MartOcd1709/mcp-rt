@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp-rt — Attestation Dashboard</title>
+<style>
+  :root{--bg:#0e1116;--panel:#161b22;--border:#2a313c;--fg:#e6edf3;--muted:#9aa7b4;
+    --green:#2e9e3f;--red:#c62828;--amber:#b58900;--accent:#4c8bf5;}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:baseline;gap:12px}
+  header h1{font-size:19px;margin:0} header .tag{color:var(--muted);font-size:13px}
+  main{max-width:1060px;margin:0 auto;padding:24px 20px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:24px}
+  .tile{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .tile .n{font-size:30px;font-weight:700} .tile .l{color:var(--muted);font-size:12px;margin-top:2px}
+  .tile.clean .n{color:#7ee096} .tile.vuln .n{color:#ff8f8f} .tile.inc .n{color:var(--amber)} .tile.proof .n{color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:22px}
+  .card h2{font-size:15px;margin:0 0 14px} .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  input,select{background:#0b0e13;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:9px 11px;font-size:14px}
+  input[type=text]{flex:1;min-width:260px;font-family:ui-monospace,Menlo,monospace;font-size:13px}
+  label.ck{color:var(--muted);font-size:13px;display:flex;align-items:center;gap:6px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 18px;font-size:14px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:default}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{padding:10px 12px;text-align:left;border-top:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;border-top:0}
+  tr.srv{cursor:pointer} tr.srv:hover td{background:#131820}
+  .v-CLEAN{color:#7ee096;font-weight:600} .v-VULNERABLE{color:#ff8f8f;font-weight:600} .v-INCONCLUSIVE{color:var(--amber);font-weight:600}
+  .pill{display:inline-block;background:#0b0e13;border:1px solid var(--border);border-radius:6px;padding:1px 7px;margin:2px 3px 0 0;font-size:11px}
+  .pill.ran{color:#7ee096} .pill.skip{color:var(--muted)}
+  .mono{font-family:ui-monospace,Menlo,monospace} a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .detail{background:#0b0e13} .detail td{padding:14px 18px}
+  .muted{color:var(--muted)} .jobline{font-size:13px;margin-top:10px}
+  .badgeimg{height:20px;vertical-align:middle}
+  .note{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🛡️ mcp-rt</h1>
+  <span class="tag">Ground-truth MCP attestation — every verdict is proof, not a guess · runs locally, nothing leaves</span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="card">
+    <h2>Scan a server</h2>
+    <div class="row">
+      <input type="text" id="target" placeholder='npx -y @modelcontextprotocol/server-filesystem /tmp'>
+      <label class="ck"><input type="checkbox" id="deep"> deep (MCP-00)</label>
+      <button id="go">Scan &amp; attest</button>
+    </div>
+    <div class="jobline muted" id="jobs"></div>
+    <div class="note">The scan runs here on this host; it signs an attestation you can verify offline. Deep tier adds the MCP-00 undeclared-capability hunt (needs strace).</div>
+  </div>
+
+  <div class="card">
+    <h2>Attested servers <span class="muted" id="count"></span></h2>
+    <table>
+      <thead><tr><th>Server</th><th>Verdict</th><th>Tier</th><th>Findings</th><th>Scanned</th><th>Attestation</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</main>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+let openSlug=null;
+
+function tile(n,l,cls){return `<div class="tile ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;}
+
+async function refresh(){
+  const d=await fetch("/api/servers").then(r=>r.json());
+  const t=d.tiles||{};
+  const cleanPct = d.total ? Math.round(100*(t.CLEAN||0)/d.total) : 0;
+  $("#tiles").innerHTML =
+    tile(t.CLEAN||0,"Verified CLEAN (proven)","clean")+
+    tile(t.VULNERABLE||0,"Vulnerable (reproduced)","vuln")+
+    tile(t.INCONCLUSIVE||0,"Inconclusive","inc")+
+    tile(d.total||0,"Servers attested","proof")+
+    tile(cleanPct+"%","Clean rate","proof");
+  $("#count").textContent = d.total?`(${d.total})`:"";
+  const rows=d.servers||[];
+  $("#rows").innerHTML = rows.length ? rows.map(r=>{
+    const find = Object.keys(r.findings||{}).length ? Object.entries(r.findings).map(([k,v])=>k+":"+v).join(", ") : "none";
+    const sig = r.signed_valid ? '✓ signed' : '✗ INVALID';
+    const main=`<tr class="srv" data-slug="${esc(r.slug)}">
+      <td class="mono">${esc(r.target)}</td>
+      <td class="v-${esc(r.verdict)}">${esc(r.verdict)}</td>
+      <td>${esc(r.tier)}</td><td>${esc(find)}</td><td class="muted">${esc(r.scanned)}</td>
+      <td><a href="/verify?att=/data/${esc(r.slug)}.attestation.json" target="_blank">verify ↗</a>
+          · <a href="/data/${esc(r.slug)}.attestation.json" download>json</a>
+          · <span class="muted">${sig}</span></td></tr>`;
+    let det="";
+    if(openSlug===r.slug){
+      const comps = Object.entries(r.components||{}).map(([k,v])=>`<span class="pill ${v==="ran"?"ran":"skip"}">${esc(k)}: ${esc(v)}</span>`).join("")||'<span class="muted">basic tier</span>';
+      const cls = (r.classes||[]).map(c=>`<span class="pill">${esc(c)}</span>`).join("")||"—";
+      det=`<tr class="detail"><td colspan="6">
+        <div><b>Classes tested:</b> ${cls}</div>
+        <div style="margin-top:8px"><b>Deep coverage:</b> ${comps}</div>
+        <div style="margin-top:10px"><img class="badgeimg" src="/data/${esc(r.slug)}.badge.svg" alt="badge">
+          &nbsp; <a href="/data/${esc(r.slug)}.report.json" download>download evidence report</a></div>
+      </td></tr>`;
+    }
+    return main+det;
+  }).join("") : '<tr><td colspan="6" class="muted">No servers scanned yet — run one above.</td></tr>';
+  document.querySelectorAll("tr.srv").forEach(tr=>tr.onclick=()=>{
+    const s=tr.getAttribute("data-slug"); openSlug = openSlug===s?null:s; refresh();
+  });
+}
+
+async function poll(jobId,target){
+  const j=await fetch("/api/jobs/"+jobId).then(r=>r.json());
+  if(j.status==="running"){ $("#jobs").innerHTML=`⏳ scanning <span class="mono">${esc(target)}</span>… (this can take ~30–90s)`; setTimeout(()=>poll(jobId,target),2000); }
+  else if(j.status==="done"){ $("#jobs").innerHTML=`✅ <span class="mono">${esc(target)}</span> → <span class="v-${esc(j.verdict)}">${esc(j.verdict)}</span> (${esc(j.tier)})`; $("#go").disabled=false; refresh(); }
+  else if(j.status==="error"){ $("#jobs").innerHTML=`❌ ${esc(j.error||"scan failed")}`; $("#go").disabled=false; }
+}
+
+$("#go").onclick=async()=>{
+  const target=$("#target").value.trim(); if(!target) return;
+  $("#go").disabled=true; $("#jobs").textContent="submitting…";
+  const r=await fetch("/api/scan",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({target, deep:$("#deep").checked})}).then(r=>r.json());
+  if(r.job_id) poll(r.job_id,target); else { $("#jobs").textContent=r.error||"error"; $("#go").disabled=false; }
+};
+refresh(); setInterval(refresh, 15000);
+</script>
+</body>
+</html>
