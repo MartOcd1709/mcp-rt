@@ -69,6 +69,32 @@ safe one — the test suite proves the detector both catches and doesn't false-p
 
 ---
 
+## Prove it to your customers — a signed, verifiable attestation
+
+Other scanners (Snyk, AgentAvow, the registries) sign a *static opinion* — or admit they don't certify
+security at all. mcp-rt signs **proof**: scan a server, get a cryptographically signed record of the
+verdict and the evidence that **anyone can verify offline** — no account, no call back to us.
+
+```bash
+mcp-rt attest --target-stdio "npx -y your-mcp-server"           # basic: direct-probe classes
+mcp-rt attest --target-stdio "npx -y your-mcp-server" --deep    # + MCP-00 undeclared-capability hunt
+mcp-rt attest --verify your-mcp-server.attestation.json         # offline-verify (only needs the file)
+```
+
+You get a bundle to host anywhere: a signed `attestation.json`, an embeddable **badge**, and a
+self-contained **`verify.html`** that checks the Ed25519 signature *in the browser*.
+
+- **Signed, not asserted.** Ed25519 over a canonical claim — change the verdict (or any field) and
+  verification flips to INVALID.
+- **Proves how deep.** The claim records a `tier` and per-component `ran | skipped` coverage, so a
+  *deep* attestation can never over-claim a test that couldn't run.
+- **Disclosure-safe.** Carries the verdict + severity counts + an evidence digest — never the raw
+  finding bodies, so a public badge can't leak a vulnerability before coordinated disclosure.
+- **Local / VPC — nothing leaves.** The scan and signing run entirely on your host; publishing an
+  attestation is a separate, explicit choice. (Snyk ships your tool metadata to its API; we don't.)
+
+---
+
 ## Two ways to use it
 
 **1. You run or ship an MCP server** → scan it before you (or your customers) trust it:
