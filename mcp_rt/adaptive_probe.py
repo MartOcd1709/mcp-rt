@@ -78,43 +78,77 @@ class MockProbeModel(ProbeModel):
         return out
 
 
-class AnthropicProbeModel(ProbeModel):
-    """Uses an Anthropic-compatible model to pick + adapt techniques for the target.
+def _prompt(tools: list[str], techniques: list[dict], n: int) -> str:
+    return (
+        "You are an MCP security tester doing AUTHORIZED vulnerability detection. "
+        "Given a target MCP server's tools and a list of known detection techniques, pick the "
+        "techniques most likely to apply and say which tool each targets. Reply ONLY with a JSON "
+        'array of objects {"technique","target_tool","mcp_class","rationale"}.\n\n'
+        f"Target tools: {json.dumps(tools)}\n"
+        f"Known techniques: {json.dumps(techniques)}\n"
+        f"Return at most {n}."
+    )
 
-    Works with Anthropic directly OR any Anthropic-compatible gateway (e.g. tokenharbor.ai) by
-    setting ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY — the `anthropic` SDK reads both. Pick the model
-    with MCPRT_AI_MODEL_NAME (default a Claude Sonnet-class id). Falls back to mock on any error so
-    the pipeline never hard-fails on the model."""
+
+def _extract_json_array(text: str, n: int) -> list[dict]:
+    start, end = text.find("["), text.rfind("]")
+    return json.loads(text[start:end + 1])[:n] if start >= 0 and end > start else []
+
+
+class OpenAICompatibleProbeModel(ProbeModel):
+    """Any OpenAI-compatible chat API — covers CSI/CAI (alias3 via LiteLLM), a LiteLLM proxy,
+    tokenharbor's OpenAI endpoint, vLLM, or local Ollama. Configure via env:
+      MCPRT_AI_BASE_URL  e.g. https://api.aliasrobotics.com/v1  (the /v1 base)
+      MCPRT_AI_API_KEY   the provider/CSI key
+      MCPRT_AI_MODEL_NAME e.g. alias3
+    No SDK dependency — posts /chat/completions with httpx."""
+    name = "openai"
+
+    def __init__(self, base_url: str | None = None, api_key: str | None = None, model: str | None = None):
+        self.base_url = (base_url or os.getenv("MCPRT_AI_BASE_URL", "")).rstrip("/")
+        self.api_key = api_key or os.getenv("MCPRT_AI_API_KEY", "")
+        self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "alias3")
+
+    def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
+        import httpx
+        r = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json={"model": self.model, "max_tokens": 1500,
+                  "messages": [{"role": "user", "content": _prompt(tools, techniques, n)}]},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return _extract_json_array(r.json()["choices"][0]["message"]["content"], n)
+
+
+class AnthropicProbeModel(ProbeModel):
+    """Anthropic / Anthropic-compatible gateway (e.g. tokenharbor): set ANTHROPIC_BASE_URL +
+    ANTHROPIC_API_KEY (the `anthropic` SDK reads both). Model via MCPRT_AI_MODEL_NAME."""
     name = "anthropic"
 
     def __init__(self, model: str | None = None):
         self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "claude-sonnet-5-5")
 
     def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
-        try:
-            import anthropic
-            client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL if set)
-            prompt = (
-                "You are an MCP security tester doing AUTHORIZED vulnerability detection. "
-                "Given a target MCP server's tools and a list of known detection techniques, "
-                "pick the techniques most likely to apply and say which tool each targets. "
-                "Reply ONLY with a JSON array of objects "
-                '{"technique","target_tool","mcp_class","rationale"}.\n\n'
-                f"Target tools: {json.dumps(tools)}\n"
-                f"Known techniques: {json.dumps(techniques)}\n"
-                f"Return at most {n}."
-            )
-            msg = client.messages.create(model=self.model, max_tokens=1500,
-                                         messages=[{"role": "user", "content": prompt}])
-            text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-            start, end = text.find("["), text.rfind("]")
-            return json.loads(text[start:end + 1])[:n] if start >= 0 else []
-        except Exception:  # noqa: BLE001 — no key / network / parse error -> caller falls back to mock
-            raise
+        import anthropic
+        client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL if set)
+        msg = client.messages.create(model=self.model, max_tokens=1500,
+                                     messages=[{"role": "user", "content": _prompt(tools, techniques, n)}])
+        text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+        return _extract_json_array(text, n)
 
 
 def get_model() -> ProbeModel:
-    """Pick the probe model: Anthropic when MCPRT_AI_MODEL=anthropic AND a key is set, else mock."""
+    """Pick the probe model from env (provider-agnostic). Default: mock (offline, no key).
+      MCPRT_AI_PROVIDER=openai    + MCPRT_AI_BASE_URL + MCPRT_AI_API_KEY  -> CSI/LiteLLM/Ollama/etc.
+      MCPRT_AI_PROVIDER=anthropic + ANTHROPIC_API_KEY                     -> Anthropic / gateway
+    (legacy MCPRT_AI_MODEL=anthropic still honored.)"""
+    provider = os.getenv("MCPRT_AI_PROVIDER", "")
+    if provider == "openai" and os.getenv("MCPRT_AI_BASE_URL") and os.getenv("MCPRT_AI_API_KEY"):
+        return OpenAICompatibleProbeModel()
+    if provider == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
+        return AnthropicProbeModel()
     if os.getenv("MCPRT_AI_MODEL") == "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
         return AnthropicProbeModel()
     return MockProbeModel()
