@@ -33,6 +33,7 @@ _COMMANDS = {
     "report": ("hunt.report", "main"),
     "attest": ("hunt.attestation", "main"),      # scan -> signed, offline-verifiable attestation (+badge)
     "assess": ("hunt.orchestrator", "main"),     # full lifecycle: scan/VA -> correlate -> remediate
+    "assess-report": ("hunt.assess_report", "main"),  # triaged assessment report (markdown) from the ledger
     "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder
     "serve": ("hunt.webapp", "main"),            # scan service + dashboard (localhost or VPS)
     "org": ("hunt.orgadmin", "main"),            # platform tenant admin: create orgs, mint tokens

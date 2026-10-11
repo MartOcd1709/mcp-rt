@@ -39,6 +39,19 @@ def test_adaptive_proposes_probes_but_not_as_findings():
     assert len(a.findings) == 2                          # findings unchanged — probes await validation
 
 
+def test_persist_writes_asset_findings_and_chains(tmp_path):
+    from hunt.findings_db import DB
+    a = orch.assess("npx -y demo-mcp", base_report=_BASE)        # VULNERABLE, 2 findings, 1+ chain
+    db = DB(tmp_path / "t.db")
+    ids = orch.persist(a, db=db)
+    assert ids["findings"] == 2 and ids["chains"] >= 1
+    # the server is now an asset with a primary id; findings + chains attached to it
+    assert db.conn.execute("SELECT name FROM targets WHERE id=?", (ids["target_id"],)).fetchone()["name"] == "npx -y demo-mcp"
+    assert db.conn.execute("SELECT COUNT(*) c FROM findings WHERE target_id=?", (ids["target_id"],)).fetchone()["c"] == 2
+    assert db.conn.execute("SELECT COUNT(*) c FROM chains WHERE target_id=?", (ids["target_id"],)).fetchone()["c"] >= 1
+    db.close()
+
+
 def test_as_dict_shape():
     d = orch.assess("x", base_report=_BASE).as_dict()
     assert set(d) >= {"target", "verdict", "findings", "chains", "remediation", "surface"}

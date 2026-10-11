@@ -308,6 +308,14 @@ class DB:
         self.conn.commit()
         return cur.lastrowid
 
+    def add_chain(self, target_id: int, *, title: str, severity: str = "") -> int:
+        """Record a correlated multi-step attack chain for a target (the demonstrated-impact unit)."""
+        cur = self.conn.execute(
+            "INSERT INTO chains(target_id,title,severity,created_at) VALUES(?,?,?,?)",
+            (target_id, title, severity, time.time()))
+        self.conn.commit()
+        return cur.lastrowid
+
     def add_attack_pattern(self, *, class_id: str, finding_id: int | None = None, technique: str = "",
                            payload: str = "", outcome: str = "", cwe: str = "") -> int:
         """Record a knowledge-graph node for a confirmed attack — the labelled unit an in-house model

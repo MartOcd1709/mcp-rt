@@ -67,8 +67,34 @@ def _remediation_plan(findings: list, chains: list) -> list:
     return plan
 
 
+def persist(a: Assessment, *, db=None, source: str = "assess") -> dict:
+    """Write an assessment into the CMDB ledger under the server's primary id (find-or-create target),
+    attaching its scan, findings, and correlated chains. Returns the ids. This is the collection
+    layer: every assess becomes tracked asset intelligence, ready for the disclosure pipeline."""
+    from hunt.findings_db import DB
+    close = db is None
+    db = db or DB()
+    try:
+        db.seed_classes()                                                          # ensure class FK rows exist
+        tid = db.add_target(name=a.target, install_cmd=a.target, source=source)   # primary id (idempotent)
+        verdict = a.verdict if a.verdict in ("VULNERABLE", "CLEAN", "INCONCLUSIVE") else "INCONCLUSIVE"
+        sid = db.add_scan(tid, mode="assess", verdict=verdict,
+                          notes=f"{len(a.findings)} findings, {len(a.chains)} chains")
+        for f in a.findings:
+            db.add_finding(tid, scan_id=sid, verdict="VULNERABLE", class_id=f.get("cls", ""),
+                           tool=f.get("tool", ""), severity=f.get("sev", ""),
+                           evidence=str(f.get("evidence", ""))[:500],
+                           rationale=f.get("detail", "") or f.get("rationale", ""))
+        for c in a.chains:
+            db.add_chain(tid, title=f"{c.kind}: {c.narrative}", severity=c.severity)
+        return {"target_id": tid, "scan_id": sid, "findings": len(a.findings), "chains": len(a.chains)}
+    finally:
+        if close:
+            db.close()
+
+
 def assess(target: str, *, base_report: dict | None = None, adaptive: bool = False,
-           execute: bool = False, model=None) -> Assessment:
+           execute: bool = False, save: bool = False, model=None) -> Assessment:
     """Run the full lifecycle for `target` and return a consolidated Assessment.
 
     `base_report` (a run_full_scan dict) can be injected (tests / reuse a prior scan); otherwise it
@@ -96,9 +122,16 @@ def assess(target: str, *, base_report: dict | None = None, adaptive: bool = Fal
     verdict = "VULNERABLE" if (chains or base_report.get("verdict") == "VULNERABLE") else \
         base_report.get("verdict", "CLEAN")
 
-    return Assessment(target=target, verdict=verdict, findings=findings, chains=chains,
-                      candidates=candidates, exec_result=exec_result,
-                      remediation=_remediation_plan(findings, chains), surface=surface)
+    a = Assessment(target=target, verdict=verdict, findings=findings, chains=chains,
+                   candidates=candidates, exec_result=exec_result,
+                   remediation=_remediation_plan(findings, chains), surface=surface)
+    if save:
+        try:
+            persist(a)
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort, never fail the assess
+            import sys
+            print(f"[warn] could not persist to ledger: {exc}", file=sys.stderr)
+    return a
 
 
 def main(argv=None) -> int:
@@ -114,10 +147,12 @@ def main(argv=None) -> int:
     p.add_argument("--execute", action="store_true",
                    help="with --adaptive: validate proposals against the ground-truth scan "
                         "(a probe is confirmed only if the engine proves it)")
+    p.add_argument("--save", action="store_true",
+                   help="persist the assessment to the CMDB ledger (target primary id + findings + chains)")
     p.add_argument("--json", action="store_true", help="emit the full assessment as JSON")
     args = p.parse_args(argv)
     try:
-        a = assess(args.target_stdio, adaptive=args.adaptive, execute=args.execute)
+        a = assess(args.target_stdio, adaptive=args.adaptive, execute=args.execute, save=args.save)
     except Exception as e:  # noqa: BLE001 — degrade honestly rather than dump a traceback
         print(f"INCONCLUSIVE — could not assess target: {e}", file=sys.stderr)
         return 2
