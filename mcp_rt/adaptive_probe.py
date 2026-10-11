@@ -22,6 +22,9 @@ import json
 import os
 from dataclasses import dataclass, field
 
+# Headroom for reasoning models (e.g. CSI alias2-mini emits reasoning_content before the JSON).
+_MAX_TOKENS = 4000
+
 
 @dataclass
 class ProbeCandidate:
@@ -105,8 +108,10 @@ class OpenAICompatibleProbeModel(ProbeModel):
     name = "openai"
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None, model: str | None = None):
-        self.base_url = (base_url or os.getenv("MCPRT_AI_BASE_URL", "")).rstrip("/")
-        self.api_key = api_key or os.getenv("MCPRT_AI_API_KEY", "")
+        # Falls back to OPENAI_BASE_URL / OPENAI_API_KEY so it works out-of-the-box inside a
+        # CSI-launched shell (the `csi` proxy sets those for its local 127.0.0.1:<port> endpoint).
+        self.base_url = (base_url or os.getenv("MCPRT_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL", "")).rstrip("/")
+        self.api_key = api_key or os.getenv("MCPRT_AI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
         self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "alias2-mini")
 
     def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
@@ -114,7 +119,7 @@ class OpenAICompatibleProbeModel(ProbeModel):
         r = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json={"model": self.model, "max_tokens": 1500,
+            json={"model": self.model, "max_tokens": _MAX_TOKENS,
                   "messages": [{"role": "user", "content": _prompt(tools, techniques, n)}]},
             timeout=60,
         )
@@ -133,7 +138,7 @@ class AnthropicProbeModel(ProbeModel):
     def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
         import anthropic
         client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL if set)
-        msg = client.messages.create(model=self.model, max_tokens=1500,
+        msg = client.messages.create(model=self.model, max_tokens=_MAX_TOKENS,
                                      messages=[{"role": "user", "content": _prompt(tools, techniques, n)}])
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         return _extract_json_array(text, n)
