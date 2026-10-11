@@ -96,18 +96,18 @@ def _extract_json_array(text: str, n: int) -> list[dict]:
 
 
 class OpenAICompatibleProbeModel(ProbeModel):
-    """Any OpenAI-compatible chat API — covers CSI/CAI (alias3 via LiteLLM), a LiteLLM proxy,
-    tokenharbor's OpenAI endpoint, vLLM, or local Ollama. Configure via env:
-      MCPRT_AI_BASE_URL  e.g. https://api.aliasrobotics.com/v1  (the /v1 base)
+    """Any OpenAI-compatible chat API — covers CSI/CAI (alias2-mini / alias models via LiteLLM), a
+    LiteLLM proxy, tokenharbor's OpenAI endpoint, vLLM, or local Ollama. Configure via env:
+      MCPRT_AI_BASE_URL  the provider's OpenAI-compatible /v1 base
       MCPRT_AI_API_KEY   the provider/CSI key
-      MCPRT_AI_MODEL_NAME e.g. alias3
+      MCPRT_AI_MODEL_NAME e.g. alias2-mini (CSI specialized cybersecurity model)
     No SDK dependency — posts /chat/completions with httpx."""
     name = "openai"
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None, model: str | None = None):
         self.base_url = (base_url or os.getenv("MCPRT_AI_BASE_URL", "")).rstrip("/")
         self.api_key = api_key or os.getenv("MCPRT_AI_API_KEY", "")
-        self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "alias3")
+        self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "alias2-mini")
 
     def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
         import httpx

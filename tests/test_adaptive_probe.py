@@ -22,9 +22,17 @@ def test_openai_provider_selected_for_csi(monkeypatch):
     monkeypatch.setenv("MCPRT_AI_PROVIDER", "openai")
     monkeypatch.setenv("MCPRT_AI_BASE_URL", "https://api.aliasrobotics.com/v1")
     monkeypatch.setenv("MCPRT_AI_API_KEY", "csi-test")
-    monkeypatch.setenv("MCPRT_AI_MODEL_NAME", "alias3")
+    monkeypatch.setenv("MCPRT_AI_MODEL_NAME", "alias2-mini")
     m = ap.get_model()
-    assert m.name == "openai" and m.model == "alias3" and m.base_url.endswith("/v1")
+    assert m.name == "openai" and m.model == "alias2-mini" and m.base_url.endswith("/v1")
+
+
+def test_openai_default_model_is_alias2_mini(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv("MCPRT_AI_PROVIDER", "openai")
+    monkeypatch.setenv("MCPRT_AI_BASE_URL", "https://x/v1")
+    monkeypatch.setenv("MCPRT_AI_API_KEY", "k")
+    assert ap.get_model().model == "alias2-mini"      # CSI default when model id not overridden
 
 
 def test_anthropic_provider_selected(monkeypatch):
