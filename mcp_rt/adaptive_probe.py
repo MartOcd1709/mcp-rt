@@ -79,17 +79,21 @@ class MockProbeModel(ProbeModel):
 
 
 class AnthropicProbeModel(ProbeModel):
-    """Uses an Anthropic model to pick + adapt techniques for the target. Requires ANTHROPIC_API_KEY.
-    Falls back to mock on any error so the pipeline never hard-fails on the model."""
+    """Uses an Anthropic-compatible model to pick + adapt techniques for the target.
+
+    Works with Anthropic directly OR any Anthropic-compatible gateway (e.g. tokenharbor.ai) by
+    setting ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY — the `anthropic` SDK reads both. Pick the model
+    with MCPRT_AI_MODEL_NAME (default a Claude Sonnet-class id). Falls back to mock on any error so
+    the pipeline never hard-fails on the model."""
     name = "anthropic"
 
-    def __init__(self, model: str = "claude-opus-4-8"):
-        self.model = model
+    def __init__(self, model: str | None = None):
+        self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "claude-sonnet-5-5")
 
     def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
         try:
             import anthropic
-            client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY
+            client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL if set)
             prompt = (
                 "You are an MCP security tester doing AUTHORIZED vulnerability detection. "
                 "Given a target MCP server's tools and a list of known detection techniques, "
