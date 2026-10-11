@@ -33,6 +33,7 @@ class Assessment:
     findings: list = field(default_factory=list)
     chains: list = field(default_factory=list)          # correlate.Chain
     candidates: list = field(default_factory=list)      # adaptive_probe.ProbeCandidate (proposed)
+    exec_result: object = None                          # executor.ExecResult (if executed)
     remediation: list = field(default_factory=list)
     surface: dict = field(default_factory=dict)
 
@@ -43,6 +44,7 @@ class Assessment:
             "findings": self.findings,
             "chains": [c.as_dict() for c in self.chains],
             "proposed_probes": [c.as_dict() for c in self.candidates],
+            "adaptive_validation": self.exec_result.as_dict() if self.exec_result else None,
             "remediation": self.remediation,
             "surface": {"tools": [t.get("name") if isinstance(t, dict) else t
                                   for t in (self.surface.get("tools") or [])]},
@@ -66,11 +68,12 @@ def _remediation_plan(findings: list, chains: list) -> list:
 
 
 def assess(target: str, *, base_report: dict | None = None, adaptive: bool = False,
-           model=None) -> Assessment:
+           execute: bool = False, model=None) -> Assessment:
     """Run the full lifecycle for `target` and return a consolidated Assessment.
 
     `base_report` (a run_full_scan dict) can be injected (tests / reuse a prior scan); otherwise it
-    is produced here. `adaptive=True` proposes tailored probes (validated downstream in the sandbox).
+    is produced here. `adaptive=True` proposes tailored probes; `execute=True` validates them against
+    the ground-truth scan (executor) — a proposed probe is confirmed ONLY if the engine proves it.
     """
     if base_report is None:
         from hunt.report import run_full_scan
@@ -80,18 +83,22 @@ def assess(target: str, *, base_report: dict | None = None, adaptive: bool = Fal
     surface = base_report.get("surface", {}) or {}
     chains = _correlate.correlate(findings)
 
-    candidates = []
+    candidates, exec_result = [], None
     if adaptive:
         tools = [t.get("name") if isinstance(t, dict) else t for t in (surface.get("tools") or [])]
         candidates = generate_candidates([t for t in tools if t], model=model)
+        if execute:
+            from hunt import executor
+            # ground-truth gate: validate proposals against the already-run scan's confirmed findings
+            exec_result = executor.validate(candidates, findings)
 
     # A proven chain is demonstrated compromise -> the assessment verdict is VULNERABLE.
     verdict = "VULNERABLE" if (chains or base_report.get("verdict") == "VULNERABLE") else \
         base_report.get("verdict", "CLEAN")
 
     return Assessment(target=target, verdict=verdict, findings=findings, chains=chains,
-                      candidates=candidates, remediation=_remediation_plan(findings, chains),
-                      surface=surface)
+                      candidates=candidates, exec_result=exec_result,
+                      remediation=_remediation_plan(findings, chains), surface=surface)
 
 
 def main(argv=None) -> int:
@@ -103,11 +110,14 @@ def main(argv=None) -> int:
     p.add_argument("--target-stdio", required=True, metavar="CMD",
                    help='authorized local server, e.g. "npx -y some-mcp-server"')
     p.add_argument("--adaptive", action="store_true",
-                   help="also propose adaptive probes tailored to the target (validated in the sandbox)")
+                   help="also propose adaptive probes tailored to the target's tools")
+    p.add_argument("--execute", action="store_true",
+                   help="with --adaptive: validate proposals against the ground-truth scan "
+                        "(a probe is confirmed only if the engine proves it)")
     p.add_argument("--json", action="store_true", help="emit the full assessment as JSON")
     args = p.parse_args(argv)
     try:
-        a = assess(args.target_stdio, adaptive=args.adaptive)
+        a = assess(args.target_stdio, adaptive=args.adaptive, execute=args.execute)
     except Exception as e:  # noqa: BLE001 — degrade honestly rather than dump a traceback
         print(f"INCONCLUSIVE — could not assess target: {e}", file=sys.stderr)
         return 2
@@ -116,6 +126,8 @@ def main(argv=None) -> int:
         return 0
     print(f"verdict: {a.verdict}")
     print(f"findings: {len(a.findings)}  ·  chains: {len(a.chains)}  ·  proposed probes: {len(a.candidates)}")
+    if a.exec_result:
+        print(f"adaptive validation: {a.exec_result.note}")
     for c in a.chains:
         print(f"  [CHAIN {c.severity}] {c.kind}: {c.narrative}")
     if a.remediation:
