@@ -203,9 +203,11 @@ class AgentResult:
     agent_claimed: list = field(default_factory=list)  # claimed findings — NOT confirmed until oracle checks
     note: str = ""
 
+    plan: list = field(default_factory=list)          # the assessment plan the agent was handed (coverage)
+
     def as_dict(self) -> dict:
         return {"target": self.target, "steps": self.steps, "commands": self.commands,
-                "agent_claimed": self.agent_claimed, "note": self.note}
+                "agent_claimed": self.agent_claimed, "note": self.note, "plan": self.plan}
 
 
 def _parse_action(text: str) -> dict:
@@ -267,7 +269,8 @@ def _do_mcp_call(client, action: dict) -> str:
 
 def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor | None = None,
               model: ChatModel | None = None, mcp_client=None, policy: AgentPolicy | None = None,
-              max_steps: int | None = None, with_context: bool = True) -> AgentResult:
+              max_steps: int | None = None, with_context: bool = True,
+              use_plan: bool = False) -> AgentResult:
     """Drive the ReAct assessment loop. The agent is in charge of when it is DONE: it runs until it
     CONCLUDES (decides the surface is assessed) or CONVERGES (no new coverage for policy.patience
     steps). The step budget scales with the target's surface and is only a safety/cost ceiling — not a
@@ -285,14 +288,30 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         mcp_client = MCPClient(target)
 
     context, tools = build_target_context(target, client=mcp_client) if with_context else ("", [])
-    budget = policy.budget(len(tools))             # scales with the attack surface; ceiling-capped
+    res = AgentResult(target=target)
+
+    # PLAN handoff: the planner derives an exhaustive test plan from the surface; the agent is told to
+    # work EVERY point (guaranteed coverage) while still free to add its own. Budget covers the plan.
+    plan_block, cover = "", len(tools)
+    if use_plan and tools:
+        from mcp_rt.planner import build_plan
+        plan = build_plan(target, {"tools": tools}, model=model)
+        res.plan = [p.as_dict() for p in plan.points]
+        cover = max(cover, len(plan.points))
+        pts = "\n".join(f"  {i}. {p.target}.{p.param or '(name)'} — test {p.vuln_class} "
+                        f"e.g. {next(iter(p.probe.values()), '')}" for i, p in enumerate(plan.points, 1))
+        plan_block = ("\n\nASSESSMENT PLAN — work EVERY point below with mcp_call, read each "
+                      "observation, and record a finding for any that demonstrates the issue. Cover "
+                      "them all before you conclude; add your own points if you spot more:\n" + pts)
+
+    budget = policy.budget(cover)                  # scales with surface/plan size; ceiling-capped
     task = task or (f"Assess the MCP server launched by `{target}` for real, reproducible "
                     "vulnerabilities (authorized, sandboxed). Drive its tools with adversarial inputs, "
                     "read each observation, and conclude with evidence-backed findings only.")
     if context:
         task += "\n\n" + context
+    task += plan_block
 
-    res = AgentResult(target=target)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
     seen, stale = set(), 0                         # coverage set + steps since last new coverage
 
@@ -350,6 +369,9 @@ def main(argv=None) -> int:
                         "ceiling-capped; the agent normally stops by concluding or converging)")
     p.add_argument("--patience", type=int, default=None,
                    help="stop if no new coverage for this many steps (default from policy)")
+    p.add_argument("--plan", action="store_true",
+                   help="derive an exhaustive test plan from the surface and hand it to the agent to "
+                        "work every point (planner -> vuln-agent handoff; guaranteed coverage)")
     p.add_argument("--confirm", action="store_true",
                    help="after the agent concludes, confirm its claims against a ground-truth scan "
                         "(a claim counts only if the engine independently proves it)")
@@ -363,7 +385,8 @@ def main(argv=None) -> int:
     if args.patience is not None:
         from dataclasses import replace
         policy = replace(policy, patience=args.patience)
-    res = run_agent(args.target_stdio, executor=ex, policy=policy, max_steps=args.max_steps)
+    res = run_agent(args.target_stdio, executor=ex, policy=policy, max_steps=args.max_steps,
+                    use_plan=args.plan)
 
     confirmation = None
     if args.confirm and res.agent_claimed:

@@ -93,6 +93,23 @@ def test_agent_converges_instead_of_running_to_the_budget():
     assert res.steps <= 6 and "converged" in res.note    # stopped early, didn't burn all 50 steps
 
 
+def test_use_plan_hands_the_agent_a_coverage_plan():
+    """planner -> vuln-agent handoff: the agent's task carries an exhaustive plan for the surface."""
+    captured = {}
+
+    class Capt(al.ChatModel):
+        name = "capt"
+        def chat(self, messages):
+            captured.setdefault("task", messages[1]["content"])
+            return json.dumps({"action": "conclude", "findings": []})
+    client = FakeClient(tools=[{"name": "read_doc", "description": "read",
+                                "input_schema": {"properties": {"path": {"type": "string"}},
+                                                 "required": ["path"]}}])
+    res = al.run_agent("x", model=Capt(), mcp_client=client, use_plan=True)
+    assert "ASSESSMENT PLAN" in captured["task"] and "path_traversal" in captured["task"]
+    assert res.plan and res.plan[0]["vuln_class"] == "path_traversal"
+
+
 def test_claimed_findings_are_unconfirmed():
     class Claimer(al.ChatModel):
         name = "claimer"
