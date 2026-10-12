@@ -34,6 +34,7 @@ _COMMANDS = {
     "attest": ("hunt.attestation", "main"),      # scan -> signed, offline-verifiable attestation (+badge)
     "assess": ("hunt.orchestrator", "main"),     # full lifecycle: scan/VA -> correlate -> remediate
     "assess-report": ("hunt.assess_report", "main"),  # triaged assessment report (markdown) from the ledger
+    "agent": ("mcp_rt.agent_loop", "main"),      # autonomous sandboxed assessment agent (ReAct loop)
     "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder
     "serve": ("hunt.webapp", "main"),            # scan service + dashboard (localhost or VPS)
     "org": ("hunt.orgadmin", "main"),            # platform tenant admin: create orgs, mint tokens
