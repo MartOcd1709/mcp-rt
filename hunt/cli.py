@@ -35,6 +35,7 @@ _COMMANDS = {
     "assess": ("hunt.orchestrator", "main"),     # full lifecycle: scan/VA -> correlate -> remediate
     "assess-report": ("hunt.assess_report", "main"),  # triaged assessment report (markdown) from the ledger
     "agent": ("mcp_rt.agent_loop", "main"),      # autonomous sandboxed assessment agent (ReAct loop)
+    "pentest": ("mcp_rt.assessment", "main"),    # coordinated multi-agent assessment (plan->prove->refine)
     "discover": ("hunt.discover", "main"),       # find MCP servers on this host (configs + packages)
     "hunt-all": ("hunt.pipeline", "main"),       # end-to-end: discover -> assess each -> correlate -> report
     "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder

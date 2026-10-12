@@ -63,6 +63,23 @@ def test_safe_server_is_never_false_positived():
         assert orc.confirm(SafeClient(), "t", cls, param="x").confirmed is False
 
 
+def test_normalize_free_form_class_labels():
+    assert orc.normalize_class("ssrf_local_file_read") == "ssrf"
+    assert orc.normalize_class("OS Command Injection") == "command_injection"
+    assert orc.normalize_class("arbitrary_file_read") == "path_traversal"
+    assert orc.normalize_class("SQLi") == "sql_injection"
+
+
+def test_confirm_claims_reproves_a_free_agents_findings():
+    # the agent freely chose tools/labels; the oracle re-demonstrates each claim
+    claims = [{"class": "ssrf_local_file_read", "tool": "read_doc"},   # proven via /etc/passwd read
+              {"class": "command injection", "tool": "run_cmd"},       # proven via nonce
+              {"class": "made_up_thing", "tool": "ghost"}]             # cannot be proven
+    res = orc.confirm_claims(VulnClient(), claims)
+    proven = {p.tool for p in res.confirmed}
+    assert "read_doc" in proven and "run_cmd" in proven and "ghost" not in proven
+
+
 def test_confirm_plan_splits_confirmed_and_unconfirmed():
     from mcp_rt.planner import TestPoint
     plan = [TestPoint("read_doc", "path_traversal", param="path"),

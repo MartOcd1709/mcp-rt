@@ -144,6 +144,47 @@ def build_plan(target: str, surface: dict, *, model=None) -> Plan:
     return Plan(target=target, points=points)
 
 
+def _class_payload(cls: str) -> str:
+    for _rx, c, v in _PARAM_SIGNALS + _NAME_SIGNALS:
+        if c == cls:
+            return v
+    return "test"
+
+
+def refine(plan, proven: list, tools: list, *, max_new: int = 24) -> list:
+    """Refiner — re-plan from what was PROVEN (PentAGI's Refiner role, our ground-truth twist).
+
+    A weakness proven on one tool means the author likely has that pattern elsewhere: sweep that class
+    to sibling tools not yet planned for it (a real pentester's heuristic). Bounded (`max_new`) and
+    skips tools with no inputs, so it broadens intelligently without exploding the probe count."""
+    proven_classes = {(getattr(p, "vuln_class", "") or (p.get("vuln_class") if isinstance(p, dict) else ""))
+                      for p in proven}
+    proven_classes.discard("")
+    if not proven_classes:
+        return []
+    have = {(p.target, p.vuln_class) for p in plan.points}
+    new = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        name = t.get("name", "")
+        props = ((t.get("input_schema") or {}).get("properties") or {}) \
+            if isinstance(t.get("input_schema"), dict) else {}
+        if not props:                          # a tool with no inputs can't take an injected payload
+            continue
+        param = next(iter(props), "")
+        for cls in proven_classes:
+            if (name, cls) in have:
+                continue
+            have.add((name, cls))
+            new.append(TestPoint(target=name, vuln_class=cls, param=param, kind="tool",
+                                  rationale=f"refiner: {cls} proven on a sibling tool — sweeping",
+                                  probe=_args_for(t, param, _class_payload(cls)), source="refiner"))
+            if len(new) >= max_new:
+                return new
+    return new
+
+
 def _model_augment(target: str, tools: list, existing: list, model) -> list:
     """Ask the planner model for ADDITIONAL creative test points the deterministic pass missed."""
     import json

@@ -163,6 +163,53 @@ class OracleResult:
                         f"{len(self.unconfirmed)} not proven"}
 
 
+# Order matters — checked top-down, first substring match wins. SSRF is listed before the file-read
+# aliases so "ssrf_local_file_read" resolves to ssrf, while a bare "file_read" falls to traversal.
+_CLASS_ALIASES = [
+    ("ssrf", "ssrf"),
+    ("command_inj", "command_injection"), ("cmd_inj", "command_injection"), ("os_command", "command_injection"),
+    ("rce", "command_injection"), ("shell", "command_injection"),
+    ("code_inj", "code_injection"), ("code_exec", "code_injection"), ("arbitrary_code", "code_injection"),
+    ("deserial", "deserialization"),
+    ("path_trav", "path_traversal"), ("traversal", "path_traversal"), ("lfi", "path_traversal"),
+    ("file_read", "path_traversal"), ("file_write", "path_traversal"), ("arbitrary_write", "path_traversal"),
+    ("arbitrary_file", "path_traversal"), ("directory_trav", "path_traversal"),
+    ("sqli", "sql_injection"), ("sql_inj", "sql_injection"), ("sql", "sql_injection"),
+    ("ssti", "ssti"), ("template_inj", "ssti"),
+]
+
+
+def normalize_class(c: str) -> str:
+    """Map an agent's free-form class label (e.g. 'ssrf_local_file_read', 'OS Command Injection') to
+    an oracle class. Slug-ifies first so spaces/hyphens match the underscore aliases."""
+    c = re.sub(r"[^a-z0-9]+", "_", (c or "").lower())
+    for key, canon in _CLASS_ALIASES:
+        if key in c:
+            return canon
+    return c
+
+
+def confirm_claims(client, claims: list) -> OracleResult:
+    """Confirm an AGENT's freely-chosen claims by RE-DEMONSTRATION. The agent picks any tool/input it
+    likes; the oracle re-runs the right proof for each claim's (tool, class). This is free agentic
+    reach with a ground-truth gate — the agent's say-so is never the verdict."""
+    res = OracleResult()
+    seen = set()
+    for cl in claims:
+        tool = cl.get("tool") or cl.get("target") or ""
+        cls = normalize_class(cl.get("class") or cl.get("cls") or cl.get("vuln_class") or "")
+        param = cl.get("param", "") if isinstance(cl.get("param", ""), str) else ""
+        if not tool or not cls:
+            res.unconfirmed.append(Proof(tool, cls, False, "claim missing tool/class", "", param))
+            continue
+        if (tool, cls, param) in seen:
+            continue
+        seen.add((tool, cls, param))
+        proof = confirm(client, tool, cls, param=param)
+        (res.confirmed if proof.confirmed else res.unconfirmed).append(proof)
+    return res
+
+
 def confirm_plan(client, plan) -> OracleResult:
     """Fire every point of a test plan and prove it by re-demonstration. This IS the vulnerability
     phase done with ground truth: each plan point becomes a proven finding or an honest not-proven."""

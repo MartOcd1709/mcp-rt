@@ -405,16 +405,17 @@ def main(argv=None) -> int:
     if args.patience is not None:
         from dataclasses import replace
         policy = replace(policy, patience=args.patience)
+    from mcp_rt.mcp_client import MCPClient
+    client = MCPClient(args.target_stdio)             # one client for both the loop and confirmation
     res = run_agent(args.target_stdio, executor=ex, policy=policy, max_steps=args.max_steps,
-                    use_plan=args.plan, progress=prog)
+                    use_plan=args.plan, progress=prog, mcp_client=client)
 
     confirmation = None
     if args.confirm and res.agent_claimed:
-        _emit(prog, "confirming claims against ground truth (sandboxed scan)…")
-        from hunt.sandbox import run_isolated          # ground-truth oracle (sandboxed)
-        from hunt.executor import confirm_claims
-        report = run_isolated(args.target_stdio, backend="auto")
-        confirmation = confirm_claims(res.agent_claimed, report.get("findings", []) or [])
+        _emit(prog, "confirming claims by RE-DEMONSTRATION (ground truth)…")
+        from mcp_rt import oracle
+        orc = oracle.confirm_claims(client, res.agent_claimed)   # re-prove each freely-chosen claim
+        confirmation = orc.as_dict()
         _emit(prog, f"ground truth: {confirmation['note']}")
     if args.json:
         d = res.as_dict()
@@ -427,9 +428,9 @@ def main(argv=None) -> int:
         if confirmation is not None:
             print(f"ground-truth confirmation: {confirmation['note']}")
             for f in confirmation["confirmed"]:
-                print(f"  [CONFIRMED ✓] {f.get('class')}: {str(f.get('detail',''))[:80]}")
+                print(f"  [PROVEN ✓ {f.get('vuln_class')}] {f.get('tool')}: {str(f.get('signal',''))[:70]}")
             for f in confirmation["unconfirmed"]:
-                print(f"  [unconfirmed] {f.get('class')}: {str(f.get('detail',''))[:80]}")
+                print(f"  [not proven {f.get('vuln_class')}] {f.get('tool')}: {str(f.get('signal',''))[:60]}")
         else:
             for f in res.agent_claimed:
                 print(f"  [claimed · UNCONFIRMED — run --confirm] {f.get('class')}: {str(f.get('detail',''))[:80]}")
