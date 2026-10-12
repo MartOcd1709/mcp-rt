@@ -57,7 +57,7 @@ def _known_techniques() -> list[dict]:
 class ProbeModel:
     name = "base"
 
-    def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
+    def propose(self, tools: list[str], techniques: list[dict], n: int, hints: str = "") -> list[dict]:
         """Return up to n {technique, target_tool, mcp_class, rationale} candidate specs."""
         raise NotImplementedError
 
@@ -67,7 +67,7 @@ class MockProbeModel(ProbeModel):
     No network, no key: lets the whole pipeline be built and tested now (real model plugged later)."""
     name = "mock"
 
-    def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
+    def propose(self, tools: list[str], techniques: list[dict], n: int, hints: str = "") -> list[dict]:
         out = []
         tools = tools or ["<default-tool>"]
         for i, t in enumerate(techniques):
@@ -81,13 +81,14 @@ class MockProbeModel(ProbeModel):
         return out
 
 
-def _prompt(tools: list[str], techniques: list[dict], n: int) -> str:
+def _prompt(tools: list[str], techniques: list[dict], n: int, hints: str = "") -> str:
     return (
         "You are an MCP security tester doing AUTHORIZED vulnerability detection. "
         "Given a target MCP server's tools and a list of known detection techniques, pick the "
         "techniques most likely to apply and say which tool each targets. Reply ONLY with a JSON "
         'array of objects {"technique","target_tool","mcp_class","rationale"}.\n\n'
-        f"Target tools: {json.dumps(tools)}\n"
+        + (hints + "\n\n" if hints else "")
+        + f"Target tools: {json.dumps(tools)}\n"
         f"Known techniques: {json.dumps(techniques)}\n"
         f"Return at most {n}."
     )
@@ -114,13 +115,13 @@ class OpenAICompatibleProbeModel(ProbeModel):
         self.api_key = api_key or os.getenv("MCPRT_AI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
         self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "alias2-mini")
 
-    def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
+    def propose(self, tools: list[str], techniques: list[dict], n: int, hints: str = "") -> list[dict]:
         import httpx
         r = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             json={"model": self.model, "max_tokens": _MAX_TOKENS,
-                  "messages": [{"role": "user", "content": _prompt(tools, techniques, n)}]},
+                  "messages": [{"role": "user", "content": _prompt(tools, techniques, n, hints)}]},
             timeout=60,
         )
         r.raise_for_status()
@@ -135,11 +136,11 @@ class AnthropicProbeModel(ProbeModel):
     def __init__(self, model: str | None = None):
         self.model = model or os.getenv("MCPRT_AI_MODEL_NAME", "claude-sonnet-5-5")
 
-    def propose(self, tools: list[str], techniques: list[dict], n: int) -> list[dict]:
+    def propose(self, tools: list[str], techniques: list[dict], n: int, hints: str = "") -> list[dict]:
         import anthropic
         client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY (+ ANTHROPIC_BASE_URL if set)
         msg = client.messages.create(model=self.model, max_tokens=_MAX_TOKENS,
-                                     messages=[{"role": "user", "content": _prompt(tools, techniques, n)}])
+                                     messages=[{"role": "user", "content": _prompt(tools, techniques, n, hints)}])
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         return _extract_json_array(text, n)
 
@@ -168,10 +169,16 @@ def generate_candidates(target_tools: list[str], *, n: int = 10,
     """
     model = model or get_model()
     techniques = _known_techniques()
+    hints = ""
+    try:                                  # learn from prior ground-truth wins (best-effort)
+        from mcp_rt.knowledge import recall_hints
+        hints = recall_hints(target_tools)
+    except Exception:  # noqa: BLE001 — knowledge layer is optional; never block generation
+        pass
     try:
-        specs = model.propose(target_tools, techniques, n)
+        specs = model.propose(target_tools, techniques, n, hints)
     except Exception:  # noqa: BLE001 — model failure degrades to the offline selection, never crashes
-        specs = MockProbeModel().propose(target_tools, techniques, n)
+        specs = MockProbeModel().propose(target_tools, techniques, n, hints)
         model = MockProbeModel()
     return [ProbeCandidate(technique=s.get("technique", "?"), target_tool=s.get("target_tool", "?"),
                            mcp_class=s.get("mcp_class", ""), rationale=s.get("rationale", ""),

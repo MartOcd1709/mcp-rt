@@ -67,6 +67,21 @@ def _remediation_plan(findings: list, chains: list) -> list:
     return plan
 
 
+def _learn(a: Assessment) -> None:
+    """Record every ground-truth-confirmed finding into the knowledge graph (best-effort), so future
+    assessments recall what has actually worked on similar servers — the engine improves itself."""
+    try:
+        from mcp_rt.knowledge import get_store
+        kg = get_store()
+        for f in a.findings:                       # findings here are ground-truth confirmed
+            kg.record(f.get("cls", ""), f.get("tool", ""), outcome="confirmed",
+                      cwe=f.get("cwe", ""), target=a.target)
+        if hasattr(kg, "close"):
+            kg.close()
+    except Exception:  # noqa: BLE001 — learning is optional; never fail persistence over it
+        pass
+
+
 def persist(a: Assessment, *, db=None, source: str = "assess") -> dict:
     """Write an assessment into the CMDB ledger under the server's primary id (find-or-create target),
     attaching its scan, findings, and correlated chains. Returns the ids. This is the collection
@@ -87,6 +102,7 @@ def persist(a: Assessment, *, db=None, source: str = "assess") -> dict:
                            rationale=f.get("detail", "") or f.get("rationale", ""))
         for c in a.chains:
             db.add_chain(tid, title=f"{c.kind}: {c.narrative}", severity=c.severity)
+        _learn(a)   # feed ground-truth-confirmed findings into the knowledge graph
         return {"target_id": tid, "scan_id": sid, "findings": len(a.findings), "chains": len(a.chains)}
     finally:
         if close:
