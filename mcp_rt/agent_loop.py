@@ -267,10 +267,18 @@ def _do_mcp_call(client, action: dict) -> str:
         return f"[mcp_call error] {type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _emit(progress, msg: str) -> None:
+    if progress:
+        try:
+            progress(msg)
+        except Exception:  # noqa: BLE001 — progress is cosmetic, never fail the run over it
+            pass
+
+
 def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor | None = None,
               model: ChatModel | None = None, mcp_client=None, policy: AgentPolicy | None = None,
               max_steps: int | None = None, with_context: bool = True,
-              use_plan: bool = False) -> AgentResult:
+              use_plan: bool = False, progress=None) -> AgentResult:
     """Drive the ReAct assessment loop. The agent is in charge of when it is DONE: it runs until it
     CONCLUDES (decides the surface is assessed) or CONVERGES (no new coverage for policy.patience
     steps). The step budget scales with the target's surface and is only a safety/cost ceiling — not a
@@ -287,6 +295,7 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         from mcp_rt.mcp_client import MCPClient
         mcp_client = MCPClient(target)
 
+    _emit(progress, "connecting to target + enumerating its tools…")
     context, tools = build_target_context(target, client=mcp_client) if with_context else ("", [])
     res = AgentResult(target=target)
 
@@ -298,6 +307,7 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         plan = build_plan(target, {"tools": tools}, model=model)
         res.plan = [p.as_dict() for p in plan.points]
         cover = max(cover, len(plan.points))
+        _emit(progress, f"planned {len(plan.points)} test point(s) across {len(tools)} tool(s)")
         def _eg(pr):
             return next(iter(pr.values()), "") if isinstance(pr, dict) else pr
         pts = "\n".join(f"  {i}. {p.target}.{p.param or '(name)'} — test {p.vuln_class} "
@@ -307,6 +317,7 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
                       "them all before you conclude; add your own points if you spot more:\n" + pts)
 
     budget = policy.budget(cover)                  # scales with surface/plan size; ceiling-capped
+    _emit(progress, f"surface: {len(tools)} tool(s); step budget {budget}")
     task = task or (f"Assess the MCP server launched by `{target}` for real, reproducible "
                     "vulnerabilities (authorized, sandboxed). Drive its tools with adversarial inputs, "
                     "read each observation, and conclude with evidence-backed findings only.")
@@ -322,14 +333,17 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         final = step == budget or stale >= policy.patience   # budget edge OR converged -> wrap up
         if final:
             messages.append({"role": "user", "content": _FINAL_NUDGE})
+        _emit(progress, f"[{step}/{budget}] reasoning…")
         reply = model.chat(messages)
         res.transcript.append({"role": "assistant", "content": reply[:2000]})
         action = _parse_action(reply)
         kind = action.get("action")
+        thought = (action.get("thought") or "")[:80]
         if kind == "conclude":
             res.agent_claimed = action.get("findings", []) or []
             res.note = (f"agent concluded after {step} step(s); {len(res.agent_claimed)} claimed "
                         "finding(s) — require ground-truth confirmation before counting")
+            _emit(progress, f"[{step}/{budget}] concluded — {len(res.agent_claimed)} claim(s)")
             break
         if final:                                  # was told to wrap up but didn't — stop with a note
             res.note = (f"stopped after {step} step(s): "
@@ -339,11 +353,13 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         if kind == "mcp_call":
             key = f"mcp:{action.get('method')}:{action.get('name', action.get('uri', ''))}"
             res.commands.append(key)
+            _emit(progress, f"[{step}/{budget}] call {action.get('name') or action.get('method')} — {thought}")
             observation = _do_mcp_call(mcp_client, action)
         elif kind == "shell":
             cmd = action.get("command", "")
             key = f"sh:{cmd}"
             res.commands.append(cmd)
+            _emit(progress, f"[{step}/{budget}] shell {cmd[:40]} — {thought}")
             observation = executor.run(cmd) if cmd else "[no command]"
         else:
             messages.append({"role": "user", "content":
@@ -377,25 +393,29 @@ def main(argv=None) -> int:
     p.add_argument("--confirm", action="store_true",
                    help="after the agent concludes, confirm its claims against a ground-truth scan "
                         "(a claim counts only if the engine independently proves it)")
+    p.add_argument("--quiet", action="store_true", help="suppress live progress on stderr")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     ex = DockerExecutor(image=args.image) if args.docker else DryRunExecutor()
+    # Live progress to STDERR so the run never looks frozen; stdout stays clean for --json.
+    prog = None if args.quiet else (lambda m: print(f"  ▸ {m}", file=sys.stderr, flush=True))
     if args.docker:
-        print("[authorized assessment] running in the hardened Docker sandbox (no network, "
-              "non-root, read-only).", file=sys.stderr)
+        _emit(prog, "running in the hardened Docker sandbox (no network, non-root, read-only)")
     policy = AgentPolicy.from_env()
     if args.patience is not None:
         from dataclasses import replace
         policy = replace(policy, patience=args.patience)
     res = run_agent(args.target_stdio, executor=ex, policy=policy, max_steps=args.max_steps,
-                    use_plan=args.plan)
+                    use_plan=args.plan, progress=prog)
 
     confirmation = None
     if args.confirm and res.agent_claimed:
+        _emit(prog, "confirming claims against ground truth (sandboxed scan)…")
         from hunt.sandbox import run_isolated          # ground-truth oracle (sandboxed)
         from hunt.executor import confirm_claims
         report = run_isolated(args.target_stdio, backend="auto")
         confirmation = confirm_claims(res.agent_claimed, report.get("findings", []) or [])
+        _emit(prog, f"ground truth: {confirmation['note']}")
     if args.json:
         d = res.as_dict()
         d["confirmation"] = confirmation
