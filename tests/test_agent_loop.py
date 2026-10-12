@@ -72,6 +72,27 @@ def test_context_degrades_when_target_unreachable():
     assert "unavailable" in ctx and tools == []
 
 
+def test_policy_budget_scales_with_surface_not_a_magic_number():
+    p = al.AgentPolicy(base_steps=8, per_tool_steps=3, step_ceiling=200)
+    assert p.budget(0) == 8                       # floor for a tiny surface
+    assert p.budget(14) == 50                     # 8 + 3*14 — bigger surface, bigger budget
+    assert p.budget(1000) == 200                  # ceiling caps runaway cost
+    assert al.AgentPolicy(max_steps=4, step_ceiling=200).budget(99) == 4   # explicit override
+
+
+def test_agent_converges_instead_of_running_to_the_budget():
+    """Agentic termination: a model that keeps repeating the same action STOPS on convergence,
+    long before the (large) step budget — no wasted calls, no magic cutoff."""
+    class Repeater(al.ChatModel):
+        name = "rep"
+        def chat(self, messages):
+            return json.dumps({"action": "mcp_call", "method": "call_tool",
+                               "name": "same", "arguments": {}})
+    res = al.run_agent("x", model=Repeater(), mcp_client=FakeClient(),
+                       policy=al.AgentPolicy(base_steps=50, per_tool_steps=0, patience=3))
+    assert res.steps <= 6 and "converged" in res.note    # stopped early, didn't burn all 50 steps
+
+
 def test_claimed_findings_are_unconfirmed():
     class Claimer(al.ChatModel):
         name = "claimer"

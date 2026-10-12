@@ -25,12 +25,40 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-MAX_STEPS = int(os.getenv("MCPRT_AGENT_MAX_STEPS", "16"))
-
-_FINAL_NUDGE = ("FINAL STEP — you are out of actions. Reply with ONLY a conclude action listing every "
-                "vulnerability you DEMONSTRATED with concrete evidence from an observation (empty list "
-                'if none): {"thought":"...","action":"conclude","findings":[{"class":"...","tool":"...",'
+_FINAL_NUDGE = ("FINAL STEP — wrap up. Reply with ONLY a conclude action listing every vulnerability "
+                "you DEMONSTRATED with concrete evidence from an observation (empty list if none): "
+                '{"thought":"...","action":"conclude","findings":[{"class":"...","tool":"...",'
                 '"detail":"...","evidence":"..."}]}')
+
+
+@dataclass
+class AgentPolicy:
+    """Governs how long the agent runs — the enterprise, role-configurable alternative to a magic
+    constant. The agent primarily stops when it CONCLUDES (it decides it is done) or CONVERGES (no new
+    coverage for `patience` steps). The step budget SCALES WITH THE ATTACK SURFACE and exists only as a
+    safety/cost ceiling, not as the normal stop. The platform sets this per org/role via the API."""
+    base_steps: int = 8               # floor, even for a tiny surface
+    per_tool_steps: int = 3           # extra budget per tool the target exposes
+    step_ceiling: int = 200           # hard cap — cost/runaway protection, never exceeded
+    patience: int = 5                 # stop if no new tool/command/finding for this many steps
+    max_steps: int | None = None      # explicit override (still clamped to step_ceiling)
+
+    @classmethod
+    def from_env(cls) -> "AgentPolicy":
+        def _i(name, default):
+            try:
+                return int(os.getenv(name, "")) if os.getenv(name) else default
+            except ValueError:
+                return default
+        return cls(base_steps=_i("MCPRT_AGENT_BASE_STEPS", 8),
+                   per_tool_steps=_i("MCPRT_AGENT_PER_TOOL", 3),
+                   step_ceiling=_i("MCPRT_AGENT_STEP_CEILING", 200),
+                   patience=_i("MCPRT_AGENT_PATIENCE", 5),
+                   max_steps=_i("MCPRT_AGENT_MAX_STEPS", 0) or None)
+
+    def budget(self, n_tools: int) -> int:
+        raw = self.max_steps if self.max_steps else self.base_steps + self.per_tool_steps * max(n_tools, 0)
+        return max(1, min(raw, self.step_ceiling))
 
 SYSTEM_PROMPT = (
     "You are an authorized MCP security assessor working INSIDE an isolated, disposable sandbox "
@@ -238,19 +266,26 @@ def _do_mcp_call(client, action: dict) -> str:
 
 
 def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor | None = None,
-              model: ChatModel | None = None, mcp_client=None, max_steps: int = MAX_STEPS,
-              with_context: bool = True) -> AgentResult:
-    """Drive the ReAct assessment loop. Safe by default: executor defaults to DryRun (no execution).
-    The agent can exercise the target's MCP tools directly via `mcp_call` (that is where MCP vulns
-    are). Pass DockerExecutor for real sandboxed shell. Claimed findings are returned UNCONFIRMED —
-    the ground-truth oracle decides what counts (zero-false-positive guarantee)."""
+              model: ChatModel | None = None, mcp_client=None, policy: AgentPolicy | None = None,
+              max_steps: int | None = None, with_context: bool = True) -> AgentResult:
+    """Drive the ReAct assessment loop. The agent is in charge of when it is DONE: it runs until it
+    CONCLUDES (decides the surface is assessed) or CONVERGES (no new coverage for policy.patience
+    steps). The step budget scales with the target's surface and is only a safety/cost ceiling — not a
+    magic constant. `policy` (or per-org/role policy from the platform API) governs all of that;
+    `max_steps` is a convenience override. Safe by default (shell = DryRun). Claimed findings are
+    returned UNCONFIRMED — the ground-truth oracle decides what counts (zero-false-positive)."""
     executor = executor or DryRunExecutor()
     model = model or get_chat_model()
+    policy = policy or AgentPolicy.from_env()
+    if max_steps is not None:
+        from dataclasses import replace
+        policy = replace(policy, max_steps=max_steps)
     if mcp_client is None:
         from mcp_rt.mcp_client import MCPClient
         mcp_client = MCPClient(target)
 
-    context, _tools = build_target_context(target, client=mcp_client) if with_context else ("", [])
+    context, tools = build_target_context(target, client=mcp_client) if with_context else ("", [])
+    budget = policy.budget(len(tools))             # scales with the attack surface; ceiling-capped
     task = task or (f"Assess the MCP server launched by `{target}` for real, reproducible "
                     "vulnerabilities (authorized, sandboxed). Drive its tools with adversarial inputs, "
                     "read each observation, and conclude with evidence-backed findings only.")
@@ -259,10 +294,12 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
 
     res = AgentResult(target=target)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
+    seen, stale = set(), 0                         # coverage set + steps since last new coverage
 
-    for step in range(1, max_steps + 1):
+    for step in range(1, budget + 1):
         res.steps = step
-        if step == max_steps:                     # spend the last step producing a verdict, not probing
+        final = step == budget or stale >= policy.patience   # budget edge OR converged -> wrap up
+        if final:
             messages.append({"role": "user", "content": _FINAL_NUDGE})
         reply = model.chat(messages)
         res.transcript.append({"role": "assistant", "content": reply[:2000]})
@@ -273,21 +310,28 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
             res.note = (f"agent concluded after {step} step(s); {len(res.agent_claimed)} claimed "
                         "finding(s) — require ground-truth confirmation before counting")
             break
+        if final:                                  # was told to wrap up but didn't — stop with a note
+            res.note = (f"stopped after {step} step(s): "
+                        + ("converged (no new coverage)" if stale >= policy.patience
+                           else f"surface budget reached ({budget})"))
+            break
         if kind == "mcp_call":
-            res.commands.append(f"mcp:{action.get('method')}:{action.get('name', action.get('uri', ''))}")
+            key = f"mcp:{action.get('method')}:{action.get('name', action.get('uri', ''))}"
+            res.commands.append(key)
             observation = _do_mcp_call(mcp_client, action)
         elif kind == "shell":
             cmd = action.get("command", "")
+            key = f"sh:{cmd}"
             res.commands.append(cmd)
             observation = executor.run(cmd) if cmd else "[no command]"
         else:
             messages.append({"role": "user", "content":
                              "Reply with ONE valid JSON action object (mcp_call, shell, or conclude)."})
             continue
+        stale = 0 if key not in seen else stale + 1   # progress = a new, distinct action
+        seen.add(key)
         messages.append({"role": "assistant", "content": reply[:2000]})
         messages.append({"role": "user", "content": f"Observation:\n{observation[:3000]}"})
-    else:
-        res.note = f"reached step limit ({max_steps}) without concluding"
     return res
 
 
@@ -301,7 +345,11 @@ def main(argv=None) -> int:
     p.add_argument("--docker", action="store_true",
                    help="execute in the hardened Docker sandbox (default: dry-run, executes nothing)")
     p.add_argument("--image", default=None, help="sandbox image (default mcp-rt:latest)")
-    p.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="override the step budget (default: scales with the target's surface, "
+                        "ceiling-capped; the agent normally stops by concluding or converging)")
+    p.add_argument("--patience", type=int, default=None,
+                   help="stop if no new coverage for this many steps (default from policy)")
     p.add_argument("--confirm", action="store_true",
                    help="after the agent concludes, confirm its claims against a ground-truth scan "
                         "(a claim counts only if the engine independently proves it)")
@@ -311,7 +359,11 @@ def main(argv=None) -> int:
     if args.docker:
         print("[authorized assessment] running in the hardened Docker sandbox (no network, "
               "non-root, read-only).", file=sys.stderr)
-    res = run_agent(args.target_stdio, executor=ex, max_steps=args.max_steps)
+    policy = AgentPolicy.from_env()
+    if args.patience is not None:
+        from dataclasses import replace
+        policy = replace(policy, patience=args.patience)
+    res = run_agent(args.target_stdio, executor=ex, policy=policy, max_steps=args.max_steps)
 
     confirmation = None
     if args.confirm and res.agent_claimed:
