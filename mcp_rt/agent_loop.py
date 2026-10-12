@@ -31,11 +31,19 @@ SYSTEM_PROMPT = (
     "You are an authorized MCP security assessor working INSIDE an isolated, disposable sandbox "
     "(no access to any real system or network beyond the target under test). Your job: assess the "
     "target MCP server for REAL, reproducible vulnerabilities, for responsible disclosure. "
+    "The most important thing you can do is DRIVE THE TARGET'S OWN MCP TOOLS with crafted inputs — "
+    "MCP vulnerabilities live there: path traversal in a file tool, SSRF in a fetch tool, command/arg "
+    "injection in an exec tool, SQL injection in a query tool, unsafe resource reads, oversharing.\n"
     "Work step by step. Each turn, reply with ONE JSON object and nothing else:\n"
-    '  {"thought":"...","action":"shell","command":"..."}  to run a command in the sandbox, or\n'
-    '  {"thought":"...","action":"conclude","findings":[{"class":"...","detail":"...","evidence":"..."}]}\n'
-    "Prefer minimal, targeted commands. A finding only counts if backed by concrete evidence; do not "
-    "claim a vulnerability you have not demonstrated. Conclude as soon as you have assessed the surface."
+    '  {"thought":"...","action":"mcp_call","method":"list_tools"}\n'
+    '  {"thought":"...","action":"mcp_call","method":"call_tool","name":"<tool>","arguments":{...}}\n'
+    '  {"thought":"...","action":"mcp_call","method":"read_resource","uri":"<uri>"}\n'
+    '  {"thought":"...","action":"shell","command":"..."}        (sandbox shell, for host-side checks)\n'
+    '  {"thought":"...","action":"conclude","findings":[{"class":"...","tool":"...","detail":"...","evidence":"..."}]}\n'
+    "Craft adversarial arguments (e.g. '../../../../etc/passwd', 'http://169.254.169.254/', "
+    "'$(id)', \"'; DROP TABLE--\") and READ THE OBSERVATION to see if the server actually did the "
+    "unsafe thing. A finding only counts if backed by concrete evidence from an observation; never "
+    "claim a vulnerability you have not demonstrated. Conclude once you have exercised the surface."
 )
 
 
@@ -96,18 +104,30 @@ class ChatModel:
 
 
 class MockChatModel(ChatModel):
-    """Offline, deterministic: inspects the surface once then concludes. For tests / no-key runs."""
+    """Offline, deterministic ReAct trace: list tools → probe the first one with a traversal arg →
+    conclude. Exercises the mcp_call path so no-key runs and tests are meaningful. For tests only."""
     name = "mock"
 
     def __init__(self):
         self._step = 0
+        self._first_tool = ""
 
     def chat(self, messages: list[dict]) -> str:
         self._step += 1
+        last = messages[-1]["content"] if messages else ""
         if self._step == 1:
-            return json.dumps({"thought": "enumerate the target's tools",
-                               "action": "shell", "command": "mcp-rt report --help"})
-        return json.dumps({"thought": "assessed; no demonstrated vulnerability",
+            return json.dumps({"thought": "enumerate the attack surface",
+                               "action": "mcp_call", "method": "list_tools"})
+        if self._step == 2:
+            try:                                            # grab a tool name from the observation
+                self._first_tool = (json.loads(last.split("Observation:\n", 1)[-1]) or [{}])[0].get("name", "")
+            except Exception:  # noqa: BLE001
+                self._first_tool = ""
+            if self._first_tool:
+                return json.dumps({"thought": "probe for path traversal", "action": "mcp_call",
+                                   "method": "call_tool", "name": self._first_tool,
+                                   "arguments": {"path": "../../../../etc/passwd"}})
+        return json.dumps({"thought": "assessed the surface; nothing demonstrated",
                            "action": "conclude", "findings": []})
 
 
@@ -163,15 +183,75 @@ def _parse_action(text: str) -> dict:
         return {}
 
 
+def build_target_context(target: str, *, client=None) -> tuple[str, list]:
+    """Give the agent the REAL attack surface up front: the target's actual tools + resources, plus
+    techniques recalled from prior ground-truth-confirmed attacks on similar tools (self-learning).
+    Returns (context_text, tools). Degrades to an honest note if the server can't be enumerated."""
+    lines, tools = [], []
+    try:
+        from mcp_rt.mcp_client import MCPClient
+        client = client or MCPClient(target)
+        tools = client.list_tools()
+        lines.append(f"TARGET SURFACE — {len(tools)} tool(s) you can call via mcp_call:")
+        for t in tools[:40]:
+            schema = t.get("input_schema") or {}
+            props = ", ".join((schema.get("properties") or {}).keys()) if isinstance(schema, dict) else ""
+            lines.append(f"  • {t['name']}({props}): {t.get('description', '')[:160]}")
+        resources = client.list_resources()
+        if resources:
+            lines.append(f"RESOURCES ({len(resources)}):")
+            for r in resources[:20]:
+                lines.append(f"  • {r['uri']} {r.get('name', '')}")
+    except Exception as exc:  # noqa: BLE001 — enumeration is best-effort; the agent can still shell
+        lines.append(f"(surface enumeration unavailable: {type(exc).__name__}: {str(exc)[:120]})")
+    try:
+        from mcp_rt.knowledge import recall_hints
+        hint = recall_hints([t["name"] for t in tools])
+        if hint:
+            lines.append("\nRECALLED — techniques proven on similar tools before (try these first):")
+            lines.append(hint)
+    except Exception:  # noqa: BLE001 — learning is optional
+        pass
+    return "\n".join(lines), tools
+
+
+def _do_mcp_call(client, action: dict) -> str:
+    """Dispatch one mcp_call action against the target; return the observation text."""
+    method = action.get("method", "")
+    try:
+        if method == "list_tools":
+            return json.dumps(client.list_tools())[:3000]
+        if method == "list_resources":
+            return json.dumps(client.list_resources())[:3000]
+        if method == "call_tool":
+            return client.call_tool(action.get("name", ""), action.get("arguments") or {})
+        if method == "read_resource":
+            return client.read_resource(action.get("uri", ""))
+        return f"[unknown mcp method {method!r}]"
+    except Exception as exc:  # noqa: BLE001 — a failing call is an observation, not a crash
+        return f"[mcp_call error] {type(exc).__name__}: {str(exc)[:200]}"
+
+
 def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor | None = None,
-              model: ChatModel | None = None, max_steps: int = MAX_STEPS) -> AgentResult:
+              model: ChatModel | None = None, mcp_client=None, max_steps: int = MAX_STEPS,
+              with_context: bool = True) -> AgentResult:
     """Drive the ReAct assessment loop. Safe by default: executor defaults to DryRun (no execution).
-    Pass DockerExecutor for real sandboxed runs. Claimed findings are returned unconfirmed."""
+    The agent can exercise the target's MCP tools directly via `mcp_call` (that is where MCP vulns
+    are). Pass DockerExecutor for real sandboxed shell. Claimed findings are returned UNCONFIRMED —
+    the ground-truth oracle decides what counts (zero-false-positive guarantee)."""
     executor = executor or DryRunExecutor()
     model = model or get_chat_model()
-    task = task or (f"Assess the MCP server launched by `{target}` for real vulnerabilities "
-                    "(authorized, sandboxed). Enumerate its tools, probe for issues, conclude with "
-                    "evidence-backed findings only.")
+    if mcp_client is None:
+        from mcp_rt.mcp_client import MCPClient
+        mcp_client = MCPClient(target)
+
+    context, _tools = build_target_context(target, client=mcp_client) if with_context else ("", [])
+    task = task or (f"Assess the MCP server launched by `{target}` for real, reproducible "
+                    "vulnerabilities (authorized, sandboxed). Drive its tools with adversarial inputs, "
+                    "read each observation, and conclude with evidence-backed findings only.")
+    if context:
+        task += "\n\n" + context
+
     res = AgentResult(target=target)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
 
@@ -186,15 +266,19 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
             res.note = (f"agent concluded after {step} step(s); {len(res.agent_claimed)} claimed "
                         "finding(s) — require ground-truth confirmation before counting")
             break
-        if kind == "shell":
+        if kind == "mcp_call":
+            res.commands.append(f"mcp:{action.get('method')}:{action.get('name', action.get('uri', ''))}")
+            observation = _do_mcp_call(mcp_client, action)
+        elif kind == "shell":
             cmd = action.get("command", "")
             res.commands.append(cmd)
             observation = executor.run(cmd) if cmd else "[no command]"
-            messages.append({"role": "assistant", "content": reply[:2000]})
-            messages.append({"role": "user", "content": f"Observation:\n{observation[:3000]}"})
         else:
             messages.append({"role": "user", "content":
-                             "Reply with a single valid JSON action object (shell or conclude)."})
+                             "Reply with ONE valid JSON action object (mcp_call, shell, or conclude)."})
+            continue
+        messages.append({"role": "assistant", "content": reply[:2000]})
+        messages.append({"role": "user", "content": f"Observation:\n{observation[:3000]}"})
     else:
         res.note = f"reached step limit ({max_steps}) without concluding"
     return res
