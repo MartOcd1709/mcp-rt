@@ -298,8 +298,10 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
         plan = build_plan(target, {"tools": tools}, model=model)
         res.plan = [p.as_dict() for p in plan.points]
         cover = max(cover, len(plan.points))
+        def _eg(pr):
+            return next(iter(pr.values()), "") if isinstance(pr, dict) else pr
         pts = "\n".join(f"  {i}. {p.target}.{p.param or '(name)'} — test {p.vuln_class} "
-                        f"e.g. {next(iter(p.probe.values()), '')}" for i, p in enumerate(plan.points, 1))
+                        f"e.g. {_eg(p.probe)}" for i, p in enumerate(plan.points, 1))
         plan_block = ("\n\nASSESSMENT PLAN — work EVERY point below with mcp_call, read each "
                       "observation, and record a finding for any that demonstrates the issue. Cover "
                       "them all before you conclude; add your own points if you spot more:\n" + pts)

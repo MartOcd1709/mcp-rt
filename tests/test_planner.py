@@ -49,6 +49,16 @@ def test_build_plan_coverage_over_a_surface():
     assert {"path_traversal", "command_injection", "ssrf"} <= set(cov["classes_covered"])
 
 
+def test_model_probe_as_string_is_normalized_to_dict():
+    # the LLM planner may return probe as a string/non-dict — must not crash downstream
+    class P:
+        def chat(self, m):
+            return '[{"target":"t","vuln_class":"ssrf","param":"url","probe":"http://169.254.169.254"}]'
+    plan = pl.build_plan("t", {"tools": []}, model=P())
+    pt = next(p for p in plan.points if p.source == "planner-model")
+    assert isinstance(pt.probe, dict) and pt.probe["url"] == "http://169.254.169.254"
+
+
 def test_model_augments_with_creative_points():
     class Planner:
         def chat(self, messages):

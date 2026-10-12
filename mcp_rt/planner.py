@@ -160,7 +160,10 @@ def _model_augment(target: str, tools: list, existing: list, model) -> list:
     out = []
     for d in raw if isinstance(raw, list) else []:
         if isinstance(d, dict) and d.get("target") and d.get("vuln_class"):
+            probe = d.get("probe")
+            if not isinstance(probe, dict):            # the model may return a string/list — normalize
+                probe = {str(d.get("param") or "input"): probe} if probe else {}
             out.append(TestPoint(target=str(d["target"]), vuln_class=str(d["vuln_class"]),
                                   param=str(d.get("param", "")), rationale=str(d.get("rationale", "")),
-                                  probe=d.get("probe") or {}, source="planner-model"))
+                                  probe=probe, source="planner-model"))
     return out
