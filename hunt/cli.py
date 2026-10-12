@@ -2,21 +2,45 @@
 
 Installed via `pip install -e .` (see pyproject [project.scripts]), then:
 
+  ASSESS ONE SERVER
+    mcp-rt check     --target-stdio "..."                     # ONE command: full scan + supply-chain + MCP-CAP, consolidated verdict
+    mcp-rt report    --target-stdio "..." [--exit-code] [--pdf]  # full VAPT + OWASP report (+PDF deliverable); `hunt` is an alias
     mcp-rt scan      --target-stdio "npx some-mcp-server"     # single credential-exfil scan
-    mcp-rt probe     --target-stdio "..."                     # the 5 impl-bug probes
+    mcp-rt probe     --target-stdio "..."                     # the stdio impl-bug probes (SSRF, injection, traversal, ...)
     mcp-rt token     --target-stdio "..."                     # token passthrough / confused deputy
-    mcp-rt report    --target-stdio "..." [--exit-code] [--pdf]  # full VAPT + OWASP report (+PDF deliverable)
-    mcp-rt attest    --target-stdio "..."                     # signed ground-truth attestation + badge (verify offline)
+    mcp-rt benchmark --target-stdio "..."                     # grade + scorecard vs OWASP MCP Top 10
     mcp-rt diff      --target-stdio "..."                     # re-test: RESOLVED / NEW / UNCHANGED vs last scan
-    mcp-rt benchmark --target-stdio "..."                     # grade + scorecard
-    mcp-rt sweep     [--cap N] [--max-downloads N]            # discover + benchmark the long tail
-    mcp-rt daily     [--cap N] [--plan] [--top-only]          # daily discovery + enrich (curated + fresh)
-    mcp-rt monitor   --from-ledger N | --targets "..."        # continuous re-scan + ALERT on new findings
-    mcp-rt ci        [--fail-on critical] [--sarif out.sarif] # CI gate: scan repo MCP configs -> SARIF
+    mcp-rt attest    --target-stdio "..."                     # signed ground-truth attestation + badge (verify offline)
+
+  HUNT THE UNDISCOVERED (novel-class legs)
+    mcp-rt hunt-cap  --target-stdio "..." [--record]         # MCP-CAP: undeclared-capability / consent-gap (strace sensor)
+    mcp-rt hunt-agent [--mock]                               # Advanced agent-in-the-loop red-team (intent-flow / MCP06)
+    mcp-rt redteam-live [--issue --timeout]                  # honeytoken-grounded LIVE agent red-team (MCP06)
+    mcp-rt supply    <path|launch-cmd>                       # MCP04: supply-chain / install-time code execution + OSV
+
+  AUTONOMOUS
+    mcp-rt agent     --target-stdio "..."                    # sandboxed ReAct assessment agent (ground-truth gated)
+    mcp-rt pentest   --target-stdio "..."                    # coordinated multi-agent assessment (plan->prove->refine)
+    mcp-rt assess    --target-stdio "..."                    # full lifecycle: scan/VA -> correlate -> remediate
+    mcp-rt assess-report                                     # triaged assessment report (markdown) from the ledger
+
+  DISCOVER & SCALE
+    mcp-rt discover  [--subnet ...]                          # "nmap for MCP": enumerate servers on host (consent-gated subnet)
+    mcp-rt hunt-all                                          # end-to-end: discover -> assess each -> correlate -> report
+    mcp-rt sweep     [--cap N] [--max-downloads N]           # discover + benchmark the long tail
+    mcp-rt daily     [--cap N] [--plan] [--top-only]         # daily discovery + enrich (curated + fresh)
+    mcp-rt monitor   --from-ledger N | --targets "..."       # continuous re-scan + ALERT on new findings
     mcp-rt fleet     --config team/.mcp.json | --targets "..." # whole-fleet report + supply-chain risk
-    mcp-rt remote    --url https://.../mcp --authorized-by "..."   # AUTHORIZED hosted-server scan
+
+  INTEGRATE / SHIP / INSPECT
+    mcp-rt ci        [--fail-on critical] [--sarif out.sarif] # CI gate: scan repo MCP configs -> SARIF
+    mcp-rt remote    --url https://.../mcp --authorized-by "..."   # AUTHORIZED hosted-server scan (consent-gated)
+    mcp-rt serve     [--host --port]                         # scan service + dashboard (localhost or VPS)
+    mcp-rt scorecard                                         # public HTML scorecard from the ledger (disclosure-safe)
+    mcp-rt registry  <folder>                               # build a static attestation registry
     mcp-rt stats                                             # canonical stats.json (single source of truth)
-    mcp-rt hunt      --target-stdio "..."                     # alias for report
+    mcp-rt db        [<table> [-n N]] [--backfill]           # inspect the findings DB without SQL
+    mcp-rt org                                               # platform tenant admin: create orgs, mint tokens
 
 One dispatcher over the hunt modules, so there is one product command, not a kit of scripts.
 """
