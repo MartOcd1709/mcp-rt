@@ -66,6 +66,21 @@ def validate(candidates: list, findings: list) -> ExecResult:
     return res
 
 
+def confirm_claims(claims: list, findings: list) -> dict:
+    """Confirm an agent's CLAIMED findings against ground-truth findings.
+
+    The autonomous agent *claims* vulnerabilities as it reasons; a claim becomes real ONLY if the
+    ground-truth scan independently proves a finding of that class. The agent's say-so is never a
+    verdict (preserves zero-FP even for a free-roaming agent)."""
+    proven = {f.get("cls") for f in findings}
+    confirmed, unconfirmed = [], []
+    for c in claims:
+        cls = c.get("class") or c.get("cls") or ""
+        (confirmed if cls in proven else unconfirmed).append(c)
+    return {"confirmed": confirmed, "unconfirmed": unconfirmed,
+            "note": f"{len(confirmed)}/{len(claims)} agent claim(s) confirmed by ground truth"}
+
+
 def execute(target: str, candidates: list, *, backend: str = "auto", scan_fn=None) -> ExecResult:
     """Run the ground-truth scan in the sandbox, then validate the candidates against it.
 

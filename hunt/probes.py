@@ -65,8 +65,14 @@ _FETCH_DESC = re.compile(r"fetch|http|request|download|url|web|crawl|scrape|curl
 # by-design, NOT a vuln. SSRF is a finding only when a tool that is NOT a general fetcher can
 # be steered to internal hosts. This gate prevents false positives on curl/fetch tools.
 _DEDICATED_FETCH = re.compile(
-    r"\bcurl\b|http request|https request|fetch (a |the )?url|fetch (the )?contents|"
-    r"web request|make .{0,12}request|download (a |the )?file|\bscrape\b|web ?search", re.I)
+    r"\bcurl\b|http request|https request|fetch\w* (a |an |the )?url|fetch\w* (the )?contents|"
+    r"web request|make .{0,12}request|download\w* (a |the )?file|\bscrape\b|web ?search", re.I)
+# A tool whose NAME is itself a general fetcher (fetch, curl, http_get, download, scrape, …):
+# reaching any URL is its purpose, so it is by-design, not SSRF. (Catches e.g. mcp-server-fetch,
+# whose tool is literally named `fetch` — a bare name _DEDICATED_FETCH's phrase patterns miss.)
+_FETCH_NAME = re.compile(
+    r"\b(fetch|curl|wget|download|scrape|crawl|http_?get|get_?url|open_?url|"
+    r"web_?(fetch|get|search|request)|url_?(fetch|get))\b", re.I)
 _CMD_DESC = re.compile(r"\brun\b|execute|shell|command|exec|spawn|subprocess|process", re.I)
 _READ_DESC = re.compile(r"read|open|file|path|document|load|\bcat\b|contents", re.I)
 _WRITE_DESC = re.compile(r"write|create|save|edit|append|\bput\b|modify", re.I)
@@ -235,7 +241,8 @@ async def probe_ssrf(session, tools) -> list[ProbeResult]:
                 out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,
                                        rationale="did not fetch the loopback URL"))
                 continue
-            dedicated = bool(_DEDICATED_FETCH.search((tool.description or "") + " " + tool.name))
+            desc = (tool.description or "") + " " + tool.name
+            dedicated = bool(_DEDICATED_FETCH.search(desc) or _FETCH_NAME.search(tool.name))
             follows = sink.hit(f"followed-{marker}")
             if dedicated:   # a general fetch/curl tool reaching a URL is its stated job — not a vuln
                 out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,

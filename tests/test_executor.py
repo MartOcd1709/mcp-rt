@@ -36,6 +36,16 @@ def test_prefers_same_tool_match():
     assert res.confirmed[0]["finding"]["tool"] == "run"
 
 
+def test_confirm_claims_only_counts_ground_truth():
+    claims = [{"class": "command_injection", "detail": "shell"},
+              {"class": "ssti", "detail": "template"}]          # agent claimed both
+    findings = [{"cls": "command_injection", "tool": "run"}]     # ground-truth proved only one
+    r = ex.confirm_claims(claims, findings)
+    assert [c["class"] for c in r["confirmed"]] == ["command_injection"]
+    assert [c["class"] for c in r["unconfirmed"]] == ["ssti"]    # agent's say-so is not a verdict
+    assert "1/2" in r["note"]
+
+
 def test_execute_uses_injected_scan():
     cands = [_c("ssrf", "fetch")]
     scan_fn = lambda target, backend: {"findings": [{"cls": "ssrf", "tool": "fetch"}]}

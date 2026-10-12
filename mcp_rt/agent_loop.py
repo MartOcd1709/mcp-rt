@@ -211,6 +211,9 @@ def main(argv=None) -> int:
                    help="execute in the hardened Docker sandbox (default: dry-run, executes nothing)")
     p.add_argument("--image", default=None, help="sandbox image (default mcp-rt:latest)")
     p.add_argument("--max-steps", type=int, default=MAX_STEPS)
+    p.add_argument("--confirm", action="store_true",
+                   help="after the agent concludes, confirm its claims against a ground-truth scan "
+                        "(a claim counts only if the engine independently proves it)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     ex = DockerExecutor(image=args.image) if args.docker else DryRunExecutor()
@@ -218,13 +221,29 @@ def main(argv=None) -> int:
         print("[authorized assessment] running in the hardened Docker sandbox (no network, "
               "non-root, read-only).", file=sys.stderr)
     res = run_agent(args.target_stdio, executor=ex, max_steps=args.max_steps)
+
+    confirmation = None
+    if args.confirm and res.agent_claimed:
+        from hunt.sandbox import run_isolated          # ground-truth oracle (sandboxed)
+        from hunt.executor import confirm_claims
+        report = run_isolated(args.target_stdio, backend="auto")
+        confirmation = confirm_claims(res.agent_claimed, report.get("findings", []) or [])
     if args.json:
-        print(json.dumps(res.as_dict(), indent=2))
+        d = res.as_dict()
+        d["confirmation"] = confirmation
+        print(json.dumps(d, indent=2))
     else:
         print(f"agent: {res.steps} step(s) · executor={ex.name} · commands issued={len(res.commands)}")
         print(f"note: {res.note}")
-        for f in res.agent_claimed:
-            print(f"  [claimed · UNCONFIRMED — needs ground-truth] {f.get('class')}: {str(f.get('detail',''))[:80]}")
+        if confirmation is not None:
+            print(f"ground-truth confirmation: {confirmation['note']}")
+            for f in confirmation["confirmed"]:
+                print(f"  [CONFIRMED ✓] {f.get('class')}: {str(f.get('detail',''))[:80]}")
+            for f in confirmation["unconfirmed"]:
+                print(f"  [unconfirmed] {f.get('class')}: {str(f.get('detail',''))[:80]}")
+        else:
+            for f in res.agent_claimed:
+                print(f"  [claimed · UNCONFIRMED — run --confirm] {f.get('class')}: {str(f.get('detail',''))[:80]}")
     return 0
 
 
