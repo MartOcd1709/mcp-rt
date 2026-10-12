@@ -25,7 +25,12 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-MAX_STEPS = int(os.getenv("MCPRT_AGENT_MAX_STEPS", "12"))
+MAX_STEPS = int(os.getenv("MCPRT_AGENT_MAX_STEPS", "16"))
+
+_FINAL_NUDGE = ("FINAL STEP — you are out of actions. Reply with ONLY a conclude action listing every "
+                "vulnerability you DEMONSTRATED with concrete evidence from an observation (empty list "
+                'if none): {"thought":"...","action":"conclude","findings":[{"class":"...","tool":"...",'
+                '"detail":"...","evidence":"..."}]}')
 
 SYSTEM_PROMPT = (
     "You are an authorized MCP security assessor working INSIDE an isolated, disposable sandbox "
@@ -257,6 +262,8 @@ def run_agent(target: str, *, task: str | None = None, executor: SandboxExecutor
 
     for step in range(1, max_steps + 1):
         res.steps = step
+        if step == max_steps:                     # spend the last step producing a verdict, not probing
+            messages.append({"role": "user", "content": _FINAL_NUDGE})
         reply = model.chat(messages)
         res.transcript.append({"role": "assistant", "content": reply[:2000]})
         action = _parse_action(reply)
@@ -315,6 +322,7 @@ def main(argv=None) -> int:
     if args.json:
         d = res.as_dict()
         d["confirmation"] = confirmation
+        d["transcript"] = res.transcript        # the model's step-by-step reasoning (thoughts+actions)
         print(json.dumps(d, indent=2))
     else:
         print(f"agent: {res.steps} step(s) · executor={ex.name} · commands issued={len(res.commands)}")

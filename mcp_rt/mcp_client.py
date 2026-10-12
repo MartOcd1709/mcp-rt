@@ -17,6 +17,7 @@ import asyncio
 import os
 import shlex
 import tempfile
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -41,7 +42,10 @@ class MCPClient:
     """Connect to an authorized stdio MCP target and call it. Methods are synchronous wrappers."""
 
     def __init__(self, target, *, env: dict | None = None, timeout: float = 30.0):
-        self.argv = shlex.split(target) if isinstance(target, str) else list(target)
+        raw = shlex.split(target) if isinstance(target, str) else list(target)
+        # We launch with cwd=a throwaway dir (isolation), so resolve any relative FILE arg to an
+        # absolute path first — otherwise `python path/to/server.py` can't be found from the temp cwd.
+        self.argv = [str(Path(a).resolve()) if (os.sep in a and Path(a).exists()) else a for a in raw]
         self.env = env
         self.timeout = timeout
 
