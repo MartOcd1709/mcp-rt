@@ -189,23 +189,69 @@ def normalize_class(c: str) -> str:
     return c
 
 
+# Which argument name a given vuln class is most likely injected into.
+_PARAM_HINTS = {
+    "path_traversal":    ("path", "file", "filepath", "filename", "doc", "document", "name"),
+    "ssrf":              ("url", "uri", "link", "endpoint", "src", "source", "address", "host"),
+    "ssti":              ("template", "message", "format", "pattern", "text", "content"),
+    "code_injection":    ("code", "script", "python", "expr", "expression", "snippet", "eval"),
+    "command_injection": ("cmd", "command", "exec", "run", "shell", "arg", "args"),
+    "sql_injection":     ("query", "sql", "search", "term", "keyword", "q", "filter"),
+}
+_BENIGN_BY_TYPE = {"string": "x", "integer": 1, "number": 1, "boolean": True, "array": [], "object": {}}
+
+
+def _resolve_attack_target(input_schema, vuln_class: str, declared_param: str = ""):
+    """From a tool's JSON input schema, pick the parameter this vuln class should be injected into,
+    and build benign values for the OTHER required args so the call doesn't fail on a missing field.
+    Returns (param, base_args). This is the fix for the confirm bridge: the agent's claim rarely
+    names the param, and without the real arg name the payload lands on a non-existent field and a
+    genuine bug is wrongly rejected. Degrades to the declared/empty param when no schema is present."""
+    schema = input_schema or {}
+    props = schema.get("properties") or {}
+    required = schema.get("required") or []
+    base_args = {n: _BENIGN_BY_TYPE.get((props.get(n) or {}).get("type", "string"), "x") for n in required}
+    if declared_param and declared_param in props:
+        return declared_param, base_args
+    string_props = [n for n, p in props.items() if (p or {}).get("type", "string") == "string"]
+    for hint in _PARAM_HINTS.get(vuln_class, ()):                 # 1) class-matched string arg
+        for n in string_props:
+            if hint in n.lower():
+                return n, base_args
+    for n in string_props:                                        # 2) first REQUIRED string arg
+        if n in required:
+            return n, base_args
+    if string_props:                                              # 3) any string arg
+        return string_props[0], base_args
+    if props:                                                     # 4) any arg at all
+        return next(iter(props)), base_args
+    return declared_param, base_args
+
+
 def confirm_claims(client, claims: list) -> OracleResult:
     """Confirm an AGENT's freely-chosen claims by RE-DEMONSTRATION. The agent picks any tool/input it
     likes; the oracle re-runs the right proof for each claim's (tool, class). This is free agentic
-    reach with a ground-truth gate — the agent's say-so is never the verdict."""
+    reach with a ground-truth gate — the agent's say-so is never the verdict. We resolve each tool's
+    real input schema so the re-demonstration hits the correct argument (zero-FP is preserved: the
+    pass condition in confirm() is unchanged, we only fix WHERE the payload is placed)."""
     res = OracleResult()
+    try:
+        schemas = {t["name"]: t.get("input_schema") for t in client.list_tools()}
+    except Exception:  # noqa: BLE001 — degrade to schema-less (prior behavior) if listing fails
+        schemas = {}
     seen = set()
     for cl in claims:
         tool = cl.get("tool") or cl.get("target") or ""
         cls = normalize_class(cl.get("class") or cl.get("cls") or cl.get("vuln_class") or "")
-        param = cl.get("param", "") if isinstance(cl.get("param", ""), str) else ""
+        declared = cl.get("param", "") if isinstance(cl.get("param", ""), str) else ""
         if not tool or not cls:
-            res.unconfirmed.append(Proof(tool, cls, False, "claim missing tool/class", "", param))
+            res.unconfirmed.append(Proof(tool, cls, False, "claim missing tool/class", "", declared))
             continue
+        param, base_args = _resolve_attack_target(schemas.get(tool), cls, declared)
         if (tool, cls, param) in seen:
             continue
         seen.add((tool, cls, param))
-        proof = confirm(client, tool, cls, param=param)
+        proof = confirm(client, tool, cls, param=param, base_args=base_args)
         (res.confirmed if proof.confirmed else res.unconfirmed).append(proof)
     return res
 
