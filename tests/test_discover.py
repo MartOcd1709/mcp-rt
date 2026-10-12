@@ -47,13 +47,55 @@ def test_network_scan_requires_authorization():
 
 
 def test_probe_detects_sse_endpoint(monkeypatch):
-    import socket
-    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: _Dummy())
-    import httpx
-    monkeypatch.setattr(httpx, "get", lambda *a, **k:
-                        type("R", (), {"headers": {"content-type": "text/event-stream"}, "text": ""})())
+    """SSE server: GET /sse returns text/event-stream -> matched 'open' by handshake, not substring."""
+    _patch_http(monkeypatch, lambda method, url: (200, "text/event-stream", False, "")
+                if method == "GET" and url.endswith("/sse") else (404, "text/html", False, ""))
     s = dc.probe_mcp_endpoint("127.0.0.1", 8085)
-    assert s and s.transport == "http" and "127.0.0.1:8085" in s.name
+    assert s and s.transport == "http" and s.state == "open"
+    assert s.name == "127.0.0.1:8085" and s.launch.endswith("/sse")
+
+
+def test_probe_rejects_non_mcp_page_mentioning_mcp(monkeypatch):
+    """Regression: a plain HTTP page whose body contains 'mcp'/'jsonrpc' must NOT be flagged.
+
+    The old code matched a bare 'mcp' substring (even a 404 'Cannot GET /mcp' page) — a false positive.
+    """
+    body = '<html>this mentions mcp and jsonrpc but is not a server</html>'
+    _patch_http(monkeypatch, lambda method, url: (200, "text/html", False, body))
+    assert dc.probe_mcp_endpoint("127.0.0.1", 9000) is None
+
+
+def test_probe_detects_protected_server(monkeypatch):
+    """A 401 carrying WWW-Authenticate is a PROTECTED MCP server (RFC 9728), still reported."""
+    _patch_http(monkeypatch, lambda method, url: (401, "application/json", True, ""))
+    s = dc.probe_mcp_endpoint("127.0.0.1", 8443)
+    assert s and s.state == "protected"
+
+
+# --- test plumbing: fake socket + httpx.Client.stream so probe logic runs with no real network ---
+def _patch_http(monkeypatch, responder):
+    import socket
+    import httpx
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: _Dummy())
+
+    class _Resp:
+        def __init__(self, method, url):
+            self.status_code, ct, self._www, self._body = responder(method, url)
+            self.headers = {"content-type": ct}
+            if self._www:
+                self.headers["www-authenticate"] = 'Bearer resource_metadata="x"'
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def iter_text(self): return iter([self._body] if self._body else [])
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def stream(self, method, url, **k): return _Resp(method, url)
+
+    monkeypatch.setattr(httpx, "Client", _Client)
 
 
 class _Dummy:

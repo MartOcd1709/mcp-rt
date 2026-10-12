@@ -38,10 +38,11 @@ class DiscoveredServer:
     transport: str = "stdio"      # "stdio" | "http"
     launch: str = ""              # the command (stdio) or URL (http) — safe to show
     env_keys: list = field(default_factory=list)   # declared env VAR NAMES only (values redacted)
+    state: str = "open"           # network only: "open" (reachable) | "protected" (401, auth required)
 
     def as_dict(self) -> dict:
         return {"name": self.name, "source": self.source, "transport": self.transport,
-                "launch": self.launch, "env_keys": self.env_keys}
+                "launch": self.launch, "env_keys": self.env_keys, "state": self.state}
 
 
 def _servers_from_obj(obj: dict) -> dict:
@@ -140,11 +141,33 @@ def discover(roots: list | None = None) -> list[DiscoveredServer]:
 # Loopback is free; scanning other hosts/subnets is active recon -> consent-gated.
 # --------------------------------------------------------------------------------------
 _COMMON_MCP_PORTS = [8080, 8000, 3000, 3001, 8001, 8085, 5000, 9000, 8888, 8765, 7860]
-_MCP_PATHS = ["/sse", "/mcp", "/"]
+# Streamable-HTTP / JSON-RPC mount points (POST), then SSE mount points (GET).
+_RPC_PATHS = ["/mcp", "/", "/api/mcp", "/v1/messages"]
+_SSE_PATHS = ["/sse", "/mcp", "/"]
+_PROTOCOL_VERSION = "2025-06-18"
 
 
-def probe_mcp_endpoint(host: str, port: int, timeout: float = 1.0) -> DiscoveredServer | None:
-    """Return a DiscoveredServer if host:port looks like an MCP server (SSE or JSON-RPC), else None."""
+def _rpc_body(method: str) -> dict:
+    params = {"protocolVersion": _PROTOCOL_VERSION, "capabilities": {},
+              "clientInfo": {"name": "mcp-rt-discover", "version": "1"}}
+    return {"jsonrpc": "2.0", "id": 1, "method": method,
+            "params": params if method == "initialize" else {}}
+
+
+def _looks_like_mcp_rpc(body: str) -> bool:
+    """A JSON-RPC handshake reply that is specifically MCP (not just any JSON-RPC)."""
+    b = body.lower()
+    return '"jsonrpc"' in b and ('"serverinfo"' in b or '"protocolversion"' in b
+                                 or '"supportedversions"' in b or '"capabilities"' in b)
+
+
+def probe_mcp_endpoint(host: str, port: int, timeout: float = 1.5) -> DiscoveredServer | None:
+    """Fingerprint host:port by the MCP protocol HANDSHAKE (not a banner or substring).
+
+    Order: POST `initialize`/`server/discover` (streamable-HTTP + spec-2026-07-28), then GET for an
+    SSE content-type. A 401/403 carrying WWW-Authenticate is a PROTECTED MCP server (RFC 9728).
+    Never reads an event-stream body (it may never end) — the content-type header is the signal.
+    """
     import socket
     try:                                       # cheap TCP pre-check before any HTTP
         with socket.create_connection((host, port), timeout=timeout):
@@ -153,18 +176,56 @@ def probe_mcp_endpoint(host: str, port: int, timeout: float = 1.0) -> Discovered
         return None
     import httpx
     base = f"http://{host}:{port}"
-    for path in _MCP_PATHS:
-        try:
-            r = httpx.get(base + path, timeout=timeout, headers={"Accept": "text/event-stream"})
-            ct = r.headers.get("content-type", "")
-            body = (r.text or "")[:400].lower()
-            if "text/event-stream" in ct or ("jsonrpc" in body or "protocolversion" in body
-                                             or "mcp" in body or "server-sent" in ct):
-                return DiscoveredServer(f"{host}:{port}", "network probe", "http",
-                                        base + (path if path != "/" else "/mcp"))
-        except Exception:  # noqa: BLE001
-            continue
+
+    def hit(path: str, state: str) -> DiscoveredServer:
+        return DiscoveredServer(f"{host}:{port}", "network probe", "http", base + path, state=state)
+
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            for path in _RPC_PATHS:                                    # (1) JSON-RPC / streamable-HTTP
+                for method in ("server/discover", "initialize"):
+                    try:
+                        with client.stream("POST", base + path, json=_rpc_body(method),
+                                           headers={"Accept": "application/json, text/event-stream",
+                                                    "MCP-Protocol-Version": _PROTOCOL_VERSION}) as r:
+                            ct = r.headers.get("content-type", "")
+                            if r.status_code in (401, 403) and _has_www_auth(r.headers):
+                                return hit(path, "protected")
+                            if r.status_code == 200 and "text/event-stream" in ct:
+                                return hit(path, "open")              # streamable-HTTP replies via SSE
+                            body = _read_capped(r) if "json" in ct else ""
+                        if _looks_like_mcp_rpc(body):
+                            return hit(path, "open")
+                    except Exception:  # noqa: BLE001
+                        continue
+            for path in _SSE_PATHS:                                    # (2) SSE transport (header only)
+                try:
+                    with client.stream("GET", base + path,
+                                       headers={"Accept": "text/event-stream"}) as r:
+                        if r.status_code == 200 and "text/event-stream" in \
+                                r.headers.get("content-type", ""):
+                            return hit(path, "open")
+                        if r.status_code in (401, 403) and _has_www_auth(r.headers):
+                            return hit(path, "protected")
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001
+        return None
     return None
+
+
+def _has_www_auth(headers) -> bool:
+    return any(k.lower() == "www-authenticate" for k in headers)
+
+
+def _read_capped(r, cap: int = 2048) -> str:
+    """Read at most `cap` bytes of a NON-stream (JSON) body so a slow peer can't hang us."""
+    buf = ""
+    for chunk in r.iter_text():
+        buf += chunk
+        if len(buf) >= cap:
+            break
+    return buf[:cap]
 
 
 def discover_localhost(ports: list | None = None) -> list[DiscoveredServer]:
@@ -227,7 +288,8 @@ def main(argv=None) -> int:
         return 0
     print(f"discovered {len(servers)} MCP server(s) on this host:\n")
     for s in servers:
-        line = f"  {s.name:24} [{s.transport}]  {s.launch}"
+        tag = f"[{s.transport}]" + (" 🔒auth" if s.state == "protected" else "")
+        line = f"  {s.name:24} {tag}  {s.launch}"
         if s.env_keys:
             line += f"   (env: {', '.join(s.env_keys)} = ***redacted***)"
         print(line + f"\n      └─ {s.source}")
