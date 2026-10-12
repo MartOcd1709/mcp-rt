@@ -40,6 +40,44 @@ def test_dedup_and_empty(tmp_path):
     assert dc.discover_configs(home=tmp_path / "empty") == []
 
 
+def test_redacts_secrets_in_command_lines():
+    assert "sk-live-abcdef123456" not in dc._redact("npx server --api-key sk-live-abcdef123456")
+    assert "ghp_" not in dc._redact("node s.js ghp_0123456789abcdef0123")
+    assert "TOKEN=" in dc._redact("TOKEN=supersecretvalue node s.js")        # name kept
+    assert "supersecretvalue" not in dc._redact("TOKEN=supersecretvalue node s.js")  # value gone
+
+
+def test_process_discovery_finds_live_server_and_redacts(monkeypatch):
+    import subprocess
+    ps = ("ps\n/usr/bin/node /x/server-filesystem-mcp --token sk-abcdef123456\n"
+          "uvx some-mcp-server --port 9\n/usr/bin/firefox\n")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": ps})())
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda x: "/usr/bin/ps")
+    found = dc.discover_processes()
+    launches = " ".join(s.launch for s in found)
+    assert any("server-filesystem-mcp" in s.name for s in found)
+    assert "sk-abcdef123456" not in launches                 # token redacted
+    assert "firefox" not in launches                         # non-MCP process ignored
+
+
+def test_persist_discovery_upserts_assets(tmp_path):
+    from hunt.findings_db import DB
+    db = DB(tmp_path / "cmdb.db")
+    servers = [dc.DiscoveredServer("fs", "/h/.cursor/mcp.json", "stdio", "npx -y @mcp/fs /tmp",
+                                   env_keys=["API_KEY"]),
+               dc.DiscoveredServer("127.0.0.1:3001", "network probe", "http",
+                                   "http://127.0.0.1:3001/sse", state="open")]
+    assert dc.persist_discovery(servers, db=db) == 2
+    dc.persist_discovery(servers, db=db)                     # idempotent — no duplicate rows
+    rows = db.conn.execute("SELECT name, source, meta FROM targets").fetchall()
+    assert len(rows) == 2
+    metas = " ".join(r["meta"] for r in rows)
+    assert "stdio" in metas and "http" in metas and "API_KEY" in metas   # full asset detail stored
+    db.close()
+
+
 def test_network_scan_requires_authorization():
     import pytest
     with pytest.raises(PermissionError):

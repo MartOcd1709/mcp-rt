@@ -51,6 +51,12 @@ def hunt_all(*, roots=None, localhost: bool = True, network: str | None = None,
             seen.add(k)
             uniq.append(s)
 
+    if save and uniq:                         # record the complete asset inventory FIRST (CMDB)
+        try:
+            _discover.persist_discovery(uniq)
+        except Exception:  # noqa: BLE001 — never let ledger write abort the assessment run
+            pass
+
     results, skipped = [], []
     for s in uniq:
         try:

@@ -20,15 +20,40 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # Known client config locations (home-level). Project-level files are found by walking --root.
+# Breadth matters: a server we never enumerate is a server we can never assess ("nothing missed").
 _HOME_CONFIGS = [
-    ".cursor/mcp.json", ".codex/config.toml", ".gemini/settings.json",
-    ".cline/data/settings/cline_mcp_settings.json",
-    ".config/Claude/claude_desktop_config.json",
-    "Library/Application Support/Claude/claude_desktop_config.json",
-    ".config/Code/User/settings.json", ".vscode/mcp.json",
+    ".cursor/mcp.json",                                            # Cursor
+    ".codex/config.toml",                                          # OpenAI Codex CLI
+    ".gemini/settings.json",                                       # Gemini CLI
+    ".cline/data/settings/cline_mcp_settings.json",                # Cline
+    ".roo/mcp.json",                                               # Roo Code
+    ".config/Claude/claude_desktop_config.json",                   # Claude Desktop (Linux)
+    "Library/Application Support/Claude/claude_desktop_config.json",  # Claude Desktop (macOS)
+    ".claude.json",                                                # Claude Code (user scope)
+    ".config/Code/User/settings.json", ".vscode/mcp.json",         # VS Code / Copilot
+    ".codeium/windsurf/mcp_config.json",                           # Windsurf
+    ".continue/config.json",                                       # Continue
+    ".config/zed/settings.json",                                   # Zed (context_servers)
+    ".aws/amazonq/mcp.json",                                       # Amazon Q
+    ".config/github-copilot/mcp.json",                             # Copilot CLI
+    ".witsy/mcp.json",                                             # Witsy
 ]
 _PROJECT_GLOBS = (".mcp.json", "mcp_settings.json", ".cursor/mcp.json",
-                  ".gemini/settings.json", ".vscode/mcp.json")
+                  ".gemini/settings.json", ".vscode/mcp.json", ".roo/mcp.json")
+
+# ---- Secret redaction: discovery must never surface a credential value, anywhere. ---------------
+_SECRET_ARG = re.compile(
+    r'(--?[\w-]*(?:key|token|secret|pass|pwd|auth|credential)[\w-]*[=\s]+|'
+    r'[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*=)(\S+)', re.I)
+_SECRET_VAL = re.compile(
+    r'\b(sk-[A-Za-z0-9_\-]{6,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[baprs]-[A-Za-z0-9-]{10,}|'
+    r'AKIA[0-9A-Z]{12,}|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-.]+)\b')
+
+
+def _redact(s: str) -> str:
+    """Mask credential-looking args/values in a command line before it is stored or shown."""
+    s = _SECRET_ARG.sub(lambda m: m.group(1) + "***redacted***", s)
+    return _SECRET_VAL.sub("***redacted***", s)
 
 
 @dataclass
@@ -124,9 +149,51 @@ def discover_packages() -> list[DiscoveredServer]:
     return out
 
 
+_PROC_HINT = re.compile(r"\b(npx|uvx|uv|node|python[0-9.]*|deno|bun)\b", re.I)
+
+
+def discover_processes() -> list[DiscoveredServer]:
+    """Running MCP-server processes — catches servers live on the box but in no config file we parse.
+
+    A real blind spot: a server started by hand, by a daemon, or by a client we don't know about shows
+    up here and nowhere else. Command lines are redacted (a token passed as an arg never leaks)."""
+    import shutil
+    import subprocess
+    if not shutil.which("ps"):
+        return []
+    try:
+        txt = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    out, seen = [], set()
+    for line in txt.splitlines():
+        cmd = line.strip()
+        low = cmd.lower()
+        if "mcp" not in low or not _PROC_HINT.search(low):
+            continue
+        if "mcp-rt" in low or "hunt.cli" in low or "discover" in low:   # don't flag ourselves
+            continue
+        safe = _redact(cmd)[:300]
+        if safe in seen:
+            continue
+        seen.add(safe)
+        out.append(DiscoveredServer(_proc_name(cmd), "running process", "stdio", safe))
+    return out
+
+
+def _proc_name(cmd: str) -> str:
+    """Best-effort server name from a process command line: the arg that names the MCP package."""
+    for tok in cmd.split():
+        t = tok.strip("'\"")
+        if "mcp" in t.lower() and not _PROC_HINT.fullmatch(t):
+            return t.rsplit("/", 1)[-1][:60]
+    return (cmd.split() or ["mcp-process"])[0].rsplit("/", 1)[-1][:60]
+
+
 def discover(roots: list | None = None) -> list[DiscoveredServer]:
-    """Full host inventory: configured servers + installed packages (deduped by name+launch)."""
-    all_ = discover_configs(roots=roots) + discover_packages()
+    """Full host inventory: configured servers + installed packages + running processes
+    (deduped by name+launch). The complete local asset surface, before any assessment."""
+    all_ = discover_configs(roots=roots) + discover_packages() + discover_processes()
     seen, uniq = set(), []
     for s in all_:
         k = (s.name, s.launch)
@@ -254,12 +321,32 @@ def discover_network(cidr: str, *, authorized_by: str, ports: list | None = None
     return found
 
 
+def persist_discovery(servers: list[DiscoveredServer], *, db=None) -> int:
+    """Align the discovered inventory to the CMDB: upsert every asset as a target (idempotent),
+    stamping transport/state/source/env-key-names into meta and refreshing last_seen. This is the
+    asset ledger the vulnerability-discovery stage then works from — nothing found is left unrecorded."""
+    import json as _json
+    from hunt.findings_db import DB
+    close = db is None
+    db = db or DB()
+    try:
+        for s in servers:
+            db.add_target(name=s.name, install_cmd=s.launch,
+                          source=f"discover:{s.transport}:{Path(s.source).name or s.source}",
+                          meta=_json.dumps(s.as_dict()))
+        return len(servers)
+    finally:
+        if close:
+            db.close()
+
+
 def main(argv=None) -> int:
     import argparse
     import os
     import sys
     p = argparse.ArgumentParser(prog="mcp-rt discover",
-                                description="Discover MCP servers on this host (configs + packages)")
+                                description="Discover MCP servers on this host (configs + packages + "
+                                            "running processes), optionally the network")
     p.add_argument("--root", action="append", default=[os.getcwd()],
                    help="project dir to also scan for .mcp.json etc. (repeatable)")
     p.add_argument("--no-localhost", action="store_true",
@@ -268,6 +355,8 @@ def main(argv=None) -> int:
                    help="scan a subnet for MCP endpoints, e.g. 192.168.1.0/24 (ACTIVE RECON)")
     p.add_argument("--authorized-by", default="",
                    help="REQUIRED for --network: who authorized scanning this network")
+    p.add_argument("--save", action="store_true",
+                   help="persist the discovered assets to the CMDB ledger (one target per asset)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
@@ -280,6 +369,9 @@ def main(argv=None) -> int:
         except PermissionError as e:
             print(f"refused: {e}", file=sys.stderr)
             return 2
+    if args.save and servers:
+        n = persist_discovery(servers)
+        print(f"recorded {n} asset(s) to the CMDB ledger.", file=sys.stderr)
     if args.json:
         print(json.dumps([s.as_dict() for s in servers], indent=2))
         return 0
