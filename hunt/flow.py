@@ -19,6 +19,11 @@ _PHASE_HINTS = [
     ("proving", ("prove", "validation")),
     ("proven", ("prove", "validation")),
     ("refiner", ("refine", "coordinator")),
+    ("mcp-cap", ("prove", "validation")),
+    ("undeclared-capability", ("prove", "validation")),
+    ("agent", ("prove", "exploit")),
+    ("lead", ("prove", "recon")),
+    ("probe", ("prove", "validation")),
     ("correlat", ("correlate", "coordinator")),
     ("persist", ("report", "coordinator")),
 ]
@@ -41,12 +46,14 @@ def run_flow(store, org_id: int, target: str, *, tier: str = "basic") -> int:
 
 
 def run_flow_into(store, flow_id: int, target: str, *, tier: str = "basic") -> None:
-    """Run the engine into an EXISTING flow id. Split from run_flow so the web layer can create
-    the flow, return its id immediately, then drive this in a background thread while an SSE
-    endpoint tails the persisted trace. Persists the full step trace + final verdict. The engine
-    is injected at call time (`mcp_rt.assessment.run_assessment`) so it stays testable."""
-    from mcp_rt import assessment as _assessment
+    """Run the engine into an EXISTING flow id, persisting the full step trace + final verdict.
+    Split from run_flow so the web layer can create the flow, return its id immediately, then drive
+    this in a background thread while an SSE endpoint tails the trace.
 
+    tier='basic'    -> fast deterministic coordinated loop (assessment.run_assessment).
+    tier='advanced' -> the COMPLETE assessment (assess_complete.run_complete): deterministic probes
+                       + MCP-CAP (MCP-00) + the AI autonomous agent, all oracle-gated. Deeper, slower,
+                       and where the AI + MCP-00 coverage lives."""
     store.set_flow_status(flow_id, "running")
     store.add_step(flow_id, f"flow started on {target} (tier={tier})", phase="discover", role="coordinator")
 
@@ -55,22 +62,44 @@ def run_flow_into(store, flow_id: int, target: str, *, tier: str = "basic") -> N
         store.add_step(flow_id, msg, phase=phase, role=role, kind=kind)
 
     try:
-        a = _assessment.run_assessment(target, progress=progress)
+        if tier == "advanced":
+            _run_advanced(store, flow_id, target, progress)
+        else:
+            _run_basic(store, flow_id, target, progress)
     except Exception as exc:  # noqa: BLE001 — a failed engagement is a recorded outcome, not a crash
         store.add_step(flow_id, f"error: {type(exc).__name__}: {str(exc)[:200]}",
                        phase="report", role="coordinator", kind="verdict")
         store.finish_flow(flow_id, status="error", verdict="ERROR")
-        return
 
-    # Record each ground-truth-PROVEN finding as its own verdict step (the audit trail).
-    for p in a.proven:
+
+def _run_basic(store, flow_id: int, target: str, progress) -> None:
+    from mcp_rt import assessment as _assessment     # imported at call time -> testable
+    a = _assessment.run_assessment(target, progress=progress)
+    for p in a.proven:                                # each ground-truth-PROVEN finding = an audit step
         store.add_step(flow_id,
                        f"PROVEN {p.get('vuln_class')} on {p.get('tool')}: {p.get('signal', '')}",
                        phase="prove", role="validation", kind="verdict")
     summary = {"findings": len(a.proven), "chains": len(a.chains), "rounds": a.rounds,
-               "points_tested": a.points_tested, "tools": len(a.tools)}
+               "points_tested": a.points_tested, "tools": len(a.tools), "tier": "basic"}
     store.add_step(flow_id, a.note, phase="report", role="coordinator", kind="verdict")
     store.finish_flow(flow_id, status="done", verdict=a.verdict, summary=summary)
+
+
+def _run_advanced(store, flow_id: int, target: str, progress) -> None:
+    from hunt.assess_complete import run_complete     # imported at call time -> testable
+    r = run_complete(target, progress=progress)
+    for f in r["findings"]:                           # ground-truth findings (decide the verdict)
+        store.add_step(flow_id, f"PROVEN {f['cls']} on {f['tool']}: {f.get('detail', '')}",
+                       phase="prove", role="validation", kind="verdict")
+    for lead in r["leads"]:                           # leads: observed, NOT ground-truthed -> not findings
+        store.add_step(flow_id,
+                       f"LEAD {lead['kind']} on {lead.get('tool', '')}: "
+                       f"{lead.get('observation', '')} (needs ground-truth confirmation)",
+                       phase="prove", role="recon", kind="progress")
+    summary = {"findings": len(r["findings"]), "leads": len(r["leads"]), "chains": len(r["chains"]),
+               "components": r["components"], "tier": "advanced"}
+    store.add_step(flow_id, r["note"], phase="report", role="coordinator", kind="verdict")
+    store.finish_flow(flow_id, status="done", verdict=r["verdict"], summary=summary)
 
 
 def render_flow(store, flow_id: int) -> str:
