@@ -445,6 +445,15 @@ def main(argv=None) -> int:
         orc = oracle.confirm_claims(client, res.agent_claimed)   # re-prove each freely-chosen claim
         confirmation = orc.as_dict()
         _emit(prog, f"ground truth: {confirmation['note']}")
+        try:                                                     # feed CONFIRMED wins back into the KG (self-learning)
+            from mcp_rt.knowledge import get_store
+            kg = get_store()
+            for p in orc.confirmed:                              # only ground-truth-proven, never a raw claim
+                kg.record(p.vuln_class, p.tool, outcome="confirmed", target=args.target_stdio)
+            if hasattr(kg, "close"):
+                kg.close()
+        except Exception:  # noqa: BLE001 — learning is optional; never fail a run over it
+            pass
     if args.json:
         d = res.as_dict()
         d["confirmation"] = confirmation
