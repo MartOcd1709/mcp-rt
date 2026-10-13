@@ -19,6 +19,21 @@ MCP-specialized, with one hard edge: **ground truth.** A finding is real because
 *proved* it (a honeytoken fired, a canary leaked) — never because an AI "thinks so." That edge is
 the moat. Every decision below protects it. Repo: `~/Desktop/mcp-rt`. Branch: `phase2-attestation-beachhead` (PR to `master`). Project state lives in memory `mcp_rt_scaling`.
 
+## ⭐ NORTH STAR — the ambition (hold every decision to it)
+
+Build the **complete MCP product, discovery → design.** Not a scanner that stops at a
+finding — the full lifecycle that carries a client from *discovering* their MCP exposure all
+the way to *designing* the secure fix: DISCOVER → SCAN/VA → EXPLOIT → CORRELATE → REPORT →
+**remediation / secure-design**. Finding the bug is half the product; delivering the design
+that closes it is the other half. Don't ship a stage that stops at "here's a problem."
+
+The goal is **category ownership** — the way phones mean Apple and AI means Claude, *MCP
+security means mcp-rt.* That's earned two ways, together: (1) **discover-and-disclose the
+novel protocol-00 classes first** (see `mcp-hunt` — first to find it → it enters everyone's
+checklist under our name), and (2) **ground-truth zero-FP**, which is what makes the name
+*trusted* rather than merely loud. Every build slice should move us toward being the name
+someone reaches for the moment they say "MCP."
+
 ## The lifecycle (the whole product is this loop)
 
 ```
