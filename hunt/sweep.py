@@ -222,17 +222,22 @@ def _verdict_for(cat: str) -> str:
 
 
 def _classify(reason: str) -> str:
-    """Bucket an INCONCLUSIVE reason so the denominator is honest (recoverable vs not-a-target)."""
+    """Bucket an INCONCLUSIVE reason so the denominator is honest (recoverable vs not-a-target).
+    Goal: almost nothing stays an opaque 'OTHER' — every inconclusive carries a real reason."""
     r = reason.lower()
-    if _NEEDS_SUB_RE.search(reason):
+    if _NEEDS_SUB_RE.search(reason) or "no command specified" in r:
         return "NEEDS_SUBCOMMAND"
-    if any(x in r for x in ("required environment", "client_id", "api key", "missing env",
-                            "must be set", "not configured", "credentials")):
+    if any(x in r for x in ("required environment", "client_id", "api key", "api_key", "missing env",
+                            "must be set", "not configured", "credentials", "specify a model",
+                            "set a default model", "--token", "token is", "bearer", "manquante",
+                            "令牌", "api-key", "auth", "connection string", "no connection", "--db",
+                            "环境变量", "未设置", "数据库", "getaddrinfo", "database file")):
         return "NEEDS_CONFIG"
     # Broken/incompatible package: Node module-resolution failures AND Python import failures
     # (e.g. "No module named 'mcp.server.fastmcp'" — a server pinned to the mcp 1.x API in our 2.x env).
-    if any(x in r for x in ("syntaxerror", "does not provide an export", "cannot find module",
-                            "err_module", "unexpected token",
+    if any(x in r for x in ("syntaxerror", "syntax error", "does not provide an export",
+                            "cannot find module", "err_module", "unexpected token", "invalid command",
+                            "err_package_path_not_exported", "schema is missing", "dynamic require of",
                             "no module named", "modulenotfounderror", "importerror")):
         return "BROKEN_PACKAGE"
     # npm package exposing multiple/ambiguous bins ("The following executables are available:") —
@@ -241,7 +246,15 @@ def _classify(reason: str) -> str:
         return "ENTRYPOINT_NOT_FOUND"
     if any(x in r for x in ("npm err", "404", "etarget", "install")):
         return "INSTALL_FAILED"
-    if "not found" in r:
+    # Server STARTED but we couldn't establish/complete an MCP session (handshake/transport error) —
+    # honest inconclusive: it ran, it just didn't speak clean MCP to us. Not a verdict on security.
+    if any(x in r for x in ("exceptiongroup", "taskgroup", "could not probe", "connection closed",
+                            "closedresource", "broken pipe", "mcperror", "err_invalid_url",
+                            "schema is mi", "transport", "reverse --url")):
+        return "PROTOCOL_ERROR"
+    if any(x in r for x in ("scan exceeded", "scan_timeout", "timeoutexpired", "timed out", "timeout")):
+        return "SCAN_TIMEOUT"
+    if any(x in r for x in ("not found", "enoent", "no such file")):
         return "ENTRYPOINT_NOT_FOUND"
     return "OTHER"
 
