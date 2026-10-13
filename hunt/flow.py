@@ -34,11 +34,19 @@ def _classify_step(msg: str) -> tuple[str, str, str]:
 
 
 def run_flow(store, org_id: int, target: str, *, tier: str = "basic") -> int:
-    """Create and run a flow to completion; return its id. Persists the full step trace + verdict.
-    The engine is injected at call time (`mcp_rt.assessment.run_assessment`) so it stays testable."""
+    """Create and run a flow to completion; return its id (CLI path)."""
+    flow_id = store.create_flow(org_id, target, tier)
+    run_flow_into(store, flow_id, target, tier=tier)
+    return flow_id
+
+
+def run_flow_into(store, flow_id: int, target: str, *, tier: str = "basic") -> None:
+    """Run the engine into an EXISTING flow id. Split from run_flow so the web layer can create
+    the flow, return its id immediately, then drive this in a background thread while an SSE
+    endpoint tails the persisted trace. Persists the full step trace + final verdict. The engine
+    is injected at call time (`mcp_rt.assessment.run_assessment`) so it stays testable."""
     from mcp_rt import assessment as _assessment
 
-    flow_id = store.create_flow(org_id, target, tier)
     store.set_flow_status(flow_id, "running")
     store.add_step(flow_id, f"flow started on {target} (tier={tier})", phase="discover", role="coordinator")
 
@@ -52,7 +60,7 @@ def run_flow(store, org_id: int, target: str, *, tier: str = "basic") -> int:
         store.add_step(flow_id, f"error: {type(exc).__name__}: {str(exc)[:200]}",
                        phase="report", role="coordinator", kind="verdict")
         store.finish_flow(flow_id, status="error", verdict="ERROR")
-        return flow_id
+        return
 
     # Record each ground-truth-PROVEN finding as its own verdict step (the audit trail).
     for p in a.proven:
@@ -63,7 +71,6 @@ def run_flow(store, org_id: int, target: str, *, tier: str = "basic") -> int:
                "points_tested": a.points_tested, "tools": len(a.tools)}
     store.add_step(flow_id, a.note, phase="report", role="coordinator", kind="verdict")
     store.finish_flow(flow_id, status="done", verdict=a.verdict, summary=summary)
-    return flow_id
 
 
 def render_flow(store, flow_id: int) -> str:

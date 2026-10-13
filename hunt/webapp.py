@@ -86,11 +86,33 @@ def _run_job(store: Store, job_id: str, org_id: int, target: str, tier: str, age
         _JOBS[job_id] = {"status": "error", "org_id": org_id, "target": target, "error": str(exc)[:300]}
 
 
+def _flow_sse(store, flow_id: int):
+    """Tail a flow's persisted step trace as Server-Sent Events until it ends. DB-polling by
+    design: no new pub/sub infra, decoupled from the worker thread, survives a restart — the
+    step trace is already durable (Phase A). ponytail: 0.6s poll, ~30-min ceiling; a push bus
+    is the upgrade if live latency ever matters."""
+    import json as _json
+    import time
+    last = -1
+    for _ in range(3000):
+        for s in store.flow_steps(flow_id):
+            if s["seq"] > last:
+                last = s["seq"]
+                yield f"event: step\ndata: {_json.dumps(s)}\n\n"
+        f = store.get_flow(flow_id)
+        if f and f["status"] in ("done", "error"):
+            yield ("event: done\ndata: "
+                   + _json.dumps({"status": f["status"], "verdict": f["verdict"],
+                                  "summary": f["summary"]}) + "\n\n")
+            return
+        time.sleep(0.6)
+
+
 def create_app(store: Store):
     import os
     import secrets as _secrets
     from fastapi import FastAPI, Header, HTTPException, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
     from starlette.middleware.sessions import SessionMiddleware
     from hunt.sso import configure_sso, sso_config
     app = FastAPI(title="mcp-rt", docs_url="/api/docs")
@@ -146,6 +168,53 @@ def create_app(store: Store):
         if not j or j.get("org_id") != org_id:        # never reveal another org's job
             return {"status": "unknown"}
         return j
+
+    # ---- flows: tracked, replayable, live-streamed assessments (Phase A/B) ---------------
+    def _owned_flow(flow_id: int, org_id: int):
+        f = store.get_flow(flow_id)
+        if not f or f.get("org_id") != org_id:        # tenancy: never reveal another org's flow
+            raise HTTPException(status_code=404, detail="flow not found")
+        return f
+
+    @app.post("/api/flow")
+    def start_flow(body: dict, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization, "member")          # running an assessment is a write
+        target = (body or {}).get("target", "").strip()
+        if not target:
+            return JSONResponse({"error": "target required"}, status_code=400)
+        tier = (body or {}).get("tier", "basic")
+        tier = tier if tier in ("basic", "advanced") else "basic"
+        from hunt.flow import run_flow_into
+        flow_id = store.create_flow(org_id, target, tier)        # created up front so we can return the id
+        threading.Thread(target=run_flow_into, args=(store, flow_id, target),
+                         kwargs={"tier": tier}, daemon=True).start()
+        return {"flow_id": flow_id}
+
+    @app.get("/api/flows")
+    def flows(request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization)
+        return {"flows": store.list_flows(org_id)}
+
+    @app.get("/api/flow/{flow_id}")
+    def flow_detail(flow_id: int, request: Request, authorization: str | None = Header(None)):
+        org_id = auth(request, authorization)
+        return {"flow": _owned_flow(flow_id, org_id), "steps": store.flow_steps(flow_id)}
+
+    @app.get("/api/flow/{flow_id}/stream")
+    def flow_stream(flow_id: int, request: Request, authorization: str | None = Header(None),
+                    access_token: str | None = None):
+        # EventSource can't set an Authorization header -> accept an SSO session OR ?access_token=.
+        hdr = authorization or (f"Bearer {access_token}" if access_token else None)
+        org_id, _ = _identity(request, hdr)
+        if org_id is None:
+            raise HTTPException(status_code=401, detail="auth required")
+        _owned_flow(flow_id, org_id)
+        return StreamingResponse(_flow_sse(store, flow_id), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/flow", response_class=HTMLResponse)
+    def flow_page():
+        return (here / "flow.html").read_text(encoding="utf-8")
 
     @app.get("/api/servers")
     def servers(request: Request, authorization: str | None = Header(None)):
