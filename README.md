@@ -50,7 +50,7 @@ the answer:
 
 ---
 
-## What it tests — 11 ground-truth classes + OWASP MCP Top 10
+## What it tests — 13 ground-truth classes + OWASP MCP Top 10
 
 | Class | CWE | What "VULNERABLE" means (proven) |
 |---|---|---|
