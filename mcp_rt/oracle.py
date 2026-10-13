@@ -94,9 +94,14 @@ def confirm(client, tool: str, vuln_class: str, *, param: str = "", base_args: d
         for pl in (f"x; echo {n}", f"$(echo {n})", f"`echo {n}`", f"| echo {n}",
                    f"ls && echo {n}", f"find . -maxdepth 0 && echo {n}", f"echo {n}"):
             obs = _call(client, tool, _with(base, param, pl))
-            if n in obs:
-                return Proof(tool, cls, True, f"injected command echoed nonce ({pl!r})", obs, param)
-        return Proof(tool, cls, False, "no injected command output", "", param)
+            # Confirm ONLY if the nonce appears AND the payload was NOT echoed back verbatim — a
+            # safe tool that returns its input as literal data (e.g. `echo <arg>`, no shell) would
+            # contain the nonce without any injection. Requiring the wrapper to be GONE means the
+            # shell actually ran it. (ponytail: a verbose tool that echoes the cmd *and* runs it
+            # reads as a false negative — we accept FN over FP, the zero-FP direction.)
+            if n in obs and pl not in obs:
+                return Proof(tool, cls, True, f"injected command executed, nonce emitted ({pl!r})", obs, param)
+        return Proof(tool, cls, False, "no injected command output (or input only echoed as data)", "", param)
 
     if cls == "code_injection":
         n = _nonce()
@@ -105,9 +110,11 @@ def confirm(client, tool: str, vuln_class: str, *, param: str = "", base_args: d
         for pl in (f"print('{n}')", f"__import__('sys').stdout.write('{n}')",
                    f"__import__('os').popen('echo {n}').read()", f"'{n}'", f"raise Exception('{n}')"):
             obs = _call(client, tool, _with(base, param, pl))
-            if n in obs:
+            # Same guard as command_injection: the nonce must appear AND the code payload must NOT
+            # be echoed back verbatim, or a tool that returns its input as data is a false positive.
+            if n in obs and pl not in obs:
                 return Proof(tool, cls, True, "code executed (nonce emitted / raised)", obs, param)
-        return Proof(tool, cls, False, "code not evaluated", "", param)
+        return Proof(tool, cls, False, "code not evaluated (or input only echoed as data)", "", param)
 
     if cls == "ssti":
         a, b = random.randint(100, 999), random.randint(100, 999)
