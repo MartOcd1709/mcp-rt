@@ -4,6 +4,7 @@ Installed via `pip install -e .` (see pyproject [project.scripts]), then:
 
   ASSESS ONE SERVER
     mcp-rt check     --target-stdio "..."                     # ONE command: full scan + supply-chain + MCP-CAP, consolidated verdict
+    mcp-rt flow      run --target-stdio "..." | list | show <id>  # end-to-end assessment as a tracked, replayable Flow (persisted step trace)
     mcp-rt report    --target-stdio "..." [--exit-code] [--pdf]  # full VAPT + OWASP report (+PDF deliverable); `hunt` is an alias
     mcp-rt scan      --target-stdio "npx some-mcp-server"     # single credential-exfil scan
     mcp-rt probe     --target-stdio "..."                     # the stdio impl-bug probes (SSRF, injection, traversal, ...)
@@ -81,6 +82,7 @@ _COMMANDS = {
     "supply": ("hunt.supply_chain", "main"),     # MCP04: supply-chain / install-time code execution
     "db": ("hunt.dbview", "main"),               # inspect the findings database without SQL
     "check": ("hunt.check", "main"),             # assess a server completely (scan + supply + MCP-CAP)
+    "flow": ("hunt.flow", "main"),               # end-to-end assessment as a tracked, replayable Flow
     "redteam-live": ("hunt.redteam_live", "main"),  # honeytoken-grounded live agent red-team (MCP06)
 }
 

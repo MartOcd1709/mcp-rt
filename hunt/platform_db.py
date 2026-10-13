@@ -123,6 +123,35 @@ def _change(prev: str | None, new: str) -> str:
     return "changed"
 
 
+class Flow(Base):
+    """One end-to-end MCP assessment engagement — the first-class product unit (Phase A).
+    Drives the ground-truth engine and accumulates a full, replayable step trace (FlowStep)."""
+    __tablename__ = "flows"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), index=True)
+    target: Mapped[str] = mapped_column(Text)
+    tier: Mapped[str] = mapped_column(String(20), default="basic")
+    status: Mapped[str] = mapped_column(String(16), default="queued")   # queued|running|done|error
+    verdict: Mapped[str] = mapped_column(String(20), default="")
+    summary: Mapped[str] = mapped_column(Text, default="{}")            # JSON: findings/chains/rounds counts
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+    finished_at: Mapped[str] = mapped_column(String(40), default="")
+
+
+class FlowStep(Base):
+    """One recorded step of a flow — reasoning, a tool call, or an oracle verdict. This replay/audit
+    trace is what makes a flow inspectable and, in Phase B, watchable live."""
+    __tablename__ = "flow_steps"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("flows.id"), index=True)
+    seq: Mapped[int] = mapped_column(default=0)
+    phase: Mapped[str] = mapped_column(String(20), default="")           # discover|plan|prove|refine|correlate|report
+    role: Mapped[str] = mapped_column(String(20), default="coordinator") # coordinator|recon|exploit|validation
+    kind: Mapped[str] = mapped_column(String(16), default="progress")    # progress|reasoning|verdict
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(40), default=_now)
+
+
 class Store:
     def __init__(self, url: str | None = None):
         url = url or os.getenv("DATABASE_URL") or _DEFAULT_URL
@@ -164,6 +193,66 @@ class Store:
             token = self._mint(s, org_id, role)
             s.commit()
             return token
+
+    # ---- flows (Phase A: the end-to-end assessment unit) -----------------------------
+    def create_flow(self, org_id: int, target: str, tier: str = "basic") -> int:
+        with Session(self.engine) as s:
+            f = Flow(org_id=org_id, target=target, tier=tier, status="queued")
+            s.add(f)
+            s.flush()
+            fid = f.id
+            s.commit()
+            return fid
+
+    def set_flow_status(self, flow_id: int, status: str) -> None:
+        with Session(self.engine) as s:
+            f = s.get(Flow, flow_id)
+            if f:
+                f.status = status
+                s.commit()
+
+    def add_step(self, flow_id: int, text: str, *, phase: str = "", role: str = "coordinator",
+                 kind: str = "progress") -> None:
+        with Session(self.engine) as s:
+            seq = len(s.scalars(select(FlowStep.id).where(FlowStep.flow_id == flow_id)).all())
+            s.add(FlowStep(flow_id=flow_id, seq=seq, phase=phase, role=role, kind=kind,
+                           text=(text or "")[:2000]))
+            s.commit()
+
+    def finish_flow(self, flow_id: int, *, status: str, verdict: str = "",
+                    summary: dict | None = None) -> None:
+        import json as _json
+        with Session(self.engine) as s:
+            f = s.get(Flow, flow_id)
+            if f:
+                f.status = status
+                f.verdict = verdict
+                f.summary = _json.dumps(summary or {})
+                f.finished_at = _now()
+                s.commit()
+
+    def get_flow(self, flow_id: int) -> dict | None:
+        with Session(self.engine) as s:
+            f = s.get(Flow, flow_id)
+            if not f:
+                return None
+            return {"id": f.id, "org_id": f.org_id, "target": f.target, "tier": f.tier,
+                    "status": f.status, "verdict": f.verdict, "summary": f.summary,
+                    "created_at": f.created_at, "finished_at": f.finished_at}
+
+    def flow_steps(self, flow_id: int) -> list[dict]:
+        with Session(self.engine) as s:
+            rows = s.scalars(select(FlowStep).where(FlowStep.flow_id == flow_id)
+                             .order_by(FlowStep.seq)).all()
+            return [{"seq": r.seq, "phase": r.phase, "role": r.role, "kind": r.kind,
+                     "text": r.text, "created_at": r.created_at} for r in rows]
+
+    def list_flows(self, org_id: int, limit: int = 50) -> list[dict]:
+        with Session(self.engine) as s:
+            rows = s.scalars(select(Flow).where(Flow.org_id == org_id)
+                             .order_by(Flow.id.desc()).limit(limit)).all()
+            return [{"id": r.id, "target": r.target, "tier": r.tier, "status": r.status,
+                     "verdict": r.verdict, "created_at": r.created_at} for r in rows]
 
     def org_for_token(self, token: str) -> int | None:
         org_id, _ = self.token_role(token)
