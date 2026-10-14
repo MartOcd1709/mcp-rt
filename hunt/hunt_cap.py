@@ -15,6 +15,7 @@ reports a false CLEAN.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -188,6 +189,22 @@ def strace_available() -> bool:
 STRACE_ARGV = ["strace", "-f", "-qq", "-e",
                "trace=network,openat,execve,unlink,unlinkat,rename,renameat,mkdir,mkdirat"]
 
+# Hard OS-level deadline for one strace-wrapped session (connect + list + one call + teardown),
+# env-overridable. A tool that blocks forever server-side (e.g. an adb tool waiting on a device)
+# can wedge Python-side context teardown, which no asyncio timeout can interrupt — so we also cap
+# the whole process tree with the `timeout` coreutil, which SIGTERMs then SIGKILLs. No per-tool logic.
+_CAP_SESSION_BUDGET_S = float(os.environ.get("MCPRT_CAP_SESSION_BUDGET_S", "25"))
+_CAP_CONNECT_TIMEOUT_S = float(os.environ.get("MCPRT_CONNECT_TIMEOUT_S", "30"))
+
+
+def _os_timeout_prefix(budget: float) -> list[str]:
+    """`timeout -k <grace> <budget> …` if the coreutil exists, else no-op. Guarantees the whole
+    strace+target+grandchild tree dies even if the client-side teardown blocks on a stuck child."""
+    import shutil
+    if shutil.which("timeout"):
+        return ["timeout", "-k", "5", str(int(budget))]
+    return []
+
 
 def run_cap_hunt(argv: list[str], env: dict | None = None, call_timeout: float = 10.0):
     """Live MCP-CAP hunt. Returns (status, hypotheses). status in {"OK","INCONCLUSIVE"}.
@@ -223,13 +240,15 @@ async def _trace_session(argv, env, call_timeout, call_tool_name, debug=False):
     from .probes import _build_args
 
     tracefile = tempfile.mktemp(prefix="mcprt_strace_", suffix=".log")
-    wrapped = STRACE_ARGV + ["-o", tracefile, "--"] + list(argv)
+    # OS-level hard deadline wraps strace, which wraps the target — a stuck server-side child can't
+    # outlive the budget even if client-side teardown blocks on it.
+    wrapped = _os_timeout_prefix(_CAP_SESSION_BUDGET_S) + STRACE_ARGV + ["-o", tracefile, "--"] + list(argv)
     params = StdioServerParameters(command=wrapped[0], args=wrapped[1:], env=env or dict(os.environ))
     tools_by_name = {}
     async with stdio_client(params) as (r, w):
         async with ClientSession(r, w) as session:
-            await session.initialize()
-            for t in (await session.list_tools()).tools:
+            await _asyncio.wait_for(session.initialize(), _CAP_CONNECT_TIMEOUT_S)
+            for t in (await _asyncio.wait_for(session.list_tools(), _CAP_CONNECT_TIMEOUT_S)).tools:
                 tools_by_name[t.name] = t
             if call_tool_name and call_tool_name in tools_by_name:
                 try:
