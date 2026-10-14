@@ -63,7 +63,7 @@ class MCPClient:
     def list_tools(self) -> list[dict]:
         async def f(s):
             return [{"name": t.name, "description": (t.description or "")[:400],
-                     "input_schema": getattr(t, "inputSchema", None)}
+                     "input_schema": getattr(t, "input_schema", None) or getattr(t, "inputSchema", None)}
                     for t in (await s.list_tools()).tools]
         return self._run(f)
 
