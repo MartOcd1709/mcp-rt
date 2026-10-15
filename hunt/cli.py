@@ -88,7 +88,19 @@ _COMMANDS = {
 }
 
 
+def _install_graceful_sigterm() -> None:
+    """Turn SIGTERM into KeyboardInterrupt so `async with stdio_client(...)` unwinds and
+    terminates the spawned target server, instead of leaving it orphaned on a hard kill.
+    No-op off the main thread / where signals are unsupported."""
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    except (ValueError, OSError):
+        pass
+
+
 def main(argv=None) -> int:
+    _install_graceful_sigterm()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in ("-h", "--help", "help"):
         print("mcp-rt — MCP security engine\nusage:" + _USAGE)

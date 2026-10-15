@@ -103,7 +103,12 @@ _SQL_FALSE = re.compile(r"fts5|full[- ]?text|\bMATCH\b|fts: ", re.I)
 
 
 def _schema(tool) -> dict:
-    return tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+    # SDK-agnostic: the MCP Python SDK renamed Tool.inputSchema -> input_schema in 2.x.
+    # Read whichever the installed SDK exposes so a version bump never crashes the scan.
+    s = getattr(tool, "input_schema", None)
+    if not isinstance(s, dict):
+        s = getattr(tool, "inputSchema", None)
+    return s if isinstance(s, dict) else {}
 
 
 def _str_params(tool) -> list[str]:
@@ -616,7 +621,7 @@ async def probe_rug_pull(session, tools) -> list[ProbeResult]:
     import hashlib
 
     def h(t):
-        body = (t.description or "") + json.dumps(t.inputSchema or {}, ensure_ascii=False, sort_keys=True)
+        body = (t.description or "") + json.dumps(_schema(t), ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(body.encode()).hexdigest()
 
     before = {t.name: h(t) for t in tools}
@@ -777,6 +782,24 @@ def _unwrap(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}".strip().rstrip(":").strip()[:200]
 
 
+# Timeouts (seconds), env-overridable — no per-tool/per-server special-casing. A single slow or
+# hanging tool must never wedge the whole scan, and a stuck connect must not hang forever.
+_CALL_TIMEOUT_S = float(os.environ.get("MCPRT_CALL_TIMEOUT_S", "20"))
+_CONNECT_TIMEOUT_S = float(os.environ.get("MCPRT_CONNECT_TIMEOUT_S", "30"))
+
+
+def _guard_call_tool(session, timeout: float) -> None:
+    """Bound every tool call on this session by `timeout`. Probes already treat a raised
+    exception as 'no result' and move on, so a hung tool is skipped, not fatal. One wrap
+    here covers all call sites — no per-tool logic."""
+    original = session.call_tool
+
+    async def guarded(*args, **kwargs):
+        return await asyncio.wait_for(original(*args, **kwargs), timeout)
+
+    session.call_tool = guarded
+
+
 async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                       surface: dict | None = None) -> list[ProbeResult]:
     # Spawn the target in a throwaway cwd so any stray write (by the server or a payload) lands
@@ -796,11 +819,13 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     try:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:
-                await s.initialize()
-                tools = (await s.list_tools()).tools
+                # Bound connect/handshake so an unresponsive server fails fast instead of hanging.
+                await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
+                _guard_call_tool(s, _CALL_TIMEOUT_S)
+                tools = (await asyncio.wait_for(s.list_tools(), _CONNECT_TIMEOUT_S)).tools
                 if surface is not None:          # inventory the attack surface in-session (no 2nd connect)
                     surface["tools"] = [{"name": t.name,
-                                         "params": sorted((getattr(t, "inputSchema", None) or {}).get("properties", {}))}
+                                         "params": sorted(_schema(t).get("properties", {}))}
                                         for t in tools]
                     try:
                         surface["resources"] = [str(getattr(r, "uri", getattr(r, "name", "")))
@@ -818,7 +843,13 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                         except Exception as le:  # noqa: BLE001
                             surface["auth_gated"] = is_auth_error(str(le))
                 for probe in (probes or ALL_PROBES):
-                    results.extend(await probe(s, tools))
+                    # Isolate each probe: a timeout or error in one class must not discard the
+                    # verdicts already gathered by the others. Partial coverage beats no result.
+                    try:
+                        results.extend(await probe(s, tools))
+                    except Exception as pe:  # noqa: BLE001
+                        results.append(ProbeResult(getattr(probe, "__name__", "probe"), "-", "NOT_RUN",
+                                                   rationale=f"probe aborted: {_unwrap(pe) or type(pe).__name__}"))
     except Exception as exc:   # unwrap anyio/TaskGroup noise into a readable root cause (timeouts/cancel still propagate)
         raise ScanError(_unwrap(exc) or f"{type(exc).__name__}: {exc}"[:200]) from exc
     finally:
