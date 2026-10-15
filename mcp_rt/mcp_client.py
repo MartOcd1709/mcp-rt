@@ -158,7 +158,7 @@ class StatelessHTTPClient:
             m["io.modelcontextprotocol/clientInfo"] = self.client_info
         return m
 
-    def _headers(self, method: str, params: dict) -> dict:
+    def _headers(self, method: str, params: dict, extra_headers: dict | None = None) -> dict:
         h = {"Content-Type": "application/json",
              "Accept": "application/json, text/event-stream",   # spec: MUST offer both
              "MCP-Protocol-Version": _PV_2026,                   # MUST equal _meta protocolVersion
@@ -166,12 +166,15 @@ class StatelessHTTPClient:
         src = _NAME_SRC.get(method)
         if src and params.get(src) is not None:
             h["Mcp-Name"] = _hdr_value(str(params[src]))         # MUST equal params.name / params.uri
+        if extra_headers:
+            h.update(extra_headers)                              # e.g. Authorization (principal) for red-team
         return h
 
-    def _post(self, method: str, params: dict) -> dict:
+    def _post(self, method: str, params: dict, extra_headers: dict | None = None) -> dict:
         body = {"jsonrpc": "2.0", "id": self._next_id(), "method": method,
                 "params": {**params, "_meta": self._meta()}}
-        r = httpx.post(self.url, json=body, headers=self._headers(method, params), timeout=self.timeout)
+        r = httpx.post(self.url, json=body, headers=self._headers(method, params, extra_headers),
+                       timeout=self.timeout)
         r.raise_for_status()
         return r.json() or {}
 
@@ -209,6 +212,24 @@ class StatelessHTTPClient:
         if "ttlMs" in result or "cacheScope" in result:  # read + record list-caching hints (no exploit)
             self.cache_hints[method] = {"ttlMs": result.get("ttlMs"), "cacheScope": result.get("cacheScope")}
         return result
+
+    # ---- low-level MRTR control (T2+): drive the round-trip by hand, byte-for-byte ----
+    def begin(self, method: str, params: dict, *, extra_headers: dict | None = None) -> dict:
+        """Send the FIRST leg and return the raw result dict (incl. `resultType`/`requestState`),
+        without auto-resuming. Lets an attack probe capture + manipulate `requestState`."""
+        return self._post(method, dict(params), extra_headers).get("result") or {}
+
+    def resume(self, method: str, params: dict, *, request_state=None, input_responses: dict | None = None,
+               extra_headers: dict | None = None) -> dict:
+        """Send a crafted retry with a caller-chosen `requestState` and `inputResponses`. The transport
+        client echoes exactly; T2's probe is a MALICIOUS client that deliberately tampers/reuses the
+        state to test server validation (spec: a conformant client MUST NOT modify it)."""
+        retry = dict(params)
+        if input_responses is not None:
+            retry["inputResponses"] = input_responses
+        if request_state is not None:
+            retry["requestState"] = request_state
+        return self._post(method, retry, extra_headers).get("result") or {}
 
     # ---- transport-agnostic surface (mirrors MCPClient) ----
     def list_tools(self) -> list[dict]:
