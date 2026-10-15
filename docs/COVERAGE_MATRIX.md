@@ -1,108 +1,93 @@
-# MCP Attack-Surface Coverage Matrix ("nothing missed")
+# MCP Attack-Surface Coverage Matrix — single source of truth
 
-**Purpose.** As a security *product* we cannot have blind spots. This living document maps the
-entire **known MCP attack surface** against what mcp-rt actually tests, so every category is one of:
-✅ **covered** (which payload/probe), 🟡 **partial**, or ⛔ **gap** (→ Block 0b backlog).
+> GENERATED from `mcp_rt/taxonomy.py` (T5 / SAM1-17). Do not hand-edit — edit the taxonomy and regenerate.
+> COVERED means a zero-FP proof exists (vuln+safe fixture/test). PARTIAL/PLANNED/N-A are shown openly;
+> we never claim zero unknown-unknowns.
 
-**Honest scope.** This is *systematically exhaustive against the documented surface* (the published
-MCP-38 academic taxonomy + OWASP MCP Top 10 + our ground-truth classes), **plus a continuous process
-for new threats** (threat-intel loop + AI-generated runtime payloads). It is **not** a literal
-"zero gaps forever" guarantee — the threat landscape moves, and we say so.
+**Canonical items:** 68  ·  **COVERED (zero-FP):** 33 (48.5%)  ·  **PARTIAL:** 13  ·  **PLANNED:** 20  ·  **N-A:** 2
 
-**Baseline we ship today:** **38 attack payloads** (agent-driven corpus) + **13 ground-truth
-detection classes** (direct-probe) + **MCP-00** (undeclared capability) + **OWASP MCP Top 10** mapping.
+## Per-standard coverage
 
-Authoritative reference: **MCP-38 taxonomy**, Shen/Toyoda/Leung, arXiv:2603.18063 (38 categories).
-Note: the paper's MCP-NN numbering ≠ our internal payload numbering — this matrix maps against the
-paper's authoritative list.
+| Standard | items | COVERED | PARTIAL | PLANNED | N-A | unmapped |
+|---|---|---|---|---|---|---|
+| OWASP-MCP (https://owasp.org/www-project-mcp-top-10/) | 10 | 8 | 1 | 1 | 0 | 0 |
+| ASI (https://genai.owasp.org/resource/owasp-top-10-fo) | 10 | 8 | 0 | 2 | 0 | 0 |
+| CoSAI (https://www.coalitionforsecureai.org/wp-content/) | 34 | 19 | 5 | 10 | 0 | 0 |
+| CIS (https://www.cisecurity.org/benchmark/ai-benchmar) | 10 | 5 | 0 | 2 | 0 | 3 |
+| SPEC2026 (https://modelcontextprotocol.io/specification/20) | 13 | 1 | 0 | 12 | 0 | 0 |
+| MCP38 (arXiv:2603.18063) | 38 | 23 | 9 | 6 | 0 | 0 |
 
----
+## Canonical items
 
-## 1. Coverage vs the published MCP-38 taxonomy (the superset)
+| id | title | status | our class | evidence / gap | external refs |
+|---|---|---|---|---|---|
+| ARG-INJ | Argument Injection | COVERED | arg_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-07, OWASP-MCP:MCP05, CoSAI:CoSAI-21 |
+| CMD-INJ | Command Injection | COVERED | command_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-07, OWASP-MCP:MCP05, ASI:ASI05, CoSAI:CoSAI-21, CoSAI:CoSAI-31, CIS:CIS-9 |
+| CONSENT-BYPASS | Consent / Approval Bypass + Fatigue | COVERED | permission_prompt_bypass | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-23, ASI:ASI09, CoSAI:CoSAI-13, CoSAI:CoSAI-9 |
+| CONTEXT-OVERSHARE | Context Over-Sharing / Manifest Exposure | COVERED | context_oversharing | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-34, OWASP-MCP:MCP10, CoSAI:CoSAI-20 |
+| CROSS-SERVER | Cross-Server Tool Poisoning | COVERED | cross_server_poisoning | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-14, ASI:ASI07, CoSAI:CoSAI-6 |
+| DESER | Insecure Deserialization | COVERED | deserialization | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, ASI:ASI05, CoSAI:CoSAI-21 |
+| EXFIL-CHANNELS | Data Exfiltration via Channels | COVERED | egress_evasion | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-24, MCP38:MCP-32, CoSAI:CoSAI-24, CoSAI:CoSAI-26 |
+| OUTPUT-INJ | Insecure Output / Return-Value Injection | COVERED | return_value_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-22, OWASP-MCP:MCP06, CoSAI:CoSAI-4 |
+| P00-RESOURCE | Resource Content Injection (protocol-00) | COVERED | mcp_resource_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-12, OWASP-MCP:MCP06, ASI:ASI06, CoSAI:CoSAI-4 |
+| P00B-SAMPLING | Sampling Instruction Laundering (protocol-00b) | COVERED | sampling_instruction_laundering | tests/test_sampling_host.py | MCP38:MCP-20, ASI:ASI01, CoSAI:CoSAI-11 |
+| P00C-ELICIT | Elicitation Credential Harvest (protocol-00c) | COVERED | elicitation_credential_harvest | tests/test_elicitation_host.py | MCP38:MCP-23, ASI:ASI09, CoSAI:CoSAI-9 |
+| PARASITIC-CHAIN | Parasitic Toolchain / Workflow Exfil | COVERED | indirect_tool_chain | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-17, ASI:ASI02, CoSAI:CoSAI-24 |
+| PATH-TRAV | Path Traversal / File System Exposure | COVERED | path_traversal | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-08, OWASP-MCP:MCP05, OWASP-MCP:MCP02, CoSAI:CoSAI-22, CIS:CIS-6 |
+| PI-DIRECT | Prompt Injection (direct) | COVERED | prompt_template_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-19, OWASP-MCP:MCP06, ASI:ASI01, CoSAI:CoSAI-11 |
+| PI-INDIRECT | Prompt Injection (indirect) | COVERED | indirect_prompt_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-20, OWASP-MCP:MCP06, ASI:ASI01, CoSAI:CoSAI-11 |
+| PREF-MANIP | Preference Manipulation | COVERED | fake_authority_brand | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-15 |
+| PRIV-ESC | Privilege Escalation / Scope Creep | COVERED | authority_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-04, OWASP-MCP:MCP02, ASI:ASI03, CoSAI:CoSAI-8, CoSAI:CoSAI-20 |
+| ROOTS-PATH | Roots Path Manipulation (MCP-29 ours) | COVERED | roots_path_manipulation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-08 |
+| RUG-PULL | Rug Pull / Dynamic Mutation | COVERED | rug_pull | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-16, OWASP-MCP:MCP03, ASI:ASI04, CoSAI:CoSAI-32 |
+| SCHEMA-POISON | Full Schema Poisoning | COVERED | schema_examples_steering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11, OWASP-MCP:MCP03, CoSAI:CoSAI-3 |
+| SELF-ATTEST | Tool Annotation Self-Attestation (readOnly lie) | COVERED | tool_annotation_self_attestation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
+| SQLI | SQL Injection | COVERED | sql_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-21 |
+| SSRF | Server-Side Request Forgery | COVERED | ssrf | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, OWASP-MCP:MCP02, CoSAI:CoSAI-26, CIS:CIS-2 |
+| SSTI | Server-Side Template Injection | COVERED | ssti | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-3 |
+| STRUCT-OUT | Structured-Output Resource-Link Injection (MCP-28 ours) | COVERED | structured_output_resource_link | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-12, SPEC2026:SPEC2026-requeststate |
+| SUPPLY-CHAIN | Supply Chain / Dependency Tampering | COVERED | supply_chain | tests/test_supply_chain.py | MCP38:MCP-26, OWASP-MCP:MCP04, ASI:ASI04, CoSAI:CoSAI-25, CIS:CIS-8 |
+| TOKEN-PASS | Token Passthrough / Confused Deputy | COVERED | token_passthrough | hunt/family_b_fixtures/{vuln,safe}_oauth_server.py + tests/test_oauth.py | MCP38:MCP-02, OWASP-MCP:MCP01, OWASP-MCP:MCP07, ASI:ASI03, CoSAI:CoSAI-16, CoSAI:CoSAI-18, CoSAI:CoSAI-8, CIS:CIS-3 |
+| TOOL-POISON | Tool Description Poisoning | COVERED | tool_poisoning | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-10, OWASP-MCP:MCP03, ASI:ASI01, CoSAI:CoSAI-2 |
+| TOOL-SATURATION | Tool-Count Saturation | COVERED | tool_count_saturation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
+| TOOL-SHADOW | Tool Shadowing | COVERED | tool_shadowing | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-13, CoSAI:CoSAI-5 |
+| TRUST-LAUNDER | Proxy/Aggregator Trust Laundering | COVERED | proxy_aggregator_trust_laundering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-18, ASI:ASI07, CoSAI:CoSAI-9 |
+| UNDECLARED-CAP | Undeclared Capability / Consent Gap (MCP-00) | COVERED | mcp_cap | hunt/hunt_cap.py::_selftest (declared vs observed caps, reader not flagged) | MCP38:MCP-05, OWASP-MCP:MCP02, ASI:ASI02, CoSAI:CoSAI-20 |
+| UNICODE-CONCEAL | Unicode / Hidden-Character Concealment | COVERED | hidden_unicode | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11 |
+| DNS-REBIND | DNS Rebinding | PARTIAL | dns_rebinding | class exists but no vuln+safe fixture located -> not COVERED until a fixture proves it zer | MCP38:MCP-31, OWASP-MCP:MCP07, CoSAI:CoSAI-26 |
+| MEMORY-POISON | Memory & Context Poisoning | PARTIAL | cross_session_temporal | resource/temporal payloads touch it; persistent-memory corruption proof pending | ASI:ASI06, MCP38:MCP-12, CoSAI:CoSAI-4 |
+| MISSING-AUTH | Insufficient Authentication/Authorization | PARTIAL | — | missing-auth enforcement probed; full OAuth-flow attacks pending (hunt/oauth_harness.py) [ | OWASP-MCP:MCP07, MCP38:MCP-29, CoSAI:CoSAI-18, CIS:CIS-3 |
+| MISSING-INTEGRITY | Missing Integrity / Verification | PARTIAL | — | our signed attestation is the mitigation; rug_pull detects mutation; no integrity-absence  | MCP38:MCP-27, ASI:ASI04, CoSAI:CoSAI-23, CIS:CIS-8 |
+| MULTI-AGENT | Multi-Agent Context / Inter-Agent Comms | PARTIAL | cross_server_poisoning | cross-server propagation partial; A2A spoofing pending | MCP38:MCP-36, ASI:ASI07, CoSAI:CoSAI-12 |
+| MULTITENANCY | Improper Multitenancy | PARTIAL | — | our platform enforces org isolation (tested); not a target-server probe | MCP38:MCP-06, CoSAI:CoSAI-10 |
+| MULTITURN-PLAN | Planning / Multi-Turn Agent Logic | PARTIAL | hunt-agent | authority/temporal payloads; full coverage via agent red-team + AI runtime payloads | MCP38:MCP-35, ASI:ASI01, CoSAI:CoSAI-11 |
+| OVERRELIANCE | Overreliance on LLM | PARTIAL | hunt-agent | behavioral -> agent red-team (MCP06 leg 2); not a static-probe zero-FP class | MCP38:MCP-21, ASI:ASI09, CoSAI:CoSAI-7 |
+| PRIVACY-INVERSION | Privacy Inversion / Cross-Session | PARTIAL | cross_session_temporal | temporal/honeytoken-alignment payloads; full multi-session proof pending | MCP38:MCP-25, ASI:ASI06, CoSAI:CoSAI-10 |
+| SANDBOX-ESCAPE | Sandbox Escape | PARTIAL | — | command_injection/deserialization detect the exec primitive; sandbox-escape-specific probe | MCP38:MCP-37, ASI:ASI05 |
+| SECRET-EXPOSURE | Secret / Session-Token Exposure | PARTIAL | — | we flag secret exfil via honeytoken egress; static secret-in-code scan not a class yet | OWASP-MCP:MCP01, CoSAI:CoSAI-19, CIS:CIS-6 |
+| SHADOW-SERVER | Shadow MCP Servers | PARTIAL | mcp_json_supply_chain | config/supply-chain detects rogue install; live shadow-server impersonation pending [SAM1- | MCP38:MCP-18, OWASP-MCP:MCP09, CoSAI:CoSAI-6 |
+| UNRESTRICTED-NET | Unrestricted Network Access | PARTIAL | network_position_delivery | delivery-position payloads; egress policy not asserted as a server finding | MCP38:MCP-32, CoSAI:CoSAI-26, CIS:CIS-9 |
+| CORS | CORS / Origin Policy Bypass | PLANNED | — | no CORS/origin-policy probe [SAM1-22] | CoSAI:CoSAI-30, CIS:CIS-2 |
+| CSRF | CSRF on HTTP/SSE transport | PLANNED | — | no CSRF probe for HTTP/SSE transports [SAM1-22] | CoSAI:CoSAI-29, CIS:CIS-2 |
+| MITM-NOTLS | MitM / Missing TLS / Protocol Gaps | PLANNED | — | TLS-intercept capture backend exists; missing-TLS / weak-protocol not asserted as a findin | MCP38:MCP-28, OWASP-MCP:MCP07, CoSAI:CoSAI-12, CoSAI:CoSAI-27, CIS:CIS-2 |
+| NO-AUDIT | Invisible Activity / No Audit Trail | PLANNED | — | server-offers-no-audit not asserted as a finding (our platform adds audit for us) [SAM1-23 | MCP38:MCP-38, OWASP-MCP:MCP08, ASI:ASI10, CoSAI:CoSAI-15, CoSAI:CoSAI-34, CIS:CIS-7 |
+| RATE-DOS | Resource Exhaustion / DoS / Denial-of-Wallet | PLANNED | — | tool_count_saturation touches it; no unbounded-loop/payload-limit probe [SAM1-22] | MCP38:MCP-33, MCP38:MCP-29, CoSAI:CoSAI-14, CoSAI:CoSAI-33, ASI:ASI08, CIS:CIS-10 |
+| REPLAY | Replay Attacks / Session Hijacking | PLANNED | — | no replay probe (re-send captured authed request) [SAM1-22] | MCP38:MCP-03, CoSAI:CoSAI-17, CIS:CIS-2 |
+| SPEC-CACHESCOPE | cacheScope cross-tenant cache poisoning | PLANNED | — | cacheScope:public -> shared-cache poisoning / data leak; ttlMs stale-listing persistence [ | SPEC2026:SPEC2026-cachescope, CoSAI:CoSAI-10 |
+| SPEC-DISCOVER | server/discover pre-auth disclosure + downgrade oracle | PLANNED | — | unauthenticated capability/identity disclosure [SAM1-21] | SPEC2026:SPEC2026-discover |
+| SPEC-DOWNGRADE | Protocol downgrade attack | PLANNED | — | force Legacy/HTTP+SSE; supported-list / 400-body tamper [SAM1-21] | SPEC2026:SPEC2026-downgrade, MCP38:MCP-28 |
+| SPEC-HEADER-INJ | Mcp-Name / x-mcp-header injection | PLANNED | — | x-mcp-header param->HTTP header injection -> SSRF/smuggling/auth spoof [SAM1-21] | SPEC2026:SPEC2026-mcp-name-header |
+| SPEC-LOGLEVEL | Per-request logLevel log suppression | PLANNED | — | per-request log suppression / flood control [SAM1-21] | SPEC2026:SPEC2026-loglevel, OWASP-MCP:MCP08, CoSAI:CoSAI-34 |
+| SPEC-MCP-APPS | MCP Apps UI injection / sandbox escape | PLANNED | — | ui:// iframe escape, postMessage proxy abuse, CSP bypass, clickjacking [SAM1-21] | SPEC2026:SPEC2026-mcp-apps |
+| SPEC-META-IDENTITY | _meta self-reported identity spoofing | PLANNED | — | spec says _meta identity is unverified; spoof/downgrade-lie [SAM1-21] | SPEC2026:SPEC2026-meta-identity, MCP38:MCP-01, CoSAI:CoSAI-1 |
+| SPEC-REF-SSRF | JSON-Schema $ref network dereference (SSRF/DoS) | PLANNED | — | spec warns MUST NOT auto-deref network $ref; composition-keyword DoS [SAM1-22] | SPEC2026:SPEC2026-ref-ssrf, MCP38:MCP-09 |
+| SPEC-REQUESTSTATE | MRTR requestState tamper + replay | PLANNED | — | echoed-back correlation token tampering/replay/injection [SAM1-13] | SPEC2026:SPEC2026-requeststate, CoSAI:CoSAI-17 |
+| SPEC-STATELESS | Stateless handle forgery / IDOR / state confusion | PLANNED | — | server-minted-handle forgery + cross-tenant state confusion under stateless transport [SAM | SPEC2026:SPEC2026-stateless, CoSAI:CoSAI-10 |
+| SPEC-SUBSCRIPTIONS | subscriptionId forgery / notification injection | PLANNED | — | subscriptions/listen stream: id forgery, cross-sub leakage [SAM1-21] | SPEC2026:SPEC2026-subscriptions |
+| SPEC-TASKS-IDOR | Tasks handle IDOR / unsolicited injection | PLANNED | — | task-id guessing on tasks/get; tasks/update input injection; unsolicited handles [SAM1-21] | SPEC2026:SPEC2026-tasks |
+| SPEC-URL-ELICIT | URL-elicitation phishing / account takeover | PLANNED | — | spec itself documents the phishing->ATO flow; open-redirect/pre-auth URL [SAM1-21] | SPEC2026:SPEC2026-url-elicitation, MCP38:MCP-23, CoSAI:CoSAI-9 |
+| STDIO-FD | Insecure stdio (fd leakage) / Descriptor Handling | PLANNED | — | inherited/leaked fd check over stdio not implemented [SAM1-22] | MCP38:MCP-30, CoSAI:CoSAI-28 |
+| CASCADING | Cascading Failures | N-A | — | downstream pipeline blast-radius is a deployment-architecture property, not a single-serve | ASI:ASI08 |
+| ROGUE-AGENT | Rogue Agents (self-directed misalignment) | N-A | — | model-alignment property of the agent, not a vulnerability of the MCP server under test | ASI:ASI10, CoSAI:CoSAI-15 |
 
-| MCP-38 category (paper) | Status | mcp-rt test(s) |
-|---|---|---|
-| MCP-01 Identity Spoofing | 🟡 | missing-auth enforcement probe; spoofing per-se not asserted |
-| MCP-02 Credential Theft | ✅ | **the honeytoken exfil scan itself**; `token_passthrough`; `bash_exfil_injection` |
-| MCP-03 Replay Attacks | ⛔ | — no replay test |
-| MCP-04 Privilege Escalation | ✅ | `authority_injection`; `permission_prompt_bypass`/`_social_eng` |
-| MCP-05 Excessive Permissions | ✅ | `context_oversharing`; **MCP-00 undeclared-capability** |
-| MCP-06 Improper Multitenancy | 🟡 | our *platform* enforces org isolation (tested); not a target-server probe |
-| MCP-07 Command Injection | ✅✅ | `command_injection` class (CWE-78) |
-| MCP-08 File System Exposure | ✅✅ | `path_traversal` class (CWE-22) |
-| MCP-09 Traditional Web (SSRF/SQLi/…) | ✅✅ | `ssrf`, `sql_injection`, `ssti`, `deserialization`, `arg_injection` |
-| MCP-10 Tool Description Poisoning | ✅✅ | `tool_poisoning`; `authority_injection` |
-| MCP-11 Full Schema Poisoning | ✅ | `schema_examples_steering`; `hidden_unicode` |
-| MCP-12 Resource Content Injection | ✅✅ | `mcp_resource_injection` v1/v2/v3; `structured_output_resource_link` |
-| MCP-13 Tool Shadowing | ✅ | `tool_shadowing` |
-| MCP-14 Cross-Server Tool (shadow/poison) | ✅ | `cross_server_poisoning` |
-| MCP-15 Preference Manipulation | ✅ | `fake_authority_brand`; `authority_resource_combo` |
-| MCP-16 Rug Pull / Dynamic Mutation | ✅✅ | `rug_pull` + **drift detection** (platform) |
-| MCP-17 Parasitic Toolchain | ✅✅ | `indirect_tool_chain`; `server_side_workflow`; `workflow_scaffold_exfil` |
-| MCP-18 Shadow MCP Servers | ✅ | `mcp_json_supply_chain`; `proxy_aggregator_trust_laundering` |
-| MCP-19 Prompt Injection (direct) | ✅ | `prompt_template_injection` |
-| MCP-20 Prompt Injection (indirect) | ✅✅ | `indirect_prompt_injection`; `return_value_prompt_injection`; `atlassian_ticket_injection` |
-| MCP-21 Overreliance on LLM | 🟡 | behavioral → **agent red-team** (0c) + AI runtime payloads |
-| MCP-22 Insecure Output Handling | ✅ | `return_value_injection`; `api_error_injection`; `return_value_context_injection` |
-| MCP-23 Consent / Approval Bypass | ✅ | `permission_prompt_bypass`; `permission_prompt_social_eng` |
-| MCP-24 Data Exfiltration via Channels | ✅✅ | `egress_evasion`; `bash_exfil_injection`; honeytoken egress tap |
-| MCP-25 Privacy Inversion | ✅ | `cross_session_temporal`; `honeytoken_path_alignment` |
-| MCP-26 Supply Chain | ✅✅ | `supply_chain` probe; `mcp_json_supply_chain` |
-| MCP-27 Missing Integrity | ✅ | **our signed attestation is the mitigation**; `rug_pull` detects mutation |
-| MCP-28 MitM / No TLS | 🟡 | TLS-intercept capture backend exists; **missing-TLS not asserted as a finding** |
-| MCP-29 Protocol Gaps (rate-limit/auth) | 🟡 | missing-auth probe; **no rate-limit probe** |
-| MCP-30 Insecure stdio (fd leakage) | ⛔ | — not tested |
-| MCP-31 DNS Rebinding | ✅✅ | `dns_rebinding` class (CWE-346) |
-| MCP-32 Unrestricted Network | ✅ | `network_position_delivery`; `egress_evasion` |
-| MCP-33 Resource Exhaustion / DoS | 🟡 | `tool_count_saturation`; **no unbounded-loop/DoS probe** |
-| MCP-34 Tool Manifest Exposure | ✅ | `context_oversharing`; `tool_annotation_self_attestation` |
-| MCP-35 Planning / Agent Logic (multi-turn) | 🟡 | `authority_injection`, `cross_session_temporal` → **full coverage needs agent red-team + AI runtime payloads** |
-| MCP-36 Multi-Agent Context | 🟡 | `cross_server_poisoning`; multi-agent propagation partial |
-| MCP-37 Sandbox Escape | 🟡 | `command_injection`/`deserialization` detect exec; sandbox-escape-specific probe pending (our docker backend mitigates for *us*) |
-| MCP-38 Invisible Agent Activity (no audit) | ⛔ | — not asserted as a server finding (also: *our platform* adds audit logging, security track) |
-
-**Semantic end (MCP-07…MCP-26): dense ✅ — our 38 payloads blanket it.**
-**Infra/protocol end: the gaps live here.**
-
-## 2. Coverage vs OWASP MCP Top 10 (MCP01–MCP10)
-Mapped in `hunt/report.py` (`OWASP_MCP_TOP10`, `compliance` crosswalk) — every scan emits a
-PASS/FAIL per control. ✅ all ten represented by the classes above.
-
-## 3. Ground-truth direct-probe classes (13) + MCP-00
-`command_injection, path_traversal, ssrf, sql_injection, deserialization, ssti, arg_injection,
-tool_poisoning, token_passthrough, rug_pull, dns_rebinding, context_oversharing, supply_chain`
-— each with a **vuln+safe fixture** (must fire on vuln, stay silent on safe = zero-FP).
-Plus **MCP-00** undeclared-capability hunt (strace). Plus **missing-auth enforcement** (probes).
-
----
-
-## 4. Named gaps → Block 0b backlog (to fill before we claim "complete")
-1. **MCP-03 Replay attacks** — add a replay probe (re-send a captured authed request).
-2. **MCP-28 Missing-TLS / MitM** — flag HTTP transports without TLS as a finding; downgrade test.
-3. **MCP-29/33 Rate-limiting & Resource-exhaustion (DoS)** — probe for unbounded loops / no rate limit.
-4. **MCP-30 Insecure stdio (fd leakage)** — check inherited/leaked file descriptors over stdio.
-5. **MCP-38 Invisible activity / no audit trail** — detect a server that offers no logging/audit hooks.
-6. **Full OAuth-flow attacks** (MCP-02 subset) — wire `hunt/oauth_harness.py`: token interception,
-   PKCE downgrade, redirect/discovery-URL manipulation, confused-deputy end-to-end.
-7. **MCP-37 sandbox-escape-specific probe** (beyond detecting the exec primitive).
-8. **MCP-35 multi-turn planning manipulation** — covered by lighting up the agent red-team (0c) +
-   AI-generated runtime payloads (§5).
-Each gap filled as a payload/probe with a vuln+safe fixture, then its row flips to ✅ here.
-
-## 5. Beyond static — the engine tracks that make us not-a-blind-test (per Ved)
-- **0c Agent red-team (activate):** real coding agents (Claude Code/Codex/Gemini) attempt the attacks
-  → verdict = "an agent actually broke it," covers behavioral classes (MCP-21/35/36).
-- **AI-generated runtime payloads (new):** an LLM mutates/synthesizes *novel* payloads per target at
-  scan time (adaptive fuzzing) — catches variants the static 38 don't enumerate. Must run only in the
-  hardened docker backend. Design: a `mcp_rt/payloads/ai_generator.py` that, given the target's
-  tools/resources + a seed class, asks the model for candidate payloads; each is run ground-truth
-  (honeytoken/canary) so a hit is still zero-FP proof, not an LLM opinion.
-- **Exploit correlation (new):** chain individually-confirmed findings into a *proven* multi-step
-  attack path (e.g. resource-injection → tool-chain → egress). Reuse the `chains`/`chain_steps`
-  tables already in `hunt/findings_db.py` + the `attack-planner` approach; surface chains in the
-  attestation + UI as the highest-severity, demonstrated result.
-
----
-
-*Status: v1 (2026-10-09). Revisit whenever a new attack class, CVE, or MCP spec change lands
-(threat-intel loop). Each row links to its payload/probe + vuln+safe fixture as gaps are filled.*
+*Standards: OWASP-MCP → https://owasp.org/www-project-mcp-top-10/ (beta 2025); ASI → https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications/; CoSAI → https://www.coalitionforsecureai.org/wp-content/uploads/2026/03/model-context-protocol-security-1.pdf; CIS → https://www.cisecurity.org/benchmark/ai-benchmarks (MCP Server 1.0.0, WorkBench #26248); SPEC2026 → https://modelcontextprotocol.io/specification/2026-07-28/changelog; MCP38 → arXiv:2603.18063 (Shen/Toyoda/Leung) — 38 categories*
