@@ -138,12 +138,13 @@ class StatelessHTTPClient:
     MCPClient so callers are transport-agnostic."""
 
     def __init__(self, url: str, *, client_info: dict | None = None, capabilities: dict | None = None,
-                 timeout: float = _HTTP_TIMEOUT, max_mrtr: int = _MRTR_MAX):
+                 timeout: float = _HTTP_TIMEOUT, max_mrtr: int = _MRTR_MAX, protocol_version: str = _PV_2026):
         self.url = url
         self.client_info = client_info or {"name": "mcp-rt", "version": "0.2.0"}
         self.capabilities = {} if capabilities is None else capabilities
         self.timeout = timeout
         self.max_mrtr = max_mrtr
+        self.protocol_version = protocol_version   # default modern; overridable to FORCE an older version (T10.5)
         self._id = 0
         self.cache_hints: dict[str, dict] = {}   # method -> {ttlMs, cacheScope} — recorded for later analysis
 
@@ -152,7 +153,7 @@ class StatelessHTTPClient:
         return self._id
 
     def _meta(self) -> dict:
-        m = {"io.modelcontextprotocol/protocolVersion": _PV_2026,
+        m = {"io.modelcontextprotocol/protocolVersion": self.protocol_version,
              "io.modelcontextprotocol/clientCapabilities": self.capabilities}
         if self.client_info:
             m["io.modelcontextprotocol/clientInfo"] = self.client_info
@@ -161,7 +162,7 @@ class StatelessHTTPClient:
     def _headers(self, method: str, params: dict, extra_headers: dict | None = None) -> dict:
         h = {"Content-Type": "application/json",
              "Accept": "application/json, text/event-stream",   # spec: MUST offer both
-             "MCP-Protocol-Version": _PV_2026,                   # MUST equal _meta protocolVersion
+             "MCP-Protocol-Version": self.protocol_version,      # MUST equal _meta protocolVersion
              "Mcp-Method": method}                               # MUST equal body.method
         src = _NAME_SRC.get(method)
         if src and params.get(src) is not None:
