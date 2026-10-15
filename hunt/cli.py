@@ -85,6 +85,7 @@ _COMMANDS = {
     "check": ("hunt.check", "main"),             # assess a server completely (scan + supply + MCP-CAP)
     "flow": ("hunt.flow", "main"),               # end-to-end assessment as a tracked, replayable Flow
     "redteam-live": ("hunt.redteam_live", "main"),  # honeytoken-grounded live agent red-team (MCP06)
+    "demo": ("hunt.demo_assessment", "main"),    # one-command end-to-end demo over the full T11+T12 oracle library
 }
 
 
