@@ -84,6 +84,44 @@ CLASS_META = {
         fix="Remove or vet install/postinstall lifecycle scripts, pin every dependency to an exact "
             "version with a committed lockfile, verify package provenance, and audit the dependency "
             "tree for known CVEs."),
+    # --- T11 classic impl-bug sweep (SAM1-22) + T12 OWASP closure (SAM1-23): HTTP/stateless probes ---
+    "authz_idor": dict(sev="High", cwe="CWE-639", owasp=["MCP02", "MCP07"],
+        title="Broken Object/Function-Level Authorization (IDOR/BOLA)",
+        fix="Enforce object-level ownership on every access (resource.owner == caller); gate privileged "
+            "tools behind an explicit role check; deny by default, never trust a client-supplied id."),
+    "xxe": dict(sev="High", cwe="CWE-611", owasp=["MCP05"],
+        title="XML External Entity (XXE) + OOB/SSRF",
+        fix="Disable external-entity resolution (feature_external_ges=False / defusedxml); forbid DOCTYPE "
+            "on untrusted XML; never let the parser fetch SYSTEM/file/http entities."),
+    "open_redirect": dict(sev="High", cwe="CWE-601", owasp=["MCP01"],
+        title="Open Redirect -> Session-Token Exfiltration",
+        fix="Allowlist redirect targets to same-origin paths; never append a session token to an "
+            "attacker-controlled return_to; validate return_to is a local path, not an absolute URL."),
+    "proto_pollution": dict(sev="High", cwe="CWE-1321", owasp=["MCP05", "MCP02"],
+        title="JS Prototype Pollution -> Privilege Escalation",
+        fix="Reject __proto__/constructor/prototype keys in any recursive merge; use Object.create(null) "
+            "or Map for untrusted data; validate against a schema; freeze Object.prototype."),
+    "redos": dict(sev="Medium", cwe="CWE-1333", owasp=[],
+        title="ReDoS / Catastrophic Backtracking",
+        fix="Avoid nested quantifiers over overlapping classes; use a linear-time engine (RE2) or atomic "
+            "groups/possessive quantifiers; bound input length and add a match timeout."),
+    "resource_limit": dict(sev="Medium", cwe="CWE-770", owasp=[],
+        title="Unbounded Resource Amplification",
+        fix="Bound every resource-controlling parameter (schema maximum AND a server-side cap); reject "
+            "above-cap requests; stream/paginate large outputs instead of materialising them."),
+    "telemetry_leak": dict(sev="Medium", cwe="CWE-532", owasp=["MCP08"],
+        title="Sensitive Data in Telemetry / Logs",
+        fix="Redact secrets/credentials/PII before they reach any log or telemetry surface; gate audit "
+            "reads behind elevated authorization; log an event id, not the sensitive value."),
+    "shadow_impersonation": dict(sev="High", cwe="CWE-706", owasp=["MCP09"],
+        title="Tool Shadowing / Name Impersonation",
+        fix="Namespace tools by server identity; reject or surface duplicate tool names across servers; "
+            "prefer the trusted/first-registered source and never silently override a canonical name."),
+    "lethal_trifecta": dict(sev="Critical", cwe="CWE-200", owasp=["MCP06", "MCP10"],
+        title="Lethal Trifecta: Private-Data Exfil via Untrusted Input",
+        fix="Break the chain: never let untrusted content choose an egress destination (allowlist egress); "
+            "don't combine private-data access, untrusted ingestion and external egress in one "
+            "untrusted-reachable tool; require human approval for cross-origin egress of sensitive data."),
 }
 
 OWASP_MCP_TOP10 = {
