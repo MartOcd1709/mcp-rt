@@ -4,7 +4,7 @@
 > COVERED means a zero-FP proof exists (vuln+safe fixture/test). PARTIAL/PLANNED/N-A are shown openly;
 > we never claim zero unknown-unknowns.
 
-**Canonical items:** 68  ·  **COVERED (zero-FP):** 33 (48.5%)  ·  **PARTIAL:** 13  ·  **PLANNED:** 20  ·  **N-A:** 2
+**Canonical items:** 68  ·  **COVERED (zero-FP):** 40 (58.8%)  ·  **PARTIAL:** 14  ·  **PLANNED:** 12  ·  **N-A:** 2
 
 ## Per-standard coverage
 
@@ -12,10 +12,10 @@
 |---|---|---|---|---|---|---|
 | OWASP-MCP (https://owasp.org/www-project-mcp-top-10/) | 10 | 8 | 1 | 1 | 0 | 0 |
 | ASI (https://genai.owasp.org/resource/owasp-top-10-fo) | 10 | 8 | 0 | 2 | 0 | 0 |
-| CoSAI (https://www.coalitionforsecureai.org/wp-content/) | 34 | 19 | 5 | 10 | 0 | 0 |
+| CoSAI (https://www.coalitionforsecureai.org/wp-content/) | 34 | 22 | 4 | 8 | 0 | 0 |
 | CIS (https://www.cisecurity.org/benchmark/ai-benchmar) | 10 | 5 | 0 | 2 | 0 | 3 |
-| SPEC2026 (https://modelcontextprotocol.io/specification/20) | 13 | 1 | 0 | 12 | 0 | 0 |
-| MCP38 (arXiv:2603.18063) | 38 | 23 | 9 | 6 | 0 | 0 |
+| SPEC2026 (https://modelcontextprotocol.io/specification/20) | 13 | 7 | 1 | 5 | 0 | 0 |
+| MCP38 (arXiv:2603.18063) | 38 | 25 | 9 | 4 | 0 | 0 |
 
 ## Canonical items
 
@@ -42,6 +42,13 @@
 | RUG-PULL | Rug Pull / Dynamic Mutation | COVERED | rug_pull | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-16, OWASP-MCP:MCP03, ASI:ASI04, CoSAI:CoSAI-32 |
 | SCHEMA-POISON | Full Schema Poisoning | COVERED | schema_examples_steering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11, OWASP-MCP:MCP03, CoSAI:CoSAI-3 |
 | SELF-ATTEST | Tool Annotation Self-Attestation (readOnly lie) | COVERED | tool_annotation_self_attestation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
+| SPEC-CACHESCOPE | cacheScope cross-tenant cache poisoning | COVERED | mcp_rt/cachescope.py | tests/test_cachescope_poisoning.py (T10.1 — leak+poison fire via reference shared cache; s | SPEC2026:SPEC2026-cachescope, CoSAI:CoSAI-10 |
+| SPEC-DOWNGRADE | Forced downgrade-to-deprecated (control bypass) | COVERED | mcp_rt/downgrade.py | tests/test_downgrade.py (T10.5 — forced-legacy bypasses the guard, modern-same-host clean; | SPEC2026:SPEC2026-downgrade, MCP38:MCP-28 |
+| SPEC-HEADER-INJ | Mcp-Name header/body method differential | COVERED | mcp_rt/mcp_name_differential.py | tests/test_mcp_name_differential.py (T10.4 — authz-on-header/exec-on-body smuggle fires; s | SPEC2026:SPEC2026-mcp-name-header |
+| SPEC-META-IDENTITY | _meta self-reported identity spoofing | COVERED | mcp_rt/meta_spoof.py | tests/test_meta_spoof.py (T10.3 — clientInfo/caps spoof fire; safe decides on real auth) | SPEC2026:SPEC2026-meta-identity, MCP38:MCP-01, CoSAI:CoSAI-1 |
+| SPEC-REQUESTSTATE | MRTR requestState tamper + replay | COVERED | mcp_rt/mrtr_requeststate.py | tests/test_mrtr_requeststate.py (T2 — tamper/replay/cross-user fire; safe rejects; benign  | SPEC2026:SPEC2026-requeststate, CoSAI:CoSAI-17 |
+| SPEC-TASKS-IDOR | Tasks handle IDOR / result-after-revoke / update-injection | COVERED | mcp_rt/task_idor.py | tests/test_task_idor.py (T10.2 — get-IDOR/revoke/update fire; safe owner-binds + re-checks | SPEC2026:SPEC2026-tasks |
+| SPEC-URL-ELICIT | URL-elicitation phishing / open-redirect | COVERED | mcp_rt/url_elicitation.py | tests/test_url_elicitation.py (T10.6 — off-origin capture + pre-auth-in-URL fire; safe sam | SPEC2026:SPEC2026-url-elicitation, MCP38:MCP-23, CoSAI:CoSAI-9 |
 | SQLI | SQL Injection | COVERED | sql_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-21 |
 | SSRF | Server-Side Request Forgery | COVERED | ssrf | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, OWASP-MCP:MCP02, CoSAI:CoSAI-26, CIS:CIS-2 |
 | SSTI | Server-Side Template Injection | COVERED | ssti | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-3 |
@@ -66,6 +73,7 @@
 | SANDBOX-ESCAPE | Sandbox Escape | PARTIAL | — | command_injection/deserialization detect the exec primitive; sandbox-escape-specific probe | MCP38:MCP-37, ASI:ASI05 |
 | SECRET-EXPOSURE | Secret / Session-Token Exposure | PARTIAL | — | we flag secret exfil via honeytoken egress; static secret-in-code scan not a class yet | OWASP-MCP:MCP01, CoSAI:CoSAI-19, CIS:CIS-6 |
 | SHADOW-SERVER | Shadow MCP Servers | PARTIAL | mcp_json_supply_chain | config/supply-chain detects rogue install; live shadow-server impersonation pending [SAM1- | MCP38:MCP-18, OWASP-MCP:MCP09, CoSAI:CoSAI-6 |
+| SPEC-MCP-APPS | MCP Apps UI injection (+ clickjacking/CSP/perms leads) | PARTIAL | mcp_rt/mcp_apps_ui.py | injection->executable-context is COVERED (confirmed, oracle-gated); clickjacking/UI-redres | SPEC2026:SPEC2026-mcp-apps |
 | UNRESTRICTED-NET | Unrestricted Network Access | PARTIAL | network_position_delivery | delivery-position payloads; egress policy not asserted as a server finding | MCP38:MCP-32, CoSAI:CoSAI-26, CIS:CIS-9 |
 | CORS | CORS / Origin Policy Bypass | PLANNED | — | no CORS/origin-policy probe [SAM1-22] | CoSAI:CoSAI-30, CIS:CIS-2 |
 | CSRF | CSRF on HTTP/SSE transport | PLANNED | — | no CSRF probe for HTTP/SSE transports [SAM1-22] | CoSAI:CoSAI-29, CIS:CIS-2 |
@@ -73,19 +81,11 @@
 | NO-AUDIT | Invisible Activity / No Audit Trail | PLANNED | — | server-offers-no-audit not asserted as a finding (our platform adds audit for us) [SAM1-23 | MCP38:MCP-38, OWASP-MCP:MCP08, ASI:ASI10, CoSAI:CoSAI-15, CoSAI:CoSAI-34, CIS:CIS-7 |
 | RATE-DOS | Resource Exhaustion / DoS / Denial-of-Wallet | PLANNED | — | tool_count_saturation touches it; no unbounded-loop/payload-limit probe [SAM1-22] | MCP38:MCP-33, MCP38:MCP-29, CoSAI:CoSAI-14, CoSAI:CoSAI-33, ASI:ASI08, CIS:CIS-10 |
 | REPLAY | Replay Attacks / Session Hijacking | PLANNED | — | no replay probe (re-send captured authed request) [SAM1-22] | MCP38:MCP-03, CoSAI:CoSAI-17, CIS:CIS-2 |
-| SPEC-CACHESCOPE | cacheScope cross-tenant cache poisoning | PLANNED | — | cacheScope:public -> shared-cache poisoning / data leak; ttlMs stale-listing persistence [ | SPEC2026:SPEC2026-cachescope, CoSAI:CoSAI-10 |
 | SPEC-DISCOVER | server/discover pre-auth disclosure + downgrade oracle | PLANNED | — | unauthenticated capability/identity disclosure [SAM1-21] | SPEC2026:SPEC2026-discover |
-| SPEC-DOWNGRADE | Protocol downgrade attack | PLANNED | — | force Legacy/HTTP+SSE; supported-list / 400-body tamper [SAM1-21] | SPEC2026:SPEC2026-downgrade, MCP38:MCP-28 |
-| SPEC-HEADER-INJ | Mcp-Name / x-mcp-header injection | PLANNED | — | x-mcp-header param->HTTP header injection -> SSRF/smuggling/auth spoof [SAM1-21] | SPEC2026:SPEC2026-mcp-name-header |
 | SPEC-LOGLEVEL | Per-request logLevel log suppression | PLANNED | — | per-request log suppression / flood control [SAM1-21] | SPEC2026:SPEC2026-loglevel, OWASP-MCP:MCP08, CoSAI:CoSAI-34 |
-| SPEC-MCP-APPS | MCP Apps UI injection / sandbox escape | PLANNED | — | ui:// iframe escape, postMessage proxy abuse, CSP bypass, clickjacking [SAM1-21] | SPEC2026:SPEC2026-mcp-apps |
-| SPEC-META-IDENTITY | _meta self-reported identity spoofing | PLANNED | — | spec says _meta identity is unverified; spoof/downgrade-lie [SAM1-21] | SPEC2026:SPEC2026-meta-identity, MCP38:MCP-01, CoSAI:CoSAI-1 |
 | SPEC-REF-SSRF | JSON-Schema $ref network dereference (SSRF/DoS) | PLANNED | — | spec warns MUST NOT auto-deref network $ref; composition-keyword DoS [SAM1-22] | SPEC2026:SPEC2026-ref-ssrf, MCP38:MCP-09 |
-| SPEC-REQUESTSTATE | MRTR requestState tamper + replay | PLANNED | — | echoed-back correlation token tampering/replay/injection [SAM1-13] | SPEC2026:SPEC2026-requeststate, CoSAI:CoSAI-17 |
 | SPEC-STATELESS | Stateless handle forgery / IDOR / state confusion | PLANNED | — | server-minted-handle forgery + cross-tenant state confusion under stateless transport [SAM | SPEC2026:SPEC2026-stateless, CoSAI:CoSAI-10 |
 | SPEC-SUBSCRIPTIONS | subscriptionId forgery / notification injection | PLANNED | — | subscriptions/listen stream: id forgery, cross-sub leakage [SAM1-21] | SPEC2026:SPEC2026-subscriptions |
-| SPEC-TASKS-IDOR | Tasks handle IDOR / unsolicited injection | PLANNED | — | task-id guessing on tasks/get; tasks/update input injection; unsolicited handles [SAM1-21] | SPEC2026:SPEC2026-tasks |
-| SPEC-URL-ELICIT | URL-elicitation phishing / account takeover | PLANNED | — | spec itself documents the phishing->ATO flow; open-redirect/pre-auth URL [SAM1-21] | SPEC2026:SPEC2026-url-elicitation, MCP38:MCP-23, CoSAI:CoSAI-9 |
 | STDIO-FD | Insecure stdio (fd leakage) / Descriptor Handling | PLANNED | — | inherited/leaked fd check over stdio not implemented [SAM1-22] | MCP38:MCP-30, CoSAI:CoSAI-28 |
 | CASCADING | Cascading Failures | N-A | — | downstream pipeline blast-radius is a deployment-architecture property, not a single-serve | ASI:ASI08 |
 | ROGUE-AGENT | Rogue Agents (self-directed misalignment) | N-A | — | model-alignment property of the agent, not a vulnerability of the MCP server under test | ASI:ASI10, CoSAI:CoSAI-15 |
