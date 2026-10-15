@@ -120,6 +120,21 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     else:
         components["ai_agent"] = "not requested"
 
+    # ---- T7: explain-the-exploit chain — ADDITIVE root-cause per CONFIRMED finding -----------
+    # Never changes a verdict; the oracle stays the only source of truth. Findings here are all
+    # ground-truth (leads live separately), so the confirmed-only rule holds.
+    try:
+        from mcp_rt.oracle import Proof
+        from hunt.sink_locator import explain_chain, source_path_from_target
+        src = source_path_from_target(target)
+        for f in findings:
+            chain = explain_chain(Proof(tool=f["tool"], vuln_class=f["cls"], confirmed=True,
+                                        signal=f.get("detail", "")), source_path=src)
+            if chain:
+                f["root_cause"] = chain
+    except Exception:  # noqa: BLE001 — enrichment is additive; its failure must never affect the verdict
+        pass
+
     # ---- 4. correlate confirmed findings into attack chains ----------------------------------
     _emit(progress, "phase 4/4 · correlating confirmed findings into demonstrated attack chains…")
     try:
