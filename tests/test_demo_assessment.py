@@ -35,3 +35,28 @@ def test_classic_leg_fires_on_aggregate_vuln_server():
     classic = D.run_classic_leg()
     classes = {f.get("cls") for f in classic}
     assert "command_injection" in classes and len(classic) >= 8
+
+
+@pytest.fixture(scope="module")
+def novel():
+    from hunt.demo_novel import run_novel
+    return run_novel()
+
+
+def test_novel_family_zero_fp(novel):
+    by = {n.cls: n for n in novel}
+    # the moat invariant: no safe-host control ever fires (offline, deterministic)
+    for n in novel:
+        assert n.silent_safe is True, f"{n.cls}: safe-host control fired — FALSE POSITIVE"
+    # mcp_cap is ALWAYS a LEAD, never a canary CONFIRMED
+    assert by["mcp_cap"].kind == "LEAD" and by["mcp_cap"].confirmed is False
+    # the two cleanest classes always fire; roots may be env-sensitive (skip-tolerant, never FP)
+    assert by["sampling_instruction_laundering"].confirmed is True
+    assert by["elicitation_credential_harvest"].confirmed is True
+    assert by["roots_path_manipulation"].confirmed or by["roots_path_manipulation"].skipped
+
+
+def test_novel_section_in_report(outcomes, novel):
+    r = D.render_demo_report(outcomes, None, novel)
+    assert "Novel MCP-00 family (the moat)" in r
+    assert "LEAD (capability hypothesis" in r   # mcp_cap shown honestly as a lead, not confirmed

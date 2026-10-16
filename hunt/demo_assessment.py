@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hunt.report import CLASS_META, run_full_scan
+from hunt.demo_novel import run_novel
 from mcp_rt import taxonomy
 from mcp_rt import (tool_authz_idor, tool_xxe, tool_open_redirect, tool_proto_pollution,
                     tool_redos, tool_resource_limit, tool_telemetry_leak,
@@ -188,10 +189,13 @@ def run_classic_leg() -> list[dict]:
         return []
 
 
-def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = None) -> str:
+def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = None, novel=None) -> str:
     confirmed = [o for o in outcomes if o.confirmed]
     skipped = [o for o in outcomes if o.skipped]
     classic = classic or []
+    novel = novel or []
+    nov_conf = [n for n in novel if n.confirmed]
+    nov_lead = [n for n in novel if n.kind == "LEAD" and not n.skipped]
     cov = taxonomy.coverage()
     L = ["# mcp-rt — End-to-End Assessment (demo)", "",
          "> Each class is fired against a deliberately-vulnerable MCP host and proven only by a "
@@ -200,6 +204,8 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
          f"**Verdict: VULNERABLE** — {len(confirmed)}/{len(outcomes)} new-class (T11+T12) classes "
          f"CONFIRMED on the vulnerable target; every safe-host control stayed silent"
          + (f"; +{len(classic)} classic (T0) findings on the aggregate vuln server" if classic else "")
+         + (f"; +{len(nov_conf)} novel MCP-00 CONFIRMED" + (f" & {len(nov_lead)} lead(s)" if nov_lead else "")
+            if (nov_conf or nov_lead) else "")
          + (f" ({len(skipped)} skipped: {', '.join(o.cls for o in skipped)})" if skipped else "") + ".", "",
          "## Proven findings — new classes (T11 + T12)", ""]
     for o in confirmed:
@@ -221,6 +227,26 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
                   f"OWASP-MCP: {owasp}  ·  tool `{f.get('tool','?')}`",
                   f"- **Evidence:** {(f.get('evidence') or f.get('detail') or '')[:160]}",
                   f"- **Fix:** {f.get('fix','(see remediation guidance)')}", ""]
+    if nov_conf or nov_lead:
+        L += ["## Novel MCP-00 family (the moat) — offline, deterministic", "",
+              "Our first-to-find MCP-00 classes, proven OFFLINE (no model / no keys): each CONFIRMED fires a "
+              "real honeytoken canary on the vulnerable host (a file read + a loopback marker POST) and stays "
+              "silent on the safe host. `mcp_cap` is a capability LEAD, never a canary CONFIRMED.", ""]
+        for n in nov_conf:
+            m = CLASS_META.get(n.cls, {})
+            owasp = ", ".join(m.get("owasp") or []) or "—"
+            L += [f"### {m.get('title', n.cls)}  ·  {m.get('sev','?')}  ·  {m.get('cwe','?')}  ·  OWASP-MCP: {owasp}",
+                  f"- **Proven offensive result (the moat):** {n.proof}; safe-host control stayed **silent** → zero-FP.",
+                  f"- **Evidence:** {n.evidence}",
+                  f"- **Root cause (under assessment):** `{n.source}`.",
+                  f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
+        for n in nov_lead:
+            m = CLASS_META.get(n.cls, {})
+            L += [f"### {m.get('title', n.cls)}  ·  LEAD (capability hypothesis — NOT a canary-confirmed finding)",
+                  f"- **Observation:** {n.proof} — {n.evidence}",
+                  "- **Why a LEAD, not CONFIRMED:** no canary/nonce deterministically fires here, so it is "
+                  "reported honestly as a lead and never counted as proven.",
+                  f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
     L += ["## Honest coverage ledger (never inflated)", "",
           f"From `mcp_rt/taxonomy.py` (single source of truth): **{cov['total_items']} canonical items** — "
           f"**{cov['by_status']['COVERED']} COVERED** (zero-FP proof), "
@@ -239,7 +265,8 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
 def main(argv=None) -> int:
     outcomes = run_demo()
     classic = run_classic_leg()
-    report = render_demo_report(outcomes, classic)
+    novel = run_novel()
+    report = render_demo_report(outcomes, classic, novel)
     out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hunt", "reports", "demo")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "demo_report.md")
@@ -249,8 +276,13 @@ def main(argv=None) -> int:
     for o in outcomes:
         status = "SKIP" if o.skipped else ("CONFIRMED" if o.confirmed else "NOT-FIRED")
         print(f"  [{status:9}] {o.cls:22} vuln={o.fired_vuln} safe_silent={o.silent_safe} {o.skipped}")
+    for n in novel:
+        status = "SKIP" if n.skipped else ("LEAD" if n.kind == "LEAD" else ("CONFIRMED" if n.confirmed else "NOT-FIRED"))
+        print(f"  [{status:9}] {n.cls:22} (novel) fired={n.fired_vuln} safe_silent={n.silent_safe} {n.skipped}")
+    nov_conf = sum(n.confirmed for n in novel)
+    nov_lead = sum(1 for n in novel if n.kind == "LEAD" and not n.skipped)
     print(f"\n{confirmed}/{len(outcomes)} new-class CONFIRMED (safe controls silent) + "
-          f"{len(classic)} classic findings — report: {path}")
+          f"{len(classic)} classic findings + {nov_conf} novel MCP-00 CONFIRMED & {nov_lead} lead(s) — report: {path}")
     return 0
 
 
