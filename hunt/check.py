@@ -115,6 +115,17 @@ def _run_full_check(target: str, do_cap: bool = True) -> int:
     else:
         print("\nFINDINGS: none across all tested classes.")
 
+    susp = rep.get("suspected", [])
+    if susp:
+        print(f"\n{_C.get('Medium','')}SUSPECTED{_R} (inference — a lead, NOT ground-truth-proven; needs confirmation):")
+        for s in susp:
+            print(f"  [SUSPECT ] {s['cls']:<20} {s.get('tool',''):<16} {s.get('detail','')[:90]}")
+    incon = rep.get("inconclusive", [])
+    if incon:
+        print("\nINCONCLUSIVE (the test could not be run — NOT scored clean):")
+        for s in incon:
+            print(f"  · {s['cls']:<20} {s.get('tool','')}: {s.get('detail','')[:80]}")
+
     posture = rep.get("supply_posture", [])
     if posture:
         print("\nSUPPLY-CHAIN POSTURE (flags, not confirmed findings):")
@@ -154,7 +165,8 @@ def _run_full_check(target: str, do_cap: bool = True) -> int:
     # 3) OWASP compliance crosswalk
     print("\nOWASP MCP Top 10:")
     for c in rep.get("compliance", []):
-        tag = {"FAIL": f"{_C['High']}FAIL{_R}", "PASS": "\033[32mPASS\033[0m"}.get(c["status"], "not tested")
+        tag = {"FAIL": f"{_C['High']}FAIL{_R}", "PASS": "\033[32mPASS\033[0m",
+               "SUSPECTED": "\033[33mSUSPECTED\033[0m"}.get(c["status"], "not tested")
         print(f"  {c['id']}  {tag:<16} {c['title']}")
 
     print(f"\nrecorded to the database — see: mcp-rt db findings\n")

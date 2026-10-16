@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from hunt.family_b import probe_token_passthrough
-from hunt.probes import VULNERABLE, ScanError, scan_target
+from hunt.probes import CLEAN, INCONCLUSIVE, SUSPECTED, VULNERABLE, ScanError, scan_target
 from hunt.supply_chain import installed_dir, analyze_path, _bare_name
 
 # --- class metadata: severity, CWE, OWASP MCP Top 10 mapping, remediation ----------------
@@ -225,12 +225,36 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
     findings.sort(key=lambda f: _SEV_RANK.get(f["sev"], 9))
 
     failed = {c for f in findings for c in f["owasp"]}
+    # Honesty spine at the control level: a control is PASS only if one of its classes genuinely reached
+    # CLEAN; a SUSPECTED class surfaces as a lead (status SUSPECTED, not PASS); a class that came back
+    # ONLY INCONCLUSIVE was never really tested, so its control is NOT scored PASS — an untested-PASS is
+    # the same over-claim as a fabricated proof.
+    cls_verdicts: dict[str, set] = {}
+    for r in probe_results:
+        cls_verdicts.setdefault(r.probe, set()).add(r.verdict)
+
+    def _controls(cls):
+        return CLASS_META.get(cls, {}).get("owasp", [])
+    suspected_controls = {c for cls, v in cls_verdicts.items() if SUSPECTED in v for c in _controls(cls)}
+    real_controls = {c for cls, v in cls_verdicts.items()
+                     if v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
+    inconclusive_controls = {c for cls, v in cls_verdicts.items() if v <= {INCONCLUSIVE}
+                             for c in _controls(cls)} - real_controls
     tested = set(TESTED_CONTROLS)
     if not sc_dir:                       # supply chain didn't run for this target -> MCP04 not tested here
         tested.discard("MCP04")
     compliance = []
     for cid, title in OWASP_MCP_TOP10.items():
-        status = ("FAIL" if cid in failed else "PASS") if cid in tested else "NOT TESTED"
+        if cid not in tested:
+            status = "NOT TESTED"
+        elif cid in failed:
+            status = "FAIL"
+        elif cid in suspected_controls:
+            status = "SUSPECTED"
+        elif cid in inconclusive_controls:
+            status = "NOT TESTED"        # class(es) only returned INCONCLUSIVE — never a PASS on an untested class
+        else:
+            status = "PASS"
         compliance.append({"id": cid, "title": title, "status": status})
 
     # Tool-by-tool coverage: every (tool, class) exercised + its verdict — proves what was tested,
@@ -260,8 +284,20 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
             if cov["verdict"] == "CLEAN" and cov["cls"] not in _NO_CRED_SAFE_CLASSES:
                 cov["verdict"] = "REQUIRES_CREDENTIALS"
 
+    # Surface SUSPECTED leads and INCONCLUSIVE (untested) classes distinctly — never folded into CLEAN.
+    suspected = []
+    for r in probe_results:
+        if r.verdict == SUSPECTED:
+            meta = CLASS_META.get(r.probe, {})
+            suspected.append({"cls": r.probe, "tool": r.tool, "detail": r.rationale,
+                              "evidence": r.evidence or "", "cwe": meta.get("cwe", ""),
+                              "title": meta.get("title", r.probe)})
+    inconclusive = [{"cls": r.probe, "tool": r.tool, "detail": r.rationale}
+                    for r in probe_results if r.verdict == INCONCLUSIVE]
     return {
         "auth_gated": auth_gated,
+        "suspected": suspected,
+        "inconclusive": inconclusive,
         "target": " ".join(argv),
         "scanned_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "verdict": "VULNERABLE" if findings else "CLEAN",
@@ -294,10 +330,17 @@ def render_markdown(rep: dict) -> str:
               f"The highest-risk issue is **{top['title']} ({top['sev']}, {top['cwe']})** on tool "
               f"`{top['tool']}`. Per-finding remediation is below; a re-test is recommended once fixes land.", ""]
     else:
+        n_susp, n_inc = len(rep.get("suspected", [])), len(rep.get("inconclusive", []))
+        extra = ""
+        if n_susp:
+            extra += (f" **{n_susp} suspected lead(s)** were surfaced by inference (response-pattern / "
+                      "static signals) and require confirmation — they are NOT proven findings.")
+        if n_inc:
+            extra += f" {n_inc} class result(s) were INCONCLUSIVE (could not be tested — not scored clean)."
         L += [f"This MCP server was tested against {len(CLASS_META)} ground-truth attack classes and the "
               "OWASP MCP Top 10. **Verdict: CLEAN** — no vulnerability was confirmed by ground-truth "
-              "probing. This report stands as a point-in-time security attestation across the tested "
-              "controls (see the compliance crosswalk below).", ""]
+              f"probing.{extra} This report stands as a point-in-time security attestation across the "
+              "tested controls (see the compliance crosswalk below).", ""]
 
     # --- Attack surface: map what exists before assessing it (every assessment starts here) ----
     surf = rep.get("surface") or {}
@@ -330,10 +373,20 @@ def render_markdown(rep: dict) -> str:
                   f"- **Evidence (ground truth):** {f['evidence'] or f['detail']}",
                   f"- **Detail:** {f['detail']}",
                   f"- **Remediation:** {f['fix']}", ""]
+    susp = rep.get("suspected") or []
+    if susp:
+        L += ["## Suspected (unconfirmed leads)", "",
+              "Surfaced by inference (response-pattern / static / observed-change signals), **not** a "
+              "planted-oracle proof. Each needs confirmation before it is treated as a finding:", "",
+              "| Class | Tool | Why (inference) |", "|---|---|---|"]
+        for s in susp:
+            L.append(f"| {s['cls']} | `{s.get('tool','')}` | {s.get('detail','')[:120]} |")
+        L += [""]
     L += ["## OWASP MCP Top 10 — compliance posture", "",
           "| Control | Status |", "|---|---|"]
     for c in rep["compliance"]:
-        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "NOT TESTED": "— not tested"}[c["status"]]
+        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED (unconfirmed lead)",
+                "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
         L.append(f"| {c['id']} {c['title']} | {mark} |")
 
     # --- Compliance crosswalk: tested controls -> audit frameworks (A2) ------------------------
@@ -358,7 +411,16 @@ def render_markdown(rep: dict) -> str:
         for tool, entries in by_tool.items():
             classes = ", ".join(sorted({cls for cls, _ in entries}))
             vulns = sorted({cls for cls, v in entries if v == VULNERABLE})
-            result = ("❌ vulnerable: " + ", ".join(vulns)) if vulns else "✅ clean"
+            susp = sorted({cls for cls, v in entries if v == SUSPECTED})
+            inc = sorted({cls for cls, v in entries if v == INCONCLUSIVE})
+            if vulns:
+                result = "❌ vulnerable: " + ", ".join(vulns)
+            elif susp:
+                result = "⚠ suspected: " + ", ".join(susp)
+            elif inc:
+                result = "— inconclusive: " + ", ".join(inc)
+            else:
+                result = "✅ clean"
             L.append(f"| `{tool}` | {classes} | {result} |")
 
     # --- Intent-flow exposure (MCP06) — Basic-scan enabling-conditions flag, not a finding ---------
@@ -375,9 +437,10 @@ def render_markdown(rep: dict) -> str:
             L += ["Minimal intent-flow surface: the server exposes no model-facing resources and no "
                   "external-content tools that an attacker could use for context injection.", ""]
 
-    L += ["> Verdicts are ground-truth (planted honeytoken / sentinel / canary), not heuristic. "
-          "“Not tested” controls are outside this engine's active probe scope, stated honestly. "
-          "Compliance references support an audit; they are not an attestation of certification.", ""]
+    L += ["> FINDINGS are ground-truth (planted honeytoken / sentinel / canary), not heuristic. SUSPECTED "
+          "items are inference-based leads requiring confirmation, and INCONCLUSIVE classes could not be "
+          "tested (never scored as clean). “Not tested” controls are outside this engine's active probe "
+          "scope, stated honestly. Compliance references support an audit; not an attestation of certification.", ""]
     return "\n".join(L)
 
 
@@ -412,8 +475,9 @@ def render_html(rep: dict) -> str:
             f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
             f"<title>MCP VAPT Report — {tgt}</title><style>{_REPORT_CSS}</style></head>"
             f"<body><div class='doc'>{body}"
-            f"<footer>mcp-rt · ground-truth MCP security · every verdict proven by a planted "
-            f"honeytoken / sentinel / canary. Responsible disclosure before any public listing.</footer>"
+            f"<footer>mcp-rt · ground-truth MCP security · every FINDING proven by a planted "
+            f"honeytoken / sentinel / canary; SUSPECTED items are inference leads, not proof. "
+            f"Responsible disclosure before any public listing.</footer>"
             f"</div></body></html>")
 
 

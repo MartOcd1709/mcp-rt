@@ -36,23 +36,75 @@ import sys
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-VULNERABLE, CLEAN, NOT_APPLICABLE = "VULNERABLE", "CLEAN", "NOT_APPLICABLE"
+VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
+    "VULNERABLE", "SUSPECTED", "CLEAN", "INCONCLUSIVE", "NOT_APPLICABLE")
+
+# The honesty spine: a verdict is DERIVED from HOW we reached it (confirmation_method), never set by a
+# probe directly — so "how sure are we" and "what do we claim" can never drift apart. verdict_for() is
+# the SOLE verdict source. PROOF (a planted oracle fired, or a causal effect shown against a baseline)
+# is the ONLY path to VULNERABLE; response-pattern / static / observed-change inference is SUSPECTED
+# (a lead, not a finding); a blocked test is INCONCLUSIVE (never silently CLEAN).
+_METHOD_VERDICT = {
+    "oracle":          VULNERABLE,      # a per-run planted marker/canary/sink/eval-product fired
+    "differential":    VULNERABLE,      # effect demonstrated against a without-payload baseline
+    "signature":       SUSPECTED,       # response-pattern inference only (e.g. a SQL parser error)
+    "static":          SUSPECTED,       # structural scan (e.g. concealed metadata) — intent inferred
+    "observed_change": SUSPECTED,       # in-session tool-def mutation — can't prove it's malicious
+    "oracle_negative": CLEAN,           # the oracle ran and nothing fired
+    "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
+    "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
+    "error":           INCONCLUSIVE,    # the call / transport failed — the test could not be run
+    "not_applicable":  NOT_APPLICABLE,  # no candidate tool/param, or nothing to test
+}
+
+
+def verdict_for(method: str) -> str:
+    """The SOLE verdict source. A probe reports confirmation_method; the verdict follows from this map.
+    An unknown method raises (caught by the selfcheck) — a probe may never invent a verdict."""
+    return _METHOD_VERDICT[method]
 
 
 @dataclass
 class ProbeResult:
     probe: str
     tool: str
-    verdict: str
+    confirmation_method: str            # HOW the conclusion was reached — the single input to verdict
     marker: str = ""
     evidence: str = ""
     rationale: str = ""
+    verdict: str = field(init=False)    # DERIVED only; a probe cannot pass it (structural single-source)
+
+    def __post_init__(self):
+        self.verdict = verdict_for(self.confirmation_method)
+
+
+_REFUSAL = re.compile(
+    r"security violation|not in allowed list|not allowed|outside allowed roots|permission denied|"
+    r"forbidden|unauthori[sz]ed|access denied|not permitted|disallowed|policy (violation|denied)|"
+    r"\b40[13]\b|validation (failed|error)|\brefus(e|ed|al)", re.I)
+
+
+def _is_refusal(text: str) -> bool:
+    """STRICT: only a recognized, deliberate server deny counts as a refusal (evidence the control
+    works -> CLEAN). A generic/opaque exception is NEVER a refusal (-> INCONCLUSIVE)."""
+    return bool(_REFUSAL.search(text or ""))
+
+
+def _negative_method(returned_texts: list[str], raised_msgs: list[str]) -> str:
+    """confirmation_method for a result where NO oracle fired. CLEAN requires positive evidence the
+    oracle actually ran (a genuine non-refusal response) or that the server refused; if every attempt
+    was blocked by an unrecognized failure, the class is INCONCLUSIVE, never a silent CLEAN."""
+    if any(not _is_refusal(t) for t in returned_texts):
+        return "oracle_negative"                    # a real response came back and nothing fired
+    if returned_texts or any(_is_refusal(m) for m in raised_msgs):
+        return "refusal"                            # the only responses/exceptions were recognized denies
+    return "error"                                  # only unrecognized failures — the test could not run
 
 
 # ---- candidate heuristics --------------------------------------------------------------
@@ -234,29 +286,31 @@ async def probe_ssrf(session, tools) -> list[ProbeResult]:
             marker = "ssrf-" + uuid.uuid4().hex[:10]
             direct = f"http://127.0.0.1:{sink.port}/{marker}"
             redir = f"http://127.0.0.1:{sink.port}/redir-{marker}"
+            returned, raised = [], []
             for param in params:
                 for url in (direct, redir):
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, url)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, url)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
             await asyncio.sleep(0.3)
             reached = sink.hit(marker)
             if not reached:
-                out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,
+                out.append(ProbeResult("ssrf", tool.name, _negative_method(returned, raised), marker=marker,
                                        rationale="did not fetch the loopback URL"))
                 continue
             desc = (tool.description or "") + " " + tool.name
             dedicated = bool(_DEDICATED_FETCH.search(desc) or _FETCH_NAME.search(tool.name))
             follows = sink.hit(f"followed-{marker}")
             if dedicated:   # a general fetch/curl tool reaching a URL is its stated job — not a vuln
-                out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,
+                out.append(ProbeResult("ssrf", tool.name, "by_design", marker=marker,
                                        evidence=f"{tool.name} -> loopback sink",
                                        rationale="dedicated fetch/curl tool reached internal/loopback — "
                                                  "by-design capability (informational: no SSRF egress "
                                                  "filtering), not a finding"))
             else:           # a tool NOT meant as a general fetcher made an outbound request -> SSRF
-                out.append(ProbeResult("ssrf", tool.name, VULNERABLE, marker=marker,
+                out.append(ProbeResult("ssrf", tool.name, "oracle", marker=marker,
                                        evidence=f"{tool.name} -> loopback sink",
                                        rationale="a non-fetch tool was steered to request an "
                                                  "attacker-controlled host, reaching loopback/internal"
@@ -276,6 +330,7 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
             if not params:
                 continue
             fired, used = False, ""
+            returned, raised = [], []
             for param in params:
                 sentinel = d / ("s_" + uuid.uuid4().hex[:10])
                 cmarker = "cmd-" + uuid.uuid4().hex[:10]
@@ -297,9 +352,10 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
                 ]
                 for p in payloads:
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
                     await asyncio.sleep(0.05)
                     if sentinel.exists() or sink.hit(cmarker):
                         fired, used = True, p
@@ -307,20 +363,20 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
                 if fired:
                     break
             if not fired:
-                out.append(ProbeResult("command_injection", tool.name, CLEAN, evidence=used,
-                                       rationale="no payload achieved command execution"))
+                out.append(ProbeResult("command_injection", tool.name, _negative_method(returned, raised),
+                                       evidence=used, rationale="no payload achieved command execution"))
                 continue
             desc = (tool.description or "") + " " + tool.name
             if _CLAIMS_RESTRICTION.search(desc):
-                verdict, why = VULNERABLE, ("a tool that claims to restrict/validate executed an "
-                                            "injected command — restriction bypass")
+                method, why = "oracle", ("a tool that claims to restrict/validate executed an "
+                                         "injected command — restriction bypass")
             elif _EXEC_GENERAL.search(desc):
-                verdict, why = CLEAN, ("general command/code-execution tool ran the command — "
-                                       "by-design (informational: unrestricted execution), not a finding")
+                method, why = "by_design", ("general command/code-execution tool ran the command — "
+                                            "by-design (informational: unrestricted execution), not a finding")
             else:
-                verdict, why = VULNERABLE, ("a tool not advertised as a command executor ran an "
-                                            "injected command")
-            out.append(ProbeResult("command_injection", tool.name, verdict, evidence=used, rationale=why))
+                method, why = "oracle", ("a tool not advertised as a command executor ran an "
+                                         "injected command")
+            out.append(ProbeResult("command_injection", tool.name, method, evidence=used, rationale=why))
     finally:
         sink.stop()
         shutil.rmtree(d, ignore_errors=True)
@@ -371,7 +427,7 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
             for tool in tools:
                 if _writer_params(tool) or _candidate_params(tool, _PATH_PARAM, _READ_DESC,
                                                              ["path", "file", "filepath", "filename"]):
-                    out.append(ProbeResult("path_traversal", tool.name, NOT_APPLICABLE,
+                    out.append(ProbeResult("path_traversal", tool.name, "not_applicable",
                         rationale="server's allowed root spans all candidate locations — no out-of-root "
                                   "path exists to test traversal (not a finding)"))
             return out
@@ -387,14 +443,17 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                 path_p, content_p = writer
                 wmark = "PW-" + uuid.uuid4().hex[:12]
                 target = d / f"escaped_{wmark}.txt"       # outside any server root
+                returned, raised = [], []
                 try:
-                    await session.call_tool(tool.name, _build_args(
+                    r = await session.call_tool(tool.name, _build_args(
                         tool, {path_p: str(target), content_p: wmark}))
-                except Exception:  # noqa: BLE001
-                    pass
+                    returned.append(_result_text(r))
+                except Exception as exc:  # noqa: BLE001
+                    raised.append(str(exc))
                 await asyncio.sleep(0.1)
                 wrote = target.exists() and wmark in target.read_text(errors="replace")
-                out.append(ProbeResult("path_traversal", tool.name, VULNERABLE if wrote else CLEAN,
+                out.append(ProbeResult("path_traversal", tool.name,
+                                       "oracle" if wrote else _negative_method(returned, raised),
                                        marker=wmark, evidence=f"{tool.name}(write outside root)",
                                        rationale=("wrote a file outside its root (arbitrary write)"
                                                   if wrote else "write confined to root")))
@@ -405,18 +464,22 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
             payloads = [str(canary), "../" * 20 + str(canary).lstrip(os.sep),
                         str(canary).replace("/", "\\")]
             fired, used = False, ""
+            returned, raised = [], []
             for param in params:
                 for p in payloads:
                     try:
                         r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
                         r = None
+                        raised.append(str(exc))
                     if r and marker in _result_text(r):    # only OUR planted marker counts
                         fired, used = True, p
                         break
                 if fired:
                     break
-            out.append(ProbeResult("path_traversal", tool.name, VULNERABLE if fired else CLEAN, marker=marker,
+            out.append(ProbeResult("path_traversal", tool.name,
+                                   "oracle" if fired else _negative_method(returned, raised), marker=marker,
                                    evidence=used,
                                    rationale=("returned a file outside its root (planted canary leaked)"
                                               if fired else "did not return the out-of-root canary")))
@@ -493,7 +556,7 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
     for label, name, text in surfaces:
         hits = _scan_conceal(name) + _scan_conceal(text)
         if hits:
-            out.append(ProbeResult("tool_poisoning", label, VULNERABLE,
+            out.append(ProbeResult("tool_poisoning", label, "static",
                                    evidence="; ".join(f"{c}: {e}" for c, e in hits),
                                    rationale="concealed payload in model-facing metadata "
                                              "(invisible in the approval view)"))
@@ -510,29 +573,32 @@ async def probe_sql_injection(session, tools) -> list[ProbeResult]:
         if not params:
             continue
         fired, used, ev = False, "", ""
+        returned, raised = [], []
         for param in params:
             for p in ["'", '"', "' OR '1'='1", "')--", "1); DROP TABLE x--"]:
                 try:
                     r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
                     txt = _result_text(r)
+                    returned.append(txt)
                 except Exception as exc:  # noqa: BLE001 — some servers surface the SQL error as a tool error
                     txt = str(exc)
+                    raised.append(txt)
                 if _SQL_ERR.search(txt) and not _SQL_FALSE.search(txt):   # exclude FTS5/full-text errors
                     fired, used, ev = True, p, txt[:160]
                     break
             if fired:
                 break
         if not fired:
-            out.append(ProbeResult("sql_injection", tool.name, CLEAN, evidence=used,
-                                   rationale="no SQL parser error surfaced"))
+            out.append(ProbeResult("sql_injection", tool.name, _negative_method(returned, raised),
+                                   evidence=used, rationale="no SQL parser error surfaced"))
             continue
         desc = (tool.description or "") + " " + tool.name
         if _SQL_EXEC.search(desc):
-            out.append(ProbeResult("sql_injection", tool.name, CLEAN, evidence=used,
+            out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=used,
                                    rationale="dedicated SQL-execution tool surfaced a SQL error — "
                                              "by-design (it runs SQL), not injection"))
         else:
-            out.append(ProbeResult("sql_injection", tool.name, VULNERABLE, evidence=used,
+            out.append(ProbeResult("sql_injection", tool.name, "signature", evidence=used,
                                    rationale=f"a non-SQL-execution tool concatenated input into SQL "
                                              f"(error-based): {ev}"))
     return out
@@ -564,19 +630,23 @@ async def probe_arg_injection(session, tools) -> list[ProbeResult]:
         if not params:
             continue
         fired, used, ev = False, "", ""
+        returned, raised = [], []
         for param in params:
             for p in ("--version", "--help", "-V"):
                 try:
                     r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
                     txt = _result_text(r)
+                    returned.append(txt)
                 except Exception as exc:  # noqa: BLE001
                     txt = str(exc)
+                    raised.append(txt)
                 if _FLAG_EFFECT.search(txt):
                     fired, used, ev = True, p, txt[:120]
                     break
             if fired:
                 break
-        out.append(ProbeResult("arg_injection", tool.name, VULNERABLE if fired else CLEAN, evidence=used,
+        out.append(ProbeResult("arg_injection", tool.name,
+                               "signature" if fired else _negative_method(returned, raised), evidence=used,
                                rationale=(f"leading-dash value interpreted as a CLI flag by the wrapped "
                                           f"binary — argument injection: {ev}" if fired
                                           else "input not interpreted as a CLI flag")))
@@ -594,19 +664,23 @@ async def probe_ssti(session, tools) -> list[ProbeResult]:
         if not params:
             continue
         fired, used = False, ""
+        returned, raised = [], []
         for param in params:
             for p in _SSTI_PAYLOADS:
                 try:
                     r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
                     txt = _result_text(r)
-                except Exception:  # noqa: BLE001
+                    returned.append(txt)
+                except Exception as exc:  # noqa: BLE001
                     txt = ""
+                    raised.append(str(exc))
                 if _SSTI_MARK in txt:
                     fired, used = True, p
                     break
             if fired:
                 break
-        out.append(ProbeResult("ssti", tool.name, VULNERABLE if fired else CLEAN, evidence=used,
+        out.append(ProbeResult("ssti", tool.name,
+                               "oracle" if fired else _negative_method(returned, raised), evidence=used,
                                rationale=("template expression evaluated server-side "
                                           "(1337*1337 = 1787569 in output)" if fired
                                           else "template expression not evaluated")))
@@ -633,17 +707,17 @@ async def probe_rug_pull(session, tools) -> list[ProbeResult]:
     try:
         after_tools = (await session.list_tools()).tools
     except Exception:  # noqa: BLE001
-        return [ProbeResult("rug_pull", "(server)", CLEAN, rationale="could not re-enumerate tools")]
+        return [ProbeResult("rug_pull", "(server)", "error", rationale="could not re-enumerate tools")]
     after = {t.name: h(t) for t in after_tools}
     changed = [n for n in before if n in after and before[n] != after[n]]
     added = [n for n in after if n not in before]
     removed = [n for n in before if n not in after]
     if changed or added or removed:
-        return [ProbeResult("rug_pull", (changed or added or removed)[0], VULNERABLE,
+        return [ProbeResult("rug_pull", (changed or added or removed)[0], "observed_change",
                             evidence=f"changed={changed} added={added} removed={removed}",
                             rationale="tool definitions mutated within a session "
                                       "(dynamic redefinition — rug-pull indicator)")]
-    return [ProbeResult("rug_pull", "(server)", CLEAN,
+    return [ProbeResult("rug_pull", "(server)", "oracle_negative",
                         rationale="tool definitions stable across the session")]
 
 
@@ -674,6 +748,7 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
             if not params:
                 continue
             fired, used = False, ""
+            returned, raised = [], []
             for param in params:
                 sentinel = d / ("s_" + uuid.uuid4().hex[:10])
                 dmarker = "deser-" + uuid.uuid4().hex[:10]
@@ -686,9 +761,10 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
                 ]
                 for p in payloads:
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
                     await asyncio.sleep(0.05)
                     if sentinel.exists() or sink.hit(dmarker):
                         fired, used = True, p
@@ -696,12 +772,12 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
                 if fired:
                     break
             if fired:
-                out.append(ProbeResult("deserialization", tool.name, VULNERABLE, evidence=used[:120],
+                out.append(ProbeResult("deserialization", tool.name, "oracle", evidence=used[:120],
                            rationale="tool deserialized attacker input and executed code (unsafe "
                                      "yaml.load / pickle.loads / eval) — ground-truthed by a sentinel "
                                      "only RCE could create (CWE-502)"))
             else:
-                out.append(ProbeResult("deserialization", tool.name, CLEAN,
+                out.append(ProbeResult("deserialization", tool.name, _negative_method(returned, raised),
                            rationale="no deserialization payload achieved code execution"))
     finally:
         sink.stop()
@@ -730,31 +806,36 @@ async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     user-supplied value is not oversharing."""
     canary = _CTX_CANARY
     if not canary:
-        return [ProbeResult("context_oversharing", "(server)", CLEAN, rationale="no context canary planted")]
+        return [ProbeResult("context_oversharing", "(server)", "not_applicable", rationale="no context canary planted")]
     out: list[ProbeResult] = []
+    returned, raised = [], []
     for t in tools:                                   # exercise each tool with benign args
         try:
             text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
-        except Exception:  # noqa: BLE001
+            returned.append(text)
+        except Exception as exc:  # noqa: BLE001
+            raised.append(str(exc))
             continue
         if canary in text:
-            out.append(ProbeResult("context_oversharing", t.name, VULNERABLE, marker=canary,
+            out.append(ProbeResult("context_oversharing", t.name, "oracle", marker=canary,
                        rationale="tool returned the server's environment context (a planted secret) to "
                                  "the model — context oversharing (OWASP MCP10 / CWE-200)"))
     try:                                              # and every resource the server exposes
         for res in (await session.list_resources()).resources:
             try:
                 text = _res_text(await session.read_resource(res.uri))
-            except Exception:  # noqa: BLE001
+                returned.append(text)
+            except Exception as exc:  # noqa: BLE001
+                raised.append(str(exc))
                 continue
             if canary in text:
-                out.append(ProbeResult("context_oversharing", "resource:" + str(res.uri), VULNERABLE,
+                out.append(ProbeResult("context_oversharing", "resource:" + str(res.uri), "oracle",
                            marker=canary, rationale="resource exposed the server's environment context "
                                                     "(a planted secret) to the model (OWASP MCP10 / CWE-200)"))
     except Exception:  # noqa: BLE001 — many servers expose no resources endpoint
         pass
     if not out:
-        out.append(ProbeResult("context_oversharing", "(server)", CLEAN,
+        out.append(ProbeResult("context_oversharing", "(server)", _negative_method(returned, raised),
                    rationale="no tool or resource surfaced the planted environment secret"))
     return out
 
@@ -848,7 +929,7 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                     try:
                         results.extend(await probe(s, tools))
                     except Exception as pe:  # noqa: BLE001
-                        results.append(ProbeResult(getattr(probe, "__name__", "probe"), "-", "NOT_RUN",
+                        results.append(ProbeResult(getattr(probe, "__name__", "probe"), "-", "error",
                                                    rationale=f"probe aborted: {_unwrap(pe) or type(pe).__name__}"))
     except Exception as exc:   # unwrap anyio/TaskGroup noise into a readable root cause (timeouts/cancel still propagate)
         raise ScanError(_unwrap(exc) or f"{type(exc).__name__}: {exc}"[:200]) from exc
@@ -878,7 +959,9 @@ def _print(results: list[ProbeResult]) -> None:
         print("  (no candidate tools matched any probe)")
         return
     for r in results:
-        tag = {"VULNERABLE": "\033[31mVULN\033[0m", "CLEAN": "\033[32mok\033[0m"}.get(r.verdict, r.verdict)
+        tag = {"VULNERABLE": "\033[31mVULN\033[0m", "SUSPECTED": "\033[33mSUSPECT\033[0m",
+               "CLEAN": "\033[32mok\033[0m", "INCONCLUSIVE": "\033[90mINCONCL\033[0m",
+               "NOT_APPLICABLE": "\033[90mn/a\033[0m"}.get(r.verdict, r.verdict)
         print(f"  [{tag:>12}] {r.probe:<18} {r.tool:<22} {r.rationale}")
 
 
@@ -888,8 +971,9 @@ def _selftest() -> bool:
     vuln = asyncio.run(scan_target([py, str(base / "vuln_server.py")]))
     safe = asyncio.run(scan_target([py, str(base / "safe_server.py")]))
 
-    def fired(results, probe):
-        return any(r.verdict == VULNERABLE for r in results if r.probe == probe)
+    def fired(results, probe):   # a probe "fires" if it reaches a POSITIVE signal — proof (VULNERABLE)
+        return any(r.verdict in (VULNERABLE, SUSPECTED)   # or inference lead (SUSPECTED), per the spine
+                   for r in results if r.probe == probe)
 
     print("vuln fixture (every probe must FIRE):")
     _print(vuln)
