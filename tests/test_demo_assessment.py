@@ -60,3 +60,25 @@ def test_novel_section_in_report(outcomes, novel):
     r = D.render_demo_report(outcomes, None, novel)
     assert "Novel MCP-00 family (the moat)" in r
     assert "LEAD (capability hypothesis" in r   # mcp_cap shown honestly as a lead, not confirmed
+
+
+@pytest.fixture(scope="module")
+def t10():
+    from hunt.demo_t10 import run_t10
+    return run_t10()
+
+
+def test_t10_zero_fp_and_leads_not_promoted(t10):
+    # the moat invariant: no safe-host control ever fires
+    for n in t10:
+        assert n.silent_safe is True, f"{n.cls}: safe-host control fired — FALSE POSITIVE"
+    # 6 CONFIRMED host-pairs + mcp_apps injection CONFIRMED = 7; structural UI items stay LEADs
+    assert sum(n.confirmed for n in t10) >= 7
+    leads = [n for n in t10 if n.kind == "LEAD"]
+    assert leads and all(n.confirmed is False for n in leads)   # mcp_apps structural leads never counted CONFIRMED
+
+
+def test_t10_section_in_report(outcomes, t10):
+    r = D.render_demo_report(outcomes, None, None, t10)
+    assert "T10 — 2026-07-28 spec surface" in r
+    assert "LEAD (structural" in r

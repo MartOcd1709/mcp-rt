@@ -25,6 +25,7 @@ from pathlib import Path
 
 from hunt.report import CLASS_META, run_full_scan
 from hunt.demo_novel import run_novel
+from hunt.demo_t10 import run_t10, T10_META
 from mcp_rt import taxonomy
 from mcp_rt import (tool_authz_idor, tool_xxe, tool_open_redirect, tool_proto_pollution,
                     tool_redos, tool_resource_limit, tool_telemetry_leak,
@@ -189,13 +190,16 @@ def run_classic_leg() -> list[dict]:
         return []
 
 
-def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = None, novel=None) -> str:
+def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = None, novel=None, t10=None) -> str:
     confirmed = [o for o in outcomes if o.confirmed]
     skipped = [o for o in outcomes if o.skipped]
     classic = classic or []
     novel = novel or []
     nov_conf = [n for n in novel if n.confirmed]
     nov_lead = [n for n in novel if n.kind == "LEAD" and not n.skipped]
+    t10 = t10 or []
+    t10_conf = [n for n in t10 if n.confirmed]
+    t10_lead = [n for n in t10 if n.kind == "LEAD" and not n.skipped]
     cov = taxonomy.coverage()
     L = ["# mcp-rt — End-to-End Assessment (demo)", "",
          "> Each class is fired against a deliberately-vulnerable MCP host and proven only by a "
@@ -206,6 +210,8 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
          + (f"; +{len(classic)} classic (T0) findings on the aggregate vuln server" if classic else "")
          + (f"; +{len(nov_conf)} novel MCP-00 CONFIRMED" + (f" & {len(nov_lead)} lead(s)" if nov_lead else "")
             if (nov_conf or nov_lead) else "")
+         + (f"; +{len(t10_conf)} T10 spec CONFIRMED" + (f" & {len(t10_lead)} lead(s)" if t10_lead else "")
+            if (t10_conf or t10_lead) else "")
          + (f" ({len(skipped)} skipped: {', '.join(o.cls for o in skipped)})" if skipped else "") + ".", "",
          "## Proven findings — new classes (T11 + T12)", ""]
     for o in confirmed:
@@ -247,6 +253,26 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
                   "- **Why a LEAD, not CONFIRMED:** no canary/nonce deterministically fires here, so it is "
                   "reported honestly as a lead and never counted as proven.",
                   f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
+    if t10_conf or t10_lead:
+        L += ["## T10 — 2026-07-28 spec surface", "",
+              "The stateless-spec attack surface (cacheScope, Tasks, _meta identity, Mcp-Name differential, "
+              "downgrade, URL-elicitation, MCP-Apps UI), each proven offline on its vuln/safe host-pair. The "
+              "MCP-Apps structural items (clickjacking / CSP / permissions) are honest LEADs, never promoted.", ""]
+        for n in t10_conf:
+            m = T10_META.get(n.cls, {})
+            owasp = ", ".join(m.get("owasp") or []) or "—"
+            L += [f"### {m.get('title', n.cls)}  ·  {m.get('sev','?')}  ·  {m.get('cwe','?')}  ·  OWASP-MCP: {owasp}",
+                  f"- **Proven offensive result (the moat):** {n.proof}; safe-host control stayed **silent** → zero-FP.",
+                  f"- **Evidence:** {n.evidence}",
+                  f"- **Root cause (under assessment):** `{n.source}`.",
+                  f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
+        for n in t10_lead:
+            m = T10_META.get(n.cls, {})
+            L += [f"### {m.get('title', n.cls)}  ·  LEAD (structural — NOT a canary-confirmed finding)",
+                  f"- **Observation:** {n.proof} — {n.evidence}",
+                  "- **Why a LEAD, not CONFIRMED:** structural observations with no deterministic sink; reported "
+                  "honestly as leads and never counted as proven (taxonomy marks this class PARTIAL).",
+                  f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
     L += ["## Honest coverage ledger (never inflated)", "",
           f"From `mcp_rt/taxonomy.py` (single source of truth): **{cov['total_items']} canonical items** — "
           f"**{cov['by_status']['COVERED']} COVERED** (zero-FP proof), "
@@ -266,7 +292,8 @@ def main(argv=None) -> int:
     outcomes = run_demo()
     classic = run_classic_leg()
     novel = run_novel()
-    report = render_demo_report(outcomes, classic, novel)
+    t10 = run_t10()
+    report = render_demo_report(outcomes, classic, novel, t10)
     out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hunt", "reports", "demo")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "demo_report.md")
@@ -279,10 +306,16 @@ def main(argv=None) -> int:
     for n in novel:
         status = "SKIP" if n.skipped else ("LEAD" if n.kind == "LEAD" else ("CONFIRMED" if n.confirmed else "NOT-FIRED"))
         print(f"  [{status:9}] {n.cls:22} (novel) fired={n.fired_vuln} safe_silent={n.silent_safe} {n.skipped}")
+    for n in t10:
+        status = "SKIP" if n.skipped else ("LEAD" if n.kind == "LEAD" else ("CONFIRMED" if n.confirmed else "NOT-FIRED"))
+        print(f"  [{status:9}] {n.cls:22} (T10) fired={n.fired_vuln} safe_silent={n.silent_safe} {n.skipped}")
     nov_conf = sum(n.confirmed for n in novel)
     nov_lead = sum(1 for n in novel if n.kind == "LEAD" and not n.skipped)
+    t10_conf = sum(n.confirmed for n in t10)
+    t10_lead = sum(1 for n in t10 if n.kind == "LEAD" and not n.skipped)
     print(f"\n{confirmed}/{len(outcomes)} new-class CONFIRMED (safe controls silent) + "
-          f"{len(classic)} classic findings + {nov_conf} novel MCP-00 CONFIRMED & {nov_lead} lead(s) — report: {path}")
+          f"{len(classic)} classic findings + {nov_conf} novel MCP-00 CONFIRMED & {nov_lead} lead(s) + "
+          f"{t10_conf} T10 spec CONFIRMED & {t10_lead} lead(s) — report: {path}")
     return 0
 
 
