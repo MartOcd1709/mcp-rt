@@ -23,7 +23,7 @@ classifiers = [
   "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-  "mcp",
+  "mcp==1.30.0",  # pinned: the latest SDK removed Server.list_tools, breaking the classic probe fixtures in a fresh install (CI); update the fixtures to the new API before unpinning
   "rich",
   "anthropic",
   "google-genai",
