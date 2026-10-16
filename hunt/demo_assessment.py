@@ -184,7 +184,9 @@ def run_classic_leg() -> list[dict]:
     vuln = Path(__file__).resolve().parent / "probe_fixtures" / "vuln_server.py"
     try:
         rep = asyncio.run(run_full_scan([sys.executable, str(vuln)]))
-        return rep.get("findings") or []
+        proven = [{**f, "verdict": "VULNERABLE"} for f in (rep.get("findings") or [])]
+        leads = [{**s, "verdict": "SUSPECTED"} for s in (rep.get("suspected") or [])]
+        return proven + leads
     except Exception as e:  # noqa: BLE001 — never let the classic leg break the new-class demo
         print(f"  [classic leg skipped: {type(e).__name__}: {e}]")
         return []
@@ -207,7 +209,7 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
          "silent. Zero false positives: no canary, no finding.", "",
          f"**Verdict: VULNERABLE** — {len(confirmed)}/{len(outcomes)} new-class (T11+T12) classes "
          f"CONFIRMED on the vulnerable target; every safe-host control stayed silent"
-         + (f"; +{len(classic)} classic (T0) findings on the aggregate vuln server" if classic else "")
+         + (f"; +{len(classic)} classic (T0) results on the aggregate vuln server" if classic else "")
          + (f"; +{len(nov_conf)} novel MCP-00 CONFIRMED" + (f" & {len(nov_lead)} lead(s)" if nov_lead else "")
             if (nov_conf or nov_lead) else "")
          + (f"; +{len(t10_conf)} T10 spec CONFIRMED" + (f" & {len(t10_lead)} lead(s)" if t10_lead else "")
@@ -224,15 +226,25 @@ def render_demo_report(outcomes: list[Outcome], classic: list[dict] | None = Non
               f"locates the sink in the customer's server code.",
               f"- **Fix:** {m.get('fix','(see remediation guidance)')}", ""]
     if classic:
-        L += ["## Proven findings — classic stdio probes (T0)", "",
-              "Same engine, classic transport: the direct ground-truth probes fired on the aggregate "
-              "deliberately-vulnerable server (`hunt/probe_fixtures/vuln_server.py`).", ""]
-        for f in classic:
-            owasp = ", ".join(f.get("owasp") or []) or "—"
-            L += [f"### {f.get('title', f.get('cls'))}  ·  {f.get('sev','?')}  ·  {f.get('cwe','?')}  ·  "
-                  f"OWASP-MCP: {owasp}  ·  tool `{f.get('tool','?')}`",
-                  f"- **Evidence:** {(f.get('evidence') or f.get('detail') or '')[:160]}",
-                  f"- **Fix:** {f.get('fix','(see remediation guidance)')}", ""]
+        proven_c = [f for f in classic if f.get("verdict") != "SUSPECTED"]
+        leads_c = [f for f in classic if f.get("verdict") == "SUSPECTED"]
+        if proven_c:
+            L += ["## Proven findings — classic stdio probes (T0)", "",
+                  "Same engine, classic transport: the direct ground-truth probes (a planted oracle fired) on "
+                  "the aggregate deliberately-vulnerable server (`hunt/probe_fixtures/vuln_server.py`).", ""]
+            for f in proven_c:
+                owasp = ", ".join(f.get("owasp") or []) or "—"
+                L += [f"### {f.get('title', f.get('cls'))}  ·  {f.get('sev','?')}  ·  {f.get('cwe','?')}  ·  "
+                      f"OWASP-MCP: {owasp}  ·  tool `{f.get('tool','?')}`",
+                      f"- **Evidence:** {(f.get('evidence') or f.get('detail') or '')[:160]}",
+                      f"- **Fix:** {f.get('fix','(see remediation guidance)')}", ""]
+        if leads_c:
+            L += ["## Suspected leads — classic stdio probes (T0)", "",
+                  "Inference-based (response-pattern / static / observed-change), **NOT** a planted-oracle "
+                  "proof — shown honestly as leads that need confirmation, not findings:", ""]
+            for f in leads_c:
+                L += [f"### {f.get('title', f.get('cls'))}  ·  SUSPECTED  ·  tool `{f.get('tool','?')}`",
+                      f"- **Why (inference):** {(f.get('detail') or f.get('evidence') or '')[:160]}", ""]
     if nov_conf or nov_lead:
         L += ["## Novel MCP-00 family (the moat) — offline, deterministic", "",
               "Our first-to-find MCP-00 classes, proven OFFLINE (no model / no keys): each CONFIRMED fires a "

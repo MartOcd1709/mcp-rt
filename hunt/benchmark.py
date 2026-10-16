@@ -70,7 +70,8 @@ def render_scorecard(b: dict) -> str:
                                  or "none"), "",
          "## OWASP MCP Top 10 scorecard", "", "| Control | Result |", "|---|---|"]
     for c in b["scorecard"]:
-        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "NOT TESTED": "— not tested"}[c["status"]]
+        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED",
+                "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
         L.append(f"| {c['id']} {c['title']} | {mark} |")
     L += ["", f"> `{b['badge']}`", "",
           "> Ground-truth methodology (planted honeytoken / sentinel / canary), not heuristic. "
