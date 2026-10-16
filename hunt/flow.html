@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mcp-rt · Flow</title>
+<style>
+  :root{color-scheme:dark;--bg:#0a0d11;--panel:#121823;--panel2:#0e141d;--bd:#202a36;--fg:#dce4ee;
+        --mut:#8a99a9;--good:#34d399;--bad:#f87171;--warn:#fbbf24;--acc:#60a5fa;
+        --mono:ui-monospace,SFMono-Regular,Menlo,monospace}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+  header{padding:14px 18px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:10px}
+  header b{font-size:15px;letter-spacing:.02em}
+  header .mut{color:var(--mut);font-size:12px}
+  main{max-width:960px;margin:0 auto;padding:18px 16px 60px}
+  .card{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;margin:0 0 14px}
+  label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);margin:0 0 4px}
+  input,select{width:100%;background:var(--panel2);border:1px solid var(--bd);border-radius:7px;color:var(--fg);
+        padding:8px 10px;font:13px var(--mono)}
+  .row{display:flex;gap:10px;flex-wrap:wrap}.row>div{flex:1;min-width:160px}
+  button{background:var(--acc);color:#04121f;border:0;border-radius:7px;padding:9px 16px;font-weight:600;
+        cursor:pointer;font-size:13px}button:disabled{opacity:.5;cursor:default}
+  .verdict{font-weight:700;padding:3px 10px;border-radius:20px;font-size:12px;letter-spacing:.04em}
+  .v-VULNERABLE{background:rgba(248,113,113,.15);color:var(--bad);border:1px solid rgba(248,113,113,.4)}
+  .v-CLEAN{background:rgba(52,211,153,.12);color:var(--good);border:1px solid rgba(52,211,153,.35)}
+  .v-ERROR,.v-running{background:rgba(251,191,36,.12);color:var(--warn);border:1px solid rgba(251,191,36,.35)}
+  #feed{font:12.5px/1.6 var(--mono);max-height:48vh;overflow:auto;border:1px solid var(--bd);border-radius:8px;
+        background:var(--panel2);padding:8px 10px}
+  .step{display:flex;gap:8px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+  .step .seq{color:var(--mut);min-width:26px;text-align:right}
+  .tag{color:var(--mut);min-width:150px}
+  .tag.prove{color:var(--good)} .tag.discover{color:var(--acc)} .tag.report{color:var(--warn)}
+  .step.verdict{color:var(--good)}
+  .finding{border:1px solid var(--bd);border-radius:8px;padding:8px 11px;margin:6px 0;background:var(--panel2)}
+  .finding summary{cursor:pointer;font-weight:600}
+  .finding .ev{color:var(--mut);font:11.5px var(--mono);margin-top:6px;white-space:pre-wrap;word-break:break-word}
+  .cls{color:var(--bad);font-weight:700}.tool{color:var(--acc)}
+  .flows a{color:var(--acc);text-decoration:none;font:12px var(--mono)}
+  .flows div{padding:3px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 8px}
+</style>
+</head>
+<body>
+<header><b>mcp-rt</b><span class="mut">· Flow — live MCP assessment (ground-truth, zero false positives)</span></header>
+<main>
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <div style="flex:2"><label>Target (MCP launch command)</label>
+        <input id="target" placeholder='npx -y @modelcontextprotocol/server-filesystem /tmp'></div>
+      <div style="max-width:150px"><label>Tier</label>
+        <select id="tier"><option value="basic">basic</option><option value="advanced">advanced</option></select></div>
+    </div>
+    <div class="row">
+      <div style="flex:2"><label>API token (Bearer — dev)</label><input id="token" placeholder="paste token"></div>
+      <div style="display:flex;align-items:flex-end;max-width:150px">
+        <button id="run" onclick="run()">Run assessment</button></div>
+    </div>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <h2 style="margin:0">Assessment</h2><span id="verdict" class="verdict v-running">running…</span>
+      <span id="summ" class="mut" style="font:11px var(--mono)"></span>
+    </div>
+    <div id="feed"></div>
+    <h2 style="margin:14px 0 6px">Ground-truth findings</h2>
+    <div id="findings"><span class="mut">— none yet —</span></div>
+  </div>
+
+  <div class="card flows">
+    <h2>Recent flows</h2><div id="flows"><span class="mut">—</span></div>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const tok=()=>$("token").value.trim();
+try{ $("token").value=localStorage.getItem("mcprt_token")||""; }catch(e){}
+
+function hdr(){const h={"Content-Type":"application/json"};const t=tok();if(t)h.Authorization="Bearer "+t;return h;}
+function vclass(v){return "verdict v-"+(v||"running");}
+
+async function run(){
+  try{localStorage.setItem("mcprt_token",tok());}catch(e){}
+  const target=$("target").value.trim(); if(!target){alert("enter a target");return;}
+  $("run").disabled=true; $("result").style.display="block";
+  $("feed").innerHTML=""; $("findings").innerHTML='<span class="mut">— none yet —</span>';
+  $("verdict").className="verdict v-running"; $("verdict").textContent="running…"; $("summ").textContent="";
+  let r;
+  try{ r=await fetch("/api/flow",{method:"POST",headers:hdr(),
+        body:JSON.stringify({target,tier:$("tier").value})}); }
+  catch(e){ $("run").disabled=false; alert("request failed: "+e); return; }
+  if(!r.ok){ $("run").disabled=false; alert("start failed ("+r.status+"): "+await r.text()); return; }
+  const {flow_id}=await r.json();
+  stream(flow_id);
+}
+
+function stream(id){
+  const findings=[];
+  const es=new EventSource(`/api/flow/${id}/stream?access_token=${encodeURIComponent(tok())}`);
+  es.addEventListener("step",e=>{
+    const s=JSON.parse(e.data); addStep(s);
+    if(s.kind==="verdict" && s.text.startsWith("PROVEN")){ findings.push(s); renderFindings(findings); }
+  });
+  es.addEventListener("done",e=>{
+    const d=JSON.parse(e.data); es.close(); $("run").disabled=false;
+    $("verdict").className=vclass(d.verdict); $("verdict").textContent=d.verdict;
+    try{ const sm=JSON.parse(d.summary||"{}");
+      $("summ").textContent=`${sm.findings||0} finding(s) · ${sm.chains||0} chain(s) · ${sm.rounds||0} round(s) · ${sm.points_tested||0} points`; }catch(e){}
+    loadFlows();
+  });
+  es.onerror=()=>{ es.close(); $("run").disabled=false; };
+}
+
+function addStep(s){
+  const f=$("feed");
+  const phaseCls=(s.phase||"").match(/prove|discover|report/)?s.phase:"";
+  const tag=s.phase?`[${s.phase}/${s.role}]`:"[·]";
+  const d=document.createElement("div");
+  d.className="step"+(s.kind==="verdict"?" verdict":"");
+  d.innerHTML=`<span class="seq">${s.seq}</span><span class="tag ${phaseCls}">${esc(tag)}</span><span>${esc(s.text)}</span>`;
+  f.appendChild(d); f.scrollTop=f.scrollHeight;
+}
+
+function renderFindings(list){
+  if(!list.length){ $("findings").innerHTML='<span class="mut">— none —</span>'; return; }
+  $("findings").innerHTML=list.map(s=>{
+    // "PROVEN <class> on <tool>: <evidence>"
+    const m=s.text.match(/^PROVEN (\S+) on (\S+):\s*(.*)$/);
+    const cls=m?m[1]:"finding", tool=m?m[2]:"", ev=m?m[3]:s.text;
+    return `<details class="finding"><summary><span class="cls">${esc(cls)}</span> on <span class="tool">${esc(tool)}</span></summary>`
+         + `<div class="ev">ground-truth: ${esc(ev)}</div></details>`;
+  }).join("");
+}
+
+async function loadFlows(){
+  try{ const r=await fetch("/api/flows",{headers:hdr()}); if(!r.ok)return;
+    const {flows}=await r.json();
+    $("flows").innerHTML=flows.length?flows.map(f=>
+      `<div><a href="#" onclick="openFlow(${f.id});return false">#${f.id}</a> `
+      +`<span class="${vclass(f.verdict)}" style="padding:1px 7px">${esc(f.verdict||f.status)}</span> `
+      +`<span class="mut">${esc(f.target)}</span></div>`).join(""):'<span class="mut">none yet</span>';
+  }catch(e){}
+}
+
+async function openFlow(id){
+  const r=await fetch(`/api/flow/${id}`,{headers:hdr()}); if(!r.ok){alert("load failed");return;}
+  const {flow,steps}=await r.json();
+  $("result").style.display="block"; $("feed").innerHTML="";
+  steps.forEach(addStep);
+  const findings=steps.filter(s=>s.kind==="verdict"&&s.text.startsWith("PROVEN"));
+  renderFindings(findings);
+  $("verdict").className=vclass(flow.verdict); $("verdict").textContent=flow.verdict||flow.status;
+  try{ const sm=JSON.parse(flow.summary||"{}");
+    $("summ").textContent=`${sm.findings||0} finding(s) · ${sm.rounds||0} round(s)`; }catch(e){}
+  window.scrollTo(0,0);
+}
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+loadFlows();
+</script>
+</body>
+</html>

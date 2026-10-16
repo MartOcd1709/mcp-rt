@@ -18,12 +18,20 @@ inputs:
     description: 'Optional explicit MCP config path(s); default auto-discovers .mcp.json / mcp_settings.json'
     required: false
     default: ''
+  attest-dir:
+    description: 'Directory for the signed per-server attestations + registry index'
+    required: false
+    default: 'mcp-rt-attestations'
 
 outputs:
   findings-count:
     description: 'Number of findings'
   sarif-path:
     description: 'Path to the generated SARIF report'
+  attestations:
+    description: 'Number of signed attestations written'
+  attest-dir:
+    description: 'Directory holding the signed attestations + registry index'
 
 runs:
   using: 'docker'
@@ -32,3 +40,4 @@ runs:
     - ${{ inputs.fail-on }}
     - ${{ inputs.sarif-path }}
     - ${{ inputs.config }}
+    - ${{ inputs.attest-dir }}

@@ -19,6 +19,36 @@ skill is the repeatable loop that fills the findings database (and later the das
 one server at a time. Repo root: `~/Desktop/mcp-rt`. Field manual:
 `~/Desktop/mcp-rt_field_manual.html`.
 
+## ⭐ PRIORITY — hunt the MCP-00 family first (where the novel wins actually are)
+
+Hard lesson (Ved, 2026-10): re-scanning the known classes + implementation bugs mostly
+reproduces what the field already catalogs — **after the MCP-00 protocol-00 family we have
+NOT turned up anything genuinely novel.** The 0-days that put mcp-rt's name on the
+checklist have all been protocol-00: unsanitized / trust-model gaps no single vendor can
+patch, only the spec can. So **lead every target with the MCP-00 lane, then fall back to
+the scan/audit loop** — not the other way around.
+
+The protocol-00 family so far (the job is to extend it, not just re-run it):
+- **MCP-00** — unsanitized resource content (`audience:["assistant"]`, no sanitization req).
+- **MCP-00b** — sampling instruction laundering (`sampling/createMessage`; human review is
+  only a SHOULD). Exercised by `mcp_rt/adapters/sampling_host.py`.
+- **MCP-00c** — elicitation credential harvest (`elicitation/create` form; no client-side
+  schema classification req). Exercised by `mcp_rt/adapters/elicitation_host.py`.
+
+**The hunt = the next sibling.** Every server-ORIGINATED or server-CONTROLLED-content
+channel the spec leaves a SHOULD / undefined is a candidate: roots, structured-output /
+resource-link, result `_meta`, progress-message, completion, logging, `server/discover`,
+cacheable list/read. For each ask: does a headless client ingest server-controlled content
+with no MUST-level gate? If yes, and no public PoC exists → that is the novel MCP-00d.
+
+Discipline is unchanged and matters MORE here: a protocol hypothesis is NOT a finding until
+a planted honeytoken fires end-to-end, proven with the **archetype host-pair** pattern —
+`Vulnerable*Host` auto-trusts and fires, `Safe*Host` honours the SHOULD and holds,
+`No*Host` can't declare the capability so can't reach the gap (copy `sampling_host.py` /
+`elicitation_host.py`). By-design ≠ vuln: a channel a client simply ignores (our 2026-08
+`_meta` / progress probe was negative cross-vendor) is an honest RESILIENT, never a
+manufactured claim. Zero-FP is what makes a *novel* protocol claim credible.
+
 ## HARD GUARDRAILS — check before every target (not optional)
 
 1. **Open-source + locally installable only.** We only test servers we can run on our own
@@ -42,7 +72,9 @@ If any of 1–4 is in doubt for a target, record it as `SKIPPED (out of scope)` 
 Pick one candidate from a directory (mcpmarket.com / modelcontextprotocol registry /
 GitHub "mcp server" topics). Capture: name, repo URL, language, install command, stars.
 Prefer servers that (a) touch credentials/files/env and (b) hold an outbound channel —
-those are where the `server_side_workflow` class lives.
+those are where the `server_side_workflow` class lives. **Also note which protocol-00
+capabilities it declares** (sampling / elicitation / roots / resource subscriptions) — per
+the PRIORITY section, those are the first thing to probe, not an afterthought.
 
 ### 2 · SCOPE CHECK
 Confirm guardrail #1 (OSS + local install). Note the install command. If it needs an API

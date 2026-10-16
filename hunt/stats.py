@@ -36,9 +36,11 @@ def stats() -> dict:
                         for cid, t in OWASP_MCP_TOP10.items()],
         "ledger": {
             "servers_tested": g["tested"],
+            "servers_ran": g["ran"],                           # honest reliability denominator (tested − setup_failed)
             "confirmed": g["confirmed"],                       # distinct targets with a real finding
             "clean": len(g["clean"]),
-            "inconclusive": g["inconclusive"],
+            "inconclusive": g["inconclusive"],                 # server RAN but no ground-truth verdict
+            "setup_failed": g["setup_failed"],                 # never ran: needs creds/config / didn't install
             "under_coordinated_disclosure": g["disclosing"],   # counted, NOT named
             "candidates_triaged_out": g["triaged"],            # probe-fires reviewed and rejected (zero-FP proof)
             "clean_named": g["clean"],                         # public — safe to display
@@ -55,8 +57,9 @@ def main(argv=None) -> int:
     out.write_text(json.dumps(data, indent=2))
     led = data["ledger"]
     print(f"stats written: {out}")
-    print(f"  classes={data['class_count']}  tested={led['servers_tested']}  confirmed={led['confirmed']}  "
-          f"clean={led['clean']}  inconclusive={led['inconclusive']}  triaged_out={led['candidates_triaged_out']}")
+    print(f"  classes={data['class_count']}  tested={led['servers_tested']} (ran={led['servers_ran']})  "
+          f"confirmed={led['confirmed']}  clean={led['clean']}  inconclusive={led['inconclusive']}  "
+          f"setup_failed={led['setup_failed']}  triaged_out={led['candidates_triaged_out']}")
     return 0
 
 

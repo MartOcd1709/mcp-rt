@@ -80,3 +80,7 @@ hunt/benchmark_results/
 .scout-cache/
 .project_map.json
 backups/
+
+# local platform DB from 'mcp-rt serve'
+mcprt_platform.db
+mcprt_data/

@@ -65,8 +65,9 @@ def should_fail(findings: list[dict], fail_on: str) -> bool:
             "high": bool(sevs & {"Critical", "High"})}.get(fail_on, False)
 
 
-async def _scan_servers(servers: list[dict], config_file: str, timeout: int) -> list[dict]:
-    findings = []
+async def _scan_servers(servers: list[dict], config_file: str, timeout: int) -> tuple[list[dict], list[dict]]:
+    """Return (flattened findings for SARIF, per-server {name, report} for attestation)."""
+    findings, scans = [], []
     for s in servers:
         try:
             rep = await asyncio.wait_for(run_full_scan(s["argv"], env={**s["env"]} or None), timeout=timeout)
@@ -75,8 +76,34 @@ async def _scan_servers(servers: list[dict], config_file: str, timeout: int) -> 
             continue
         for f in rep["findings"]:
             findings.append({**f, "server": s["name"], "file": config_file})
+        scans.append({"name": s["name"], "report": rep})
         print(f"  · {s['name']}: {rep['verdict']} ({len(rep['findings'])} finding(s))", file=sys.stderr)
-    return findings
+    return findings, scans
+
+
+def _write_attestations(scans: list[dict], out_dir: str, key_path: str | None) -> int:
+    """Sign a ground-truth attestation per scanned server into out_dir + a registry index."""
+    import re
+    from pathlib import Path
+    from mcp_rt import attest
+    from hunt import registry
+    try:
+        from importlib.metadata import version
+        ver = version("mcp-rt")
+    except Exception:  # noqa: BLE001
+        ver = "0+unknown"
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    key = attest.load_or_create_key(key_path) if key_path else attest.load_or_create_key()
+    for sc in scans:
+        rep = sc["report"]
+        claim = attest.build_claim(rep, capture="direct-probe", mcp_rt_version=ver)
+        env = attest.sign(claim, key)
+        slug = (re.sub(r"[^a-zA-Z0-9]+", "-", sc["name"]).strip("-").lower() or "server")[:60]
+        (d / f"{slug}.attestation.json").write_text(json.dumps(env, indent=2), encoding="utf-8")
+        (d / f"{slug}.badge.svg").write_text(attest.make_badge(env), encoding="utf-8")
+    registry.build(d, "MCP Attestations — CI")
+    return len(scans)
 
 
 def main(argv=None) -> int:
@@ -84,6 +111,11 @@ def main(argv=None) -> int:
     p.add_argument("--config", nargs="*", help="explicit config files (default: auto-discover)")
     p.add_argument("--fail-on", choices=["any", "critical", "high", "none"], default="critical")
     p.add_argument("--sarif", default="mcp-rt.sarif", help="SARIF output path")
+    p.add_argument("--attest", metavar="DIR", default=None,
+                   help="also write a signed attestation per server (+ registry index) to DIR")
+    p.add_argument("--key", metavar="PEM", default=None,
+                   help="signing key for --attest (e.g. a CI secret written to a file); "
+                        "default is an ephemeral per-run key")
     p.add_argument("--timeout", type=int, default=90)
     args = p.parse_args(argv)
 
@@ -92,7 +124,7 @@ def main(argv=None) -> int:
         print("no MCP config files found (.mcp.json / mcp_settings.json) — nothing to scan.", file=sys.stderr)
         json.dump(to_sarif([]), open(args.sarif, "w"), indent=2)
         return 0
-    all_findings = []
+    all_findings, all_scans = [], []
     for cf in files:
         try:
             servers = parse_mcp_config(json.load(open(cf)))
@@ -100,11 +132,17 @@ def main(argv=None) -> int:
             print(f"  ! {cf}: unparseable ({e})", file=sys.stderr)
             continue
         print(f"scanning {len(servers)} server(s) from {cf}", file=sys.stderr)
-        all_findings += asyncio.run(_scan_servers(servers, cf, args.timeout))
+        f, sc = asyncio.run(_scan_servers(servers, cf, args.timeout))
+        all_findings += f
+        all_scans += sc
 
     json.dump(to_sarif(all_findings), open(args.sarif, "w"), indent=2)
     print(f"findings-count={len(all_findings)}")
     print(f"sarif-path={args.sarif}")
+    if args.attest:
+        n = _write_attestations(all_scans, args.attest, args.key)
+        print(f"attestations={n}")
+        print(f"attest-dir={args.attest}")
     fail = should_fail(all_findings, args.fail_on)
     print(f"{'FAIL' if fail else 'PASS'}: {len(all_findings)} finding(s), gate=--fail-on {args.fail_on}",
           file=sys.stderr)

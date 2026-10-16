@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from hunt.family_b import probe_token_passthrough
-from hunt.probes import VULNERABLE, ScanError, scan_target
+from hunt.probes import CLEAN, INCONCLUSIVE, SUSPECTED, VULNERABLE, ScanError, scan_target
 from hunt.supply_chain import installed_dir, analyze_path, _bare_name
 
 # --- class metadata: severity, CWE, OWASP MCP Top 10 mapping, remediation ----------------
@@ -84,6 +84,62 @@ CLASS_META = {
         fix="Remove or vet install/postinstall lifecycle scripts, pin every dependency to an exact "
             "version with a committed lockfile, verify package provenance, and audit the dependency "
             "tree for known CVEs."),
+    # --- T11 classic impl-bug sweep (SAM1-22) + T12 OWASP closure (SAM1-23): HTTP/stateless probes ---
+    "authz_idor": dict(sev="High", cwe="CWE-639", owasp=["MCP02", "MCP07"],
+        title="Broken Object/Function-Level Authorization (IDOR/BOLA)",
+        fix="Enforce object-level ownership on every access (resource.owner == caller); gate privileged "
+            "tools behind an explicit role check; deny by default, never trust a client-supplied id."),
+    "xxe": dict(sev="High", cwe="CWE-611", owasp=["MCP05"],
+        title="XML External Entity (XXE) + OOB/SSRF",
+        fix="Disable external-entity resolution (feature_external_ges=False / defusedxml); forbid DOCTYPE "
+            "on untrusted XML; never let the parser fetch SYSTEM/file/http entities."),
+    "open_redirect": dict(sev="High", cwe="CWE-601", owasp=["MCP01"],
+        title="Open Redirect -> Session-Token Exfiltration",
+        fix="Allowlist redirect targets to same-origin paths; never append a session token to an "
+            "attacker-controlled return_to; validate return_to is a local path, not an absolute URL."),
+    "proto_pollution": dict(sev="High", cwe="CWE-1321", owasp=["MCP05", "MCP02"],
+        title="JS Prototype Pollution -> Privilege Escalation",
+        fix="Reject __proto__/constructor/prototype keys in any recursive merge; use Object.create(null) "
+            "or Map for untrusted data; validate against a schema; freeze Object.prototype."),
+    "redos": dict(sev="Medium", cwe="CWE-1333", owasp=[],
+        title="ReDoS / Catastrophic Backtracking",
+        fix="Avoid nested quantifiers over overlapping classes; use a linear-time engine (RE2) or atomic "
+            "groups/possessive quantifiers; bound input length and add a match timeout."),
+    "resource_limit": dict(sev="Medium", cwe="CWE-770", owasp=[],
+        title="Unbounded Resource Amplification",
+        fix="Bound every resource-controlling parameter (schema maximum AND a server-side cap); reject "
+            "above-cap requests; stream/paginate large outputs instead of materialising them."),
+    "telemetry_leak": dict(sev="Medium", cwe="CWE-532", owasp=["MCP08"],
+        title="Sensitive Data in Telemetry / Logs",
+        fix="Redact secrets/credentials/PII before they reach any log or telemetry surface; gate audit "
+            "reads behind elevated authorization; log an event id, not the sensitive value."),
+    "shadow_impersonation": dict(sev="High", cwe="CWE-706", owasp=["MCP09"],
+        title="Tool Shadowing / Name Impersonation",
+        fix="Namespace tools by server identity; reject or surface duplicate tool names across servers; "
+            "prefer the trusted/first-registered source and never silently override a canonical name."),
+    "lethal_trifecta": dict(sev="Critical", cwe="CWE-200", owasp=["MCP06", "MCP10"],
+        title="Lethal Trifecta: Private-Data Exfil via Untrusted Input",
+        fix="Break the chain: never let untrusted content choose an egress destination (allowlist egress); "
+            "don't combine private-data access, untrusted ingestion and external egress in one "
+            "untrusted-reachable tool; require human approval for cross-origin egress of sensitive data."),
+    # --- Novel MCP-00 family (the moat) — offline oracle classes surfaced in `mcp-rt demo` ---
+    "sampling_instruction_laundering": dict(sev="High", cwe="CWE-94", owasp=["MCP06"],
+        title="Sampling Instruction Laundering (MCP-00b)",
+        fix="Gate the sampling capability behind human review of the prompt AND its destination; never let "
+            "a server-issued sampling request read local files or POST to arbitrary URLs unattended; treat "
+            "server sampling prompts as untrusted content."),
+    "elicitation_credential_harvest": dict(sev="High", cwe="CWE-522", owasp=["MCP06", "MCP01"],
+        title="Elicitation Credential Harvest (MCP-00c)",
+        fix="Review every server elicitation before answering; never auto-fill credential/secret fields; "
+            "redact and confirm the destination; treat elicitation requests as untrusted input, not trusted UI."),
+    "roots_path_manipulation": dict(sev="High", cwe="CWE-22", owasp=["MCP05", "MCP02"],
+        title="Roots Path Manipulation (MCP-00 / MCP-29)",
+        fix="Validate roots boundaries server-side; never substitute or shadow a client-declared root; "
+            "canonicalize and confine every roots-scoped read to the approved root; reject path escapes."),
+    "mcp_cap": dict(sev="Medium", cwe="CWE-862", owasp=["MCP02"],
+        title="Undeclared Capability / Consent Gap (MCP-00, strace lead)",
+        fix="Declare every capability the server exercises; surface undeclared syscalls (network/exec/file) "
+            "for consent; apply least-capability so observed behavior matches the declared manifest."),
 }
 
 OWASP_MCP_TOP10 = {
@@ -169,12 +225,36 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
     findings.sort(key=lambda f: _SEV_RANK.get(f["sev"], 9))
 
     failed = {c for f in findings for c in f["owasp"]}
+    # Honesty spine at the control level: a control is PASS only if one of its classes genuinely reached
+    # CLEAN; a SUSPECTED class surfaces as a lead (status SUSPECTED, not PASS); a class that came back
+    # ONLY INCONCLUSIVE was never really tested, so its control is NOT scored PASS — an untested-PASS is
+    # the same over-claim as a fabricated proof.
+    cls_verdicts: dict[str, set] = {}
+    for r in probe_results:
+        cls_verdicts.setdefault(r.probe, set()).add(r.verdict)
+
+    def _controls(cls):
+        return CLASS_META.get(cls, {}).get("owasp", [])
+    suspected_controls = {c for cls, v in cls_verdicts.items() if SUSPECTED in v for c in _controls(cls)}
+    real_controls = {c for cls, v in cls_verdicts.items()
+                     if v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
+    inconclusive_controls = {c for cls, v in cls_verdicts.items() if v <= {INCONCLUSIVE}
+                             for c in _controls(cls)} - real_controls
     tested = set(TESTED_CONTROLS)
     if not sc_dir:                       # supply chain didn't run for this target -> MCP04 not tested here
         tested.discard("MCP04")
     compliance = []
     for cid, title in OWASP_MCP_TOP10.items():
-        status = ("FAIL" if cid in failed else "PASS") if cid in tested else "NOT TESTED"
+        if cid not in tested:
+            status = "NOT TESTED"
+        elif cid in failed:
+            status = "FAIL"
+        elif cid in suspected_controls:
+            status = "SUSPECTED"
+        elif cid in inconclusive_controls:
+            status = "NOT TESTED"        # class(es) only returned INCONCLUSIVE — never a PASS on an untested class
+        else:
+            status = "PASS"
         compliance.append({"id": cid, "title": title, "status": status})
 
     # Tool-by-tool coverage: every (tool, class) exercised + its verdict — proves what was tested,
@@ -204,8 +284,20 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
             if cov["verdict"] == "CLEAN" and cov["cls"] not in _NO_CRED_SAFE_CLASSES:
                 cov["verdict"] = "REQUIRES_CREDENTIALS"
 
+    # Surface SUSPECTED leads and INCONCLUSIVE (untested) classes distinctly — never folded into CLEAN.
+    suspected = []
+    for r in probe_results:
+        if r.verdict == SUSPECTED:
+            meta = CLASS_META.get(r.probe, {})
+            suspected.append({"cls": r.probe, "tool": r.tool, "detail": r.rationale,
+                              "evidence": r.evidence or "", "cwe": meta.get("cwe", ""),
+                              "title": meta.get("title", r.probe)})
+    inconclusive = [{"cls": r.probe, "tool": r.tool, "detail": r.rationale}
+                    for r in probe_results if r.verdict == INCONCLUSIVE]
     return {
         "auth_gated": auth_gated,
+        "suspected": suspected,
+        "inconclusive": inconclusive,
         "target": " ".join(argv),
         "scanned_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "verdict": "VULNERABLE" if findings else "CLEAN",
@@ -238,10 +330,17 @@ def render_markdown(rep: dict) -> str:
               f"The highest-risk issue is **{top['title']} ({top['sev']}, {top['cwe']})** on tool "
               f"`{top['tool']}`. Per-finding remediation is below; a re-test is recommended once fixes land.", ""]
     else:
+        n_susp, n_inc = len(rep.get("suspected", [])), len(rep.get("inconclusive", []))
+        extra = ""
+        if n_susp:
+            extra += (f" **{n_susp} suspected lead(s)** were surfaced by inference (response-pattern / "
+                      "static signals) and require confirmation — they are NOT proven findings.")
+        if n_inc:
+            extra += f" {n_inc} class result(s) were INCONCLUSIVE (could not be tested — not scored clean)."
         L += [f"This MCP server was tested against {len(CLASS_META)} ground-truth attack classes and the "
               "OWASP MCP Top 10. **Verdict: CLEAN** — no vulnerability was confirmed by ground-truth "
-              "probing. This report stands as a point-in-time security attestation across the tested "
-              "controls (see the compliance crosswalk below).", ""]
+              f"probing.{extra} This report stands as a point-in-time security attestation across the "
+              "tested controls (see the compliance crosswalk below).", ""]
 
     # --- Attack surface: map what exists before assessing it (every assessment starts here) ----
     surf = rep.get("surface") or {}
@@ -274,10 +373,20 @@ def render_markdown(rep: dict) -> str:
                   f"- **Evidence (ground truth):** {f['evidence'] or f['detail']}",
                   f"- **Detail:** {f['detail']}",
                   f"- **Remediation:** {f['fix']}", ""]
+    susp = rep.get("suspected") or []
+    if susp:
+        L += ["## Suspected (unconfirmed leads)", "",
+              "Surfaced by inference (response-pattern / static / observed-change signals), **not** a "
+              "planted-oracle proof. Each needs confirmation before it is treated as a finding:", "",
+              "| Class | Tool | Why (inference) |", "|---|---|---|"]
+        for s in susp:
+            L.append(f"| {s['cls']} | `{s.get('tool','')}` | {s.get('detail','')[:120]} |")
+        L += [""]
     L += ["## OWASP MCP Top 10 — compliance posture", "",
           "| Control | Status |", "|---|---|"]
     for c in rep["compliance"]:
-        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "NOT TESTED": "— not tested"}[c["status"]]
+        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED (unconfirmed lead)",
+                "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
         L.append(f"| {c['id']} {c['title']} | {mark} |")
 
     # --- Compliance crosswalk: tested controls -> audit frameworks (A2) ------------------------
@@ -302,7 +411,16 @@ def render_markdown(rep: dict) -> str:
         for tool, entries in by_tool.items():
             classes = ", ".join(sorted({cls for cls, _ in entries}))
             vulns = sorted({cls for cls, v in entries if v == VULNERABLE})
-            result = ("❌ vulnerable: " + ", ".join(vulns)) if vulns else "✅ clean"
+            susp = sorted({cls for cls, v in entries if v == SUSPECTED})
+            inc = sorted({cls for cls, v in entries if v == INCONCLUSIVE})
+            if vulns:
+                result = "❌ vulnerable: " + ", ".join(vulns)
+            elif susp:
+                result = "⚠ suspected: " + ", ".join(susp)
+            elif inc:
+                result = "— inconclusive: " + ", ".join(inc)
+            else:
+                result = "✅ clean"
             L.append(f"| `{tool}` | {classes} | {result} |")
 
     # --- Intent-flow exposure (MCP06) — Basic-scan enabling-conditions flag, not a finding ---------
@@ -319,9 +437,10 @@ def render_markdown(rep: dict) -> str:
             L += ["Minimal intent-flow surface: the server exposes no model-facing resources and no "
                   "external-content tools that an attacker could use for context injection.", ""]
 
-    L += ["> Verdicts are ground-truth (planted honeytoken / sentinel / canary), not heuristic. "
-          "“Not tested” controls are outside this engine's active probe scope, stated honestly. "
-          "Compliance references support an audit; they are not an attestation of certification.", ""]
+    L += ["> FINDINGS are ground-truth (planted honeytoken / sentinel / canary), not heuristic. SUSPECTED "
+          "items are inference-based leads requiring confirmation, and INCONCLUSIVE classes could not be "
+          "tested (never scored as clean). “Not tested” controls are outside this engine's active probe "
+          "scope, stated honestly. Compliance references support an audit; not an attestation of certification.", ""]
     return "\n".join(L)
 
 
@@ -356,8 +475,9 @@ def render_html(rep: dict) -> str:
             f"<meta name='viewport' content='width=device-width, initial-scale=1'>"
             f"<title>MCP VAPT Report — {tgt}</title><style>{_REPORT_CSS}</style></head>"
             f"<body><div class='doc'>{body}"
-            f"<footer>mcp-rt · ground-truth MCP security · every verdict proven by a planted "
-            f"honeytoken / sentinel / canary. Responsible disclosure before any public listing.</footer>"
+            f"<footer>mcp-rt · ground-truth MCP security · every FINDING proven by a planted "
+            f"honeytoken / sentinel / canary; SUSPECTED items are inference leads, not proof. "
+            f"Responsible disclosure before any public listing.</footer>"
             f"</div></body></html>")
 
 
@@ -430,6 +550,8 @@ def main(argv=None) -> int:
     p.add_argument("--exit-code", action="store_true", help="exit 1 if any finding (CI gate)")
     p.add_argument("--html", action="store_true", help="also write a branded HTML report deliverable")
     p.add_argument("--pdf", action="store_true", help="also write a branded PDF report deliverable (client-facing)")
+    p.add_argument("--json", action="store_true",
+                   help="emit the raw report dict to stdout (used by isolated/containerised scans)")
     args = p.parse_args(argv)
     import shlex
     try:
@@ -437,6 +559,9 @@ def main(argv=None) -> int:
     except ScanError as e:   # degrade gracefully instead of dumping a traceback
         print(f"INCONCLUSIVE — could not probe target: {e}", file=sys.stderr)
         return 2
+    if args.json:                         # machine-readable path for run_isolated (no files, no markdown)
+        print(json.dumps(rep, default=str))
+        return 1 if (args.exit_code and rep["findings"]) else 0
     report_dir = preserve(rep)
     record(rep, report_dir)
     print(render_markdown(rep))
