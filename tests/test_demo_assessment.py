@@ -28,3 +28,10 @@ def test_demo_report_is_honest(outcomes):
     for needle in ("Zero false positives", "Proven findings", "Honest coverage ledger",
                    "LEAD-only", "SHOULD/gap", "COVERED"):
         assert needle in r, f"demo report missing honest-framing section: {needle!r}"
+
+
+def test_classic_leg_fires_on_aggregate_vuln_server():
+    # full library: the classic stdio probes must also fire on the aggregate vuln server
+    classic = D.run_classic_leg()
+    classes = {f.get("cls") for f in classic}
+    assert "command_injection" in classes and len(classic) >= 8
