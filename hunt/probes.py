@@ -140,8 +140,12 @@ _EXEC_GENERAL = re.compile(
     r"run (a |an )?[\w ]{0,24}command|execute [\w ]{0,24}command|execute .{0,20}code|"
     r"run .{0,20}script|shell command|run (a )?shell|arbitrary (command|code)", re.I)
 _CLAIMS_RESTRICTION = re.compile(
-    r"allow ?list|allow-list|white ?list|allowed (command|path|dir)|restrict|\bsecure\b|"
-    r"validation|sandbox|\bsafe\b", re.I)
+    r"allow ?list|allow-list|white ?list|allowed (command|path|dir|executable)|restrict|sandbox|"
+    r"secure mode|security constraint|configurable security|safe mode|validated command", re.I)
+# NOTE: bare "safe"/"validated"/"secure" are deliberately excluded — they appear in benign executor
+# descriptions ("safely run commands", "validated input") and would mis-class a by-design executor as a
+# bypassed restriction. Only a SPECIFIC restriction claim (allowlist / secure mode / security constraint
+# / sandbox) means "this tool advertises a boundary", so executing arbitrary code is a BYPASS, not by-design.
 _SQL_EXEC = re.compile(
     r"execute .{0,20}sql|run .{0,20}sql|data modification sql|\bddl\b|arbitrary sql|"
     r"execute (a |an )?query|write query|run (a |an )?query", re.I)
@@ -320,6 +324,32 @@ async def probe_ssrf(session, tools) -> list[ProbeResult]:
     return out
 
 
+def _interp_carriers(nonce: str) -> list:
+    """`<allowed-interpreter> -c <NONCE>` carriers — the CVE-2026-55581/55582 allowlist-bypass shape the
+    old payload set missed. NONCE is a single alphanumeric token (no metacharacters, so it survives a
+    `$ ( ) { } ; |`-style blocklist AND a naive argv split); the interpreter tries to RUN it as a command
+    and echoes it back INSIDE ITS OWN error — proof of execution via the tool's RETURNED output.
+
+    Each entry is (payload, oracle_regex). The oracle matches the INTERPRETER's error/output signature
+    wrapping the nonce, NOT a bare reflection: a server that rejects and echoes the payload ("denied:
+    bash -c <nonce>") never produces `<nonce>: command not found`, so it cannot false-positive."""
+    n = re.escape(nonce)
+    sh_sig = re.compile(rf"{n}: (command )?not found", re.I)                  # bash/sh: '<nonce>: command not found'
+    py_sig = re.compile(rf"name ['\"]?{n}['\"]? is not defined", re.I)        # python NameError
+    node_sig = re.compile(rf"\b{n} is not defined", re.I)                     # node ReferenceError
+    ruby_sig = re.compile(rf"undefined .{{0,40}}{n}", re.I)                    # ruby NameError
+    nonce_alone = re.compile(rf"(?m)^\s*{n}\s*$")                             # echo output: the nonce ALONE on a line
+    tag = nonce[:5]
+    out = [(f"{b} -c {nonce}", sh_sig) for b in ("/bin/bash", "bash", "/bin/sh", "sh")]
+    out += [(f"{p} -c {nonce}", py_sig) for p in ("/usr/bin/python3", "python3")]
+    out += [(f"{nd} -e {nonce}", node_sig) for nd in ("node", "/usr/bin/node")]
+    out += [(f"ruby -e {nonce}", ruby_sig)]
+    out += [(f"{g} -c alias.{tag}=!{nonce} {tag}", sh_sig) for g in ("git", "/usr/bin/git")]  # git `!`-alias shell
+    # metachar-bypass + stdout nonce (servers that allow $ but filter spaces): echo the nonce alone
+    out += [(f"{b} -c echo${{IFS}}{nonce}", nonce_alone) for b in ("/bin/bash", "bash", "sh")]
+    return out
+
+
 async def probe_command_injection(session, tools) -> list[ProbeResult]:
     out = []
     d = Path(tempfile.mkdtemp(prefix="probe_cmd_"))
@@ -334,8 +364,12 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
             for param in params:
                 sentinel = d / ("s_" + uuid.uuid4().hex[:10])
                 cmarker = "cmd-" + uuid.uuid4().hex[:10]
+                icnonce = "IC" + uuid.uuid4().hex[:12]     # single alphanumeric token -> survives metachar filters
                 sink_url = f"http://127.0.0.1:{sink.port}/{cmarker}"
-                payloads = [
+                # (payload, oracle_regex): None -> confirmed by the planted sentinel file / loopback sink;
+                # a regex -> confirmed by the INTERPRETER's own error/output wrapping our nonce in the tool's
+                # RETURNED text (the server-2 FN root cause: the old oracle ignored returned output).
+                payloads = [(p, None) for p in (
                     f"x; touch {sentinel}", f"x && touch {sentinel}", f"x | touch {sentinel}",
                     f"$(touch {sentinel})", f"`touch {sentinel}`", f"x\ntouch {sentinel}",
                     f"'; touch {sentinel} #", f'"; touch {sentinel} #',
@@ -349,15 +383,20 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
                     f"__import__('os').system('touch {sentinel}')",
                     f"eval(\"__import__('os').system('touch {sentinel}')\")",
                     f"require('child_process').execSync('touch {sentinel}')",
-                ]
-                for p in payloads:
+                )] + _interp_carriers(icnonce)          # <allowed-interpreter> -c <nonce>, returned-text oracle
+                for p, oracle_re in payloads:
                     try:
                         r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                        returned.append(_result_text(r))
+                        text = _result_text(r)
+                        returned.append(text)
                     except Exception as exc:  # noqa: BLE001
-                        raised.append(str(exc))
+                        text = str(exc)
+                        raised.append(text)
                     await asyncio.sleep(0.05)
-                    if sentinel.exists() or sink.hit(cmarker):
+                    # interpreter-carrier: require the interpreter's OWN error/output signature around the
+                    # nonce (anti-reflection) AND that the response isn't a deliberate refusal.
+                    oracle_hit = bool(oracle_re) and not _is_refusal(text) and bool(oracle_re.search(text))
+                    if sentinel.exists() or sink.hit(cmarker) or oracle_hit:
                         fired, used = True, p
                         break
                 if fired:
@@ -368,8 +407,8 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
                 continue
             desc = (tool.description or "") + " " + tool.name
             if _CLAIMS_RESTRICTION.search(desc):
-                method, why = "oracle", ("a tool that claims to restrict/validate executed an "
-                                         "injected command — restriction bypass")
+                method, why = "oracle", ("a tool that advertises a command restriction (allowlist / secure "
+                                         "mode / sandbox) executed injected code — the restriction is bypassable")
             elif _EXEC_GENERAL.search(desc):
                 method, why = "by_design", ("general command/code-execution tool ran the command — "
                                             "by-design (informational: unrestricted execution), not a finding")
