@@ -122,6 +122,24 @@ CLASS_META = {
         fix="Break the chain: never let untrusted content choose an egress destination (allowlist egress); "
             "don't combine private-data access, untrusted ingestion and external egress in one "
             "untrusted-reachable tool; require human approval for cross-origin egress of sensitive data."),
+    # --- Novel MCP-00 family (the moat) — offline oracle classes surfaced in `mcp-rt demo` ---
+    "sampling_instruction_laundering": dict(sev="High", cwe="CWE-94", owasp=["MCP06"],
+        title="Sampling Instruction Laundering (MCP-00b)",
+        fix="Gate the sampling capability behind human review of the prompt AND its destination; never let "
+            "a server-issued sampling request read local files or POST to arbitrary URLs unattended; treat "
+            "server sampling prompts as untrusted content."),
+    "elicitation_credential_harvest": dict(sev="High", cwe="CWE-522", owasp=["MCP06", "MCP01"],
+        title="Elicitation Credential Harvest (MCP-00c)",
+        fix="Review every server elicitation before answering; never auto-fill credential/secret fields; "
+            "redact and confirm the destination; treat elicitation requests as untrusted input, not trusted UI."),
+    "roots_path_manipulation": dict(sev="High", cwe="CWE-22", owasp=["MCP05", "MCP02"],
+        title="Roots Path Manipulation (MCP-00 / MCP-29)",
+        fix="Validate roots boundaries server-side; never substitute or shadow a client-declared root; "
+            "canonicalize and confine every roots-scoped read to the approved root; reject path escapes."),
+    "mcp_cap": dict(sev="Medium", cwe="CWE-862", owasp=["MCP02"],
+        title="Undeclared Capability / Consent Gap (MCP-00, strace lead)",
+        fix="Declare every capability the server exercises; surface undeclared syscalls (network/exec/file) "
+            "for consent; apply least-capability so observed behavior matches the declared manifest."),
 }
 
 OWASP_MCP_TOP10 = {
