@@ -392,6 +392,32 @@ def _under(path: str, root: str) -> bool:
     return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
 
 
+def _resolve_real_dir(p: str):
+    """Reconcile a server-reported dir with the real filesystem: some servers advertise a NORMALISED
+    root (e.g. case-folded — which is itself the CVE-2025-53110 case-bypass tell) that fails a literal
+    isdir() on a case-sensitive FS. Walk the path components case-insensitively to recover the real
+    on-disk dir. Returns the real path or None. Dynamic — no server/path hardcoding."""
+    if os.path.isdir(p):
+        return p
+    parts = Path(p).parts
+    if not parts or parts[0] != os.sep:
+        return None
+    cur = os.sep
+    for comp in parts[1:]:
+        direct = os.path.join(cur, comp)
+        if os.path.isdir(direct):
+            cur = direct
+            continue
+        try:                                   # case-insensitive match among the real siblings
+            match = next((e for e in os.listdir(cur) if e.lower() == comp.lower()), None)
+        except OSError:
+            return None
+        if not match:
+            return None
+        cur = os.path.join(cur, match)
+    return cur if os.path.isdir(cur) else None
+
+
 async def _allowed_roots(session, tools) -> list[str]:
     """The server's advertised allowed directories (e.g. filesystem servers' list_allowed_directories),
     so the traversal canary can be planted OUTSIDE them. [] if the server doesn't advertise any."""
@@ -404,7 +430,12 @@ async def _allowed_roots(session, tools) -> list[str]:
         text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
     except Exception:  # noqa: BLE001
         return []
-    return [p for p in re.findall(r"(/[^\s,:'\"]+)", text) if os.path.isdir(p)]
+    roots: list[str] = []
+    for p in re.findall(r"(/[^\s,:'\"]+)", text):
+        rp = _resolve_real_dir(p)
+        if rp and rp not in roots:
+            roots.append(rp)
+    return roots
 
 
 def _outside_root_dir(roots: list[str]):
@@ -418,15 +449,108 @@ def _outside_root_dir(roots: list[str]):
     return None
 
 
+# ---- path-traversal variant coverage (CWE-22/23) + adjacent / in-root plants -----------------------
+# A new server is DATA, not code: payloads + oracle are derived from the server's advertised root(s)
+# and tool/param surface at runtime — no hardcoded tool/server/param names. A (sibling-prefix) writes
+# a cleaned-up canary in the root's PARENT (outside the managed area) → default-on, gated only by a
+# writable parent. B (in-root symlink) mutates the server's own managed root → OPT-IN, default off.
+_ALLOW_WRITE_INTO_ROOT = os.environ.get("MCPRT_ALLOW_WRITE_INTO_ROOT", "") == "1"
+_OUTPUT_DESC = re.compile(r"screenshot|screen[-_ ]?shot|\bpdf\b|snapshot|\bsave\b|export|download|"
+                          r"capture|dump|\brender\b", re.I)
+_OUTPUT_PARAM = re.compile(r"filename|file|path|out(put)?|dest(ination)?|save|target|to", re.I)
+
+
+def _traversal_variants(canary, marker: str) -> list:
+    """The CWE-22/23 read-escape variant space — every entry targets OUR out-of-root canary (planted in
+    our own temp, non-invasive). (payload, expected_marker, label). Covers the CLASS, not an instance:
+    a server that normalises/decodes any of these is caught with zero per-server code."""
+    a = str(canary)
+    rel = "../" * 20 + a.lstrip(os.sep)
+    return [
+        (a, marker, "plain-absolute-outside"),
+        (rel, marker, "dotdot-outside"),
+        (a.replace("/", "\\"), marker, "backslash-separator"),
+        (rel.replace("../", "%2e%2e%2f"), marker, "url-encoded"),
+        (rel.replace("../", "%252e%252e%252f"), marker, "double-url-encoded"),
+        (rel.replace("../", "....//"), marker, "nested-dotdot (single-strip bypass)"),
+        (rel.replace("/", "%2f"), marker, "encoded-separator"),
+        (a + "%00.txt", marker, "null-byte-truncation"),
+        ("\\\\?\\" + a.replace("/", "\\"), marker, "windows-unc"),
+    ]
+
+
+def _plant_sibling(root: str, cleanups: list):
+    """Plant a canary at `<root>_pt_<rand>/canary.txt` — a SIBLING that shares the root's string prefix
+    but lies OUTSIDE it (the CVE-2025-53110 bypass shape). Writes in the root's PARENT (not the managed
+    root) → default-on, gated only by a writable parent + guaranteed cleanup. Returns (payload, marker)
+    or None (→ caller marks the vector NOT_APPLICABLE, never CLEAN)."""
+    base = str(root).rstrip(os.sep)
+    parent = os.path.dirname(base)
+    if not base or not parent or not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
+        return None
+    sib = Path(base + "_pt_" + uuid.uuid4().hex[:8])
+    cleanups.append(lambda: shutil.rmtree(sib, ignore_errors=True))     # register BEFORE create (always cleaned)
+    try:
+        sib.mkdir()
+        mk = "PTA-" + uuid.uuid4().hex[:12]
+        (sib / "canary.txt").write_text(mk)
+        return str(sib / "canary.txt"), mk
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _plant_symlink(root: str, cleanups: list):
+    """Create `<root>/pt_link_<rand>` → a SIBLING-PREFIX canary just outside the root (CVE-2025-53109).
+    Pointing at a sibling-prefix target (not a plain-outside one) makes BOTH symlink-follow flavours
+    fire: a server that follows the link with no realpath re-check, AND one that re-checks realpath with
+    a prefix (no-separator) test — while a separator-aware server still denies it. Mutates the target's
+    own managed root → OPT-IN (allow_write_into_root), default off; safe-by-construction + guaranteed
+    cleanup. Returns (link_path, marker) or None (→ vector NOT_APPLICABLE)."""
+    if not _ALLOW_WRITE_INTO_ROOT:
+        return None
+    rp = str(root).rstrip(os.sep)
+    parent = os.path.dirname(rp)
+    if not (os.path.isdir(rp) and os.access(rp, os.W_OK) and parent and os.access(parent, os.W_OK)):
+        return None
+    tgt_dir = Path(rp + "_ptl_" + uuid.uuid4().hex[:8])        # sibling of root (shares prefix, outside it)
+    link = Path(rp) / ("pt_link_" + uuid.uuid4().hex[:8])
+    cleanups.append(lambda: shutil.rmtree(tgt_dir, ignore_errors=True))   # register BEFORE create
+    cleanups.append(lambda: link.unlink(missing_ok=True))
+    try:
+        tgt_dir.mkdir()
+        mk = "PTB-" + uuid.uuid4().hex[:12]
+        (tgt_dir / "canary.txt").write_text(mk)
+        os.symlink(str(tgt_dir / "canary.txt"), str(link))
+        return (str(link), mk) if link.is_symlink() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _output_file_params(tool):
+    """A tool that writes a file whose CONTENT it generates internally (screenshot/pdf/snapshot): a
+    filename/path param but NO caller-supplied content param. Returns that param or None — derived from
+    the advertised schema/description, no hardcoded names."""
+    if _writer_params(tool):                 # path+content writer -> handled by the write branch
+        return None
+    desc = (tool.description or "") + " " + tool.name
+    if not _OUTPUT_DESC.search(desc):
+        return None
+    for p in _schema(tool).get("properties", {}):
+        if _OUTPUT_PARAM.search(p):
+            return p
+    return None
+
+
 async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     out = []
-    roots = await _allowed_roots(session, tools)   # plant the canary OUTSIDE the server's real root
+    roots = await _allowed_roots(session, tools)   # the server's managed root(s); escapes target OUTSIDE them
     if roots:
         d = _outside_root_dir(roots)
         if d is None:   # root covers every candidate (e.g. '/') — no out-of-root path exists to test
             for tool in tools:
-                if _writer_params(tool) or _candidate_params(tool, _PATH_PARAM, _READ_DESC,
-                                                             ["path", "file", "filepath", "filename"]):
+                if (_writer_params(tool) or _output_file_params(tool)
+                        or _candidate_params(tool, _PATH_PARAM, _READ_DESC,
+                                             ["path", "file", "filepath", "filename"])):
                     out.append(ProbeResult("path_traversal", tool.name, "not_applicable",
                         rationale="server's allowed root spans all candidate locations — no out-of-root "
                                   "path exists to test traversal (not a finding)"))
@@ -436,10 +560,25 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     marker = "PT-" + uuid.uuid4().hex[:12]
     canary = d / "canary.txt"
     canary.write_text(marker)
+    cleanups: list = []
+    # Read-escape payloads: the full CWE-22/23 variant space, all targeting our out-of-root canary.
+    read_payloads = _traversal_variants(canary, marker)
+    # Adjacent (A, sibling-prefix: default-on) + in-root (B, symlink: opt-in) plants, per advertised root.
+    sibling_planted = symlink_planted = False
+    for root in (roots or []):
+        sp = _plant_sibling(root, cleanups)
+        if sp:
+            read_payloads.append((sp[0], sp[1], "sibling-prefix (CVE-2025-53110)"))
+            sibling_planted = True
+        lk = _plant_symlink(root, cleanups)
+        if lk:
+            read_payloads.append((lk[0], lk[1], "symlink (CVE-2025-53109)"))
+            symlink_planted = True
+    had_reader = False
     try:
         for tool in tools:
             writer = _writer_params(tool)
-            if writer:                                   # arbitrary-write escape
+            if writer:                                   # arbitrary-write escape (path + caller content)
                 path_p, content_p = writer
                 wmark = "PW-" + uuid.uuid4().hex[:12]
                 target = d / f"escaped_{wmark}.txt"       # outside any server root
@@ -458,32 +597,76 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                                        rationale=("wrote a file outside its root (arbitrary write)"
                                                   if wrote else "write confined to root")))
                 continue
+            op = _output_file_params(tool)
+            if op:                                        # output-file tool (content generated internally)
+                omark = "PTC-" + uuid.uuid4().hex[:10]
+                out_file = d / f"escaped_{omark}.out"     # in OUR out-of-root temp — we can stat it
+                returned, raised, how = [], [], ""
+                for t, lbl in ((str(out_file), "absolute-out-of-root"),
+                               ("../" * 20 + str(out_file).lstrip(os.sep), "dotdot-out-of-root")):
+                    try:
+                        r = await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, t)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
+                    await asyncio.sleep(0.1)
+                    if out_file.exists():                 # OUR uniquely-named file landed outside -> escape
+                        how = lbl
+                        break
+                out.append(ProbeResult("path_traversal", tool.name,
+                    "oracle" if how else _negative_method(returned, raised), marker=omark,
+                    evidence=(how or f"{tool.name}(output-dir escape)"),
+                    rationale=(f"output-file tool wrote OUR file outside its output directory via {how} "
+                               "(write-escape)" if how else "output path confined to the output directory")))
+                try:
+                    out_file.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
             params = _candidate_params(tool, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
             if not params:
                 continue
-            payloads = [str(canary), "../" * 20 + str(canary).lstrip(os.sep),
-                        str(canary).replace("/", "\\")]
-            fired, used = False, ""
+            had_reader = True
+            fired, used, how = False, "", ""
             returned, raised = [], []
             for param in params:
-                for p in payloads:
+                for p, expect, label in read_payloads:
                     try:
                         r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                        returned.append(_result_text(r))
+                        txt = _result_text(r)
+                        returned.append(txt)
                     except Exception as exc:  # noqa: BLE001
-                        r = None
+                        txt = ""
                         raised.append(str(exc))
-                    if r and marker in _result_text(r):    # only OUR planted marker counts
-                        fired, used = True, p
+                    if expect and expect in txt:          # only OUR planted marker counts
+                        fired, used, how = True, p, label
                         break
                 if fired:
                     break
             out.append(ProbeResult("path_traversal", tool.name,
                                    "oracle" if fired else _negative_method(returned, raised), marker=marker,
                                    evidence=used,
-                                   rationale=("returned a file outside its root (planted canary leaked)"
-                                              if fired else "did not return the out-of-root canary")))
+                                   rationale=(f"returned an out-of-root canary via {how} (planted canary "
+                                              "leaked)" if fired else "did not return the out-of-root canary")))
+        # Honest NOT_APPLICABLE (never a silent CLEAN) for adjacent vectors we could not actually test.
+        if had_reader and not sibling_planted:
+            why = ("server's allowed root could not be determined at runtime" if not roots
+                   else "the server-root's parent is not writable (cannot plant the sibling canary)")
+            out.append(ProbeResult("path_traversal", "(sibling-prefix vector)", "not_applicable",
+                                   rationale="CVE-2025-53110 sibling-prefix NOT tested: " + why))
+        if had_reader and not symlink_planted:
+            why = ("in-root symlink is opt-in — set MCPRT_ALLOW_WRITE_INTO_ROOT=1 on a server you own"
+                   if not _ALLOW_WRITE_INTO_ROOT else
+                   ("server's allowed root could not be determined at runtime" if not roots
+                    else "the server root is not writable (cannot plant the in-root symlink)"))
+            out.append(ProbeResult("path_traversal", "(symlink vector)", "not_applicable",
+                                   rationale="CVE-2025-53109 in-root symlink NOT tested: " + why))
     finally:
+        for c in cleanups:
+            try:
+                c()
+            except Exception:  # noqa: BLE001
+                pass
         shutil.rmtree(d, ignore_errors=True)
     return out
 
