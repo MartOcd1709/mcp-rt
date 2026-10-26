@@ -785,44 +785,114 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
     return out
 
 
+# ---- SQL injection (CWE-89) — READ-ONLY payloads, honestly graded (#58) ----------------------------
+# Every payload below is read-only. A security probe must never mutate a caller's data: the old
+# "1); DROP TABLE x--" payload was removed for exactly that reason (dbhub executed multi-statement DDL live).
+def _sql_union_payloads(v: str, a: int, b: int) -> list[str]:
+    """UNION-exfil. Success = the per-run PRODUCT a*b in the response. Only real SQL evaluation produces
+    the number; a reflected payload carries the expression 'a*b', never the product — so this is PROOF.
+    Covers a string context (closes a quote) and a numeric context, 1-3 result columns."""
+    e = f"{a}*{b}"
+    tails = [f"{e}--", f"NULL,{e}--", f"NULL,NULL,{e}--"]
+    return [f"{v}' UNION SELECT {t}" for t in tails] + [f"0 UNION SELECT {t}" for t in tails]
+
+
+def _sql_boolean_triples(v: str) -> list[tuple[str, str, str]]:
+    """3-way boolean differential: (baseline, true-predicate, false-predicate), string + numeric context.
+    The string form closes the quote AND comments out the server's trailing text (`'--`), the standard
+    form for a LIKE/equality context, so the predicate really is the one we send."""
+    return [(v, f"{v}' OR '1'='1'--", f"{v}' AND '1'='2'--"), ("0", "0 OR 1=1", "0 AND 1=2")]
+
+
+_SQL_ERROR_PROBES = ["'", '"', "')--", "' OR '1'='1"]
+
+
+async def _sql_try(session, tool, param: str, value: str, returned: list, raised: list) -> str:
+    """Send one payload; return the response text (or the raised error text — some servers surface the
+    SQL error as a tool error, and that text is still the signal). Records what came back."""
+    try:
+        txt = _result_text(await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, value)})))
+        returned.append(txt)
+    except Exception as exc:  # noqa: BLE001
+        txt = str(exc)
+        raised.append(txt)
+    return txt
+
+
 async def probe_sql_injection(session, tools) -> list[ProbeResult]:
-    """Error-based SQL injection: a quote-bearing arg that surfaces a SQL parser error means
-    the input is concatenated into SQL unsanitized. Parameterised servers bind it as data and
-    stay quiet, so a SQL-specific error is a low-false-positive signal."""
+    """SQL injection, graded by HOW it was confirmed (honesty spine):
+      UNION-exfil   -> PROOF (the per-run product a*b returned)                          -> VULNERABLE
+      boolean 3-way -> INFERENCE (true/false split; a search tool can vary with input)   -> SUSPECTED
+      error-based   -> INFERENCE (a SQL parser error surfaced)                            -> SUSPECTED
+      time-based    -> EXCLUDED on purpose (wall-clock oracle: jitter/load false positives)
+    A dedicated SQL-execution tool is by_design (it runs SQL). Every payload is read-only."""
     out = []
+    a = 100000 + uuid.uuid4().int % 900000       # per-run, so the product is unique to this scan
+    b = 100000 + uuid.uuid4().int % 900000
+    product = str(a * b)
+    product_re = re.compile(rf"(?<!\d){product}(?!\d)")
     for tool in tools:
         params = _candidate_params(tool, _SQL_PARAM, _SQL_DESC, ["query", "sql", "term", "filter", "id"])
         if not params:
             continue
-        fired, used, ev = False, "", ""
-        returned, raised = [], []
-        for param in params:
-            for p in ["'", '"', "' OR '1'='1", "')--", "1); DROP TABLE x--"]:
-                try:
-                    r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    txt = _result_text(r)
-                    returned.append(txt)
-                except Exception as exc:  # noqa: BLE001 — some servers surface the SQL error as a tool error
-                    txt = str(exc)
-                    raised.append(txt)
-                if _SQL_ERR.search(txt) and not _SQL_FALSE.search(txt):   # exclude FTS5/full-text errors
-                    fired, used, ev = True, p, txt[:160]
-                    break
-            if fired:
-                break
-        if not fired:
-            out.append(ProbeResult("sql_injection", tool.name, _negative_method(returned, raised),
-                                   evidence=used, rationale="no SQL parser error surfaced"))
-            continue
         desc = (tool.description or "") + " " + tool.name
-        if _SQL_EXEC.search(desc):
-            out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=used,
-                                   rationale="dedicated SQL-execution tool surfaced a SQL error — "
-                                             "by-design (it runs SQL), not injection"))
-        else:
-            out.append(ProbeResult("sql_injection", tool.name, "signature", evidence=used,
-                                   rationale=f"a non-SQL-execution tool concatenated input into SQL "
-                                             f"(error-based): {ev}"))
+        is_executor = bool(_SQL_EXEC.search(desc))
+        v = "zz_no_row_" + uuid.uuid4().hex[:6]  # a benign value that matches no row
+        returned, raised = [], []
+        proof = None
+        for param in params:                     # 1) PROOF first
+            for p in _sql_union_payloads(v, a, b):
+                txt = await _sql_try(session, tool, param, p, returned, raised)
+                if product_re.search(txt) and not _is_refusal(txt):
+                    proof = (p, txt[:160])
+                    break
+            if proof:
+                break
+        if proof:
+            if is_executor:
+                out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=proof[0],
+                                       rationale="dedicated SQL-execution tool computed a UNION product — "
+                                                 "by-design (it runs SQL), not injection"))
+            else:
+                out.append(ProbeResult("sql_injection", tool.name, "oracle", evidence=proof[0],
+                                       rationale=f"UNION-based SQL injection: the server returned the per-run "
+                                                 f"product {product}, which only SQL evaluation can produce "
+                                                 "(read-only payload)"))
+            continue
+        lead = None                              # 2) INFERENCE only — never confirmed on its own
+        for param in params:
+            for base, t_true, t_false in _sql_boolean_triples(v):
+                tb = await _sql_try(session, tool, param, base, returned, raised)
+                tt = await _sql_try(session, tool, param, t_true, returned, raised)
+                tf = await _sql_try(session, tool, param, t_false, returned, raised)
+                tt2 = await _sql_try(session, tool, param, t_true, returned, raised)   # determinism check
+                tf2 = await _sql_try(session, tool, param, t_false, returned, raised)
+                if tt != tf and tf == tb and tt2 == tt and tf2 == tf:
+                    lead = ("boolean", f"true '{t_true}' vs false '{t_false}' split, deterministic")
+                    break
+            if lead:
+                break
+            for p in _SQL_ERROR_PROBES:
+                txt = await _sql_try(session, tool, param, p, returned, raised)
+                if _SQL_ERR.search(txt) and not _SQL_FALSE.search(txt):   # exclude FTS5/full-text errors
+                    lead = ("error-based", txt[:160])
+                    break
+            if lead:
+                break
+        if lead:
+            kind, ev = lead
+            if is_executor:
+                out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=ev,
+                                       rationale="dedicated SQL-execution tool surfaced a SQL-level signal — "
+                                                 "by-design (it runs SQL)"))
+            else:
+                out.append(ProbeResult("sql_injection", tool.name, "signature", evidence=ev,
+                                       rationale=f"{kind} SQL inference, not a proof: {ev} — a search/filter "
+                                                 "tool can vary with input without being injectable, so this "
+                                                 "is a lead to confirm"))
+            continue
+        out.append(ProbeResult("sql_injection", tool.name, _negative_method(returned, raised),
+                               rationale="no UNION product, boolean split or SQL error surfaced"))
     return out
 
 
