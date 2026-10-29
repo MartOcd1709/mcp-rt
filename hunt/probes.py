@@ -1190,8 +1190,8 @@ def _lure_rows(owner: str, surfaces: list[tuple[str, str]]) -> list[ProbeResult]
 
 
 async def probe_lure_text(session, tools) -> list[ProbeResult]:
-    """Model-directed lure text (Detector Unit 1): tool descriptions, parameter text, annotations and resource
-    bodies that tell the model to forward a credential, override what it was told to do, call a forward safe, or request
+    """Model-directed lure text (Detector Unit 1): tool descriptions, parameter text, annotations, resource bodies and prompt text
+    that tell the model to forward a credential, override what it was told to do, call a forward safe, or request
     a credential "for confirmation". Static, so every hit is a SUSPECTED lead, never VULNERABLE."""
     out: list[ProbeResult] = []
     for t in tools:
@@ -1224,8 +1224,28 @@ async def probe_lure_text(session, tools) -> list[ProbeResult]:
             continue
         out += _lure_rows(owner, [("name", r.name or ""), ("description", r.description or ""),
                                   ("body", "\n".join(texts))])
+    try:    # prompts are model-facing text too: a template's messages are what the model is handed
+        prompts = (await session.list_prompts()).prompts
+    except Exception as exc:  # noqa: BLE001
+        prompts = []
+        if getattr(getattr(exc, "error", None), "code", None) != -32601:    # -32601: no prompts endpoint
+            out.append(ProbeResult("lure_text", "(prompts)", "error",
+                                   rationale=f"prompts/list failed: {_unwrap(exc)[:120]}"))
+    for p in prompts:
+        owner = f"prompt:{p.name}"
+        args = list(p.arguments or [])
+        meta = [("name", p.name or ""), ("description", p.description or "")]
+        meta += [(f"argument.{a.name}", a.description or "") for a in args]
+        try:    # rendered with placeholder values, so the text the model would receive is what gets scanned
+            res = await asyncio.wait_for(session.get_prompt(p.name, {a.name: "example" for a in args}), _CALL_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            out.append(ProbeResult("lure_text", owner, "error", rationale=f"prompts/get failed: {_unwrap(exc)[:120]}"))
+            continue
+        texts = [m.content.text for m in (res.messages or []) if getattr(m.content, "text", None)]
+        out += _lure_rows(owner, meta + [("messages", "\n".join(texts))])
     if not out:
-        out.append(ProbeResult("lure_text", "(server)", "not_applicable", rationale="no tools or resources exposed"))
+        out.append(ProbeResult("lure_text", "(server)", "not_applicable",
+                               rationale="no tools, resources or prompts exposed"))
     return out
 
 

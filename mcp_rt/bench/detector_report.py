@@ -62,8 +62,8 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
          "## Detector recall — attacks (one fixture per class)", ""]
     L += _attack_section(rows)
     L += ["", f"**Recall:** confirmed {scores['recall_confirmed']} · including leads {scores['recall_any']}", "",
-          "Common to every lure class: the observability gap and the model mismatch. The last column gives the "
-          "class-specific reason.", "",
+          "The last column gives the reason a target was not flagged: a coverage limit of the static rule families, or a "
+          "CIO scope ruling for classes outside Unit 1.", "",
           "## Precision and specificity — controls", ""]
     L += _control_section(rows)
     L += ["", f"**Precision:** confirmed {scores['precision_confirmed']} · including leads {scores['precision_any']}",
@@ -74,12 +74,16 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
     L += _calibration_section(scores)
     L += ["", f"**Calibration: {cal}.**", "",
           "## Reading this", "",
-          "- Zero recall on the agent-lure classes is a coverage gap, not a broken detector. The calibration row shows the "
-          "entrypoint flags its native vulnerable fixture and clears the safe one.",
-          "- The three structural causes are listed per class: the observability gap, the model mismatch, and the "
-          "absence of any deterministic check that reads instructions in descriptions, resources or elicitation.",
-          "- Detector improvements (a lure-text check, an agent-supplied-credential probe, server-env observability) are "
-          "separate units that come after this scorecard.",
+          "- Lure text is read statically by the lure_text probe: tool, parameter, annotation, resource and prompt text. "
+          "Its ceiling is SUSPECTED. A miss shows in the last column as a coverage limit, not as a verdict.",
+          "- Known limits this scorecard does not close: the canary observability gap (each attack forwards to MCPRT_CANARY, "
+          "a loopback channel the detector does not observe, so a class proven by a forward cannot be confirmed here) and "
+          "the family-B model mismatch (token passthrough tests a server's own environment credential, not an "
+          "agent-supplied lure).",
+          "- Out of Unit 1 scope by CIO ruling, kept in the table and not forced: tool_annotation (Unit 2 + Unit 3) and "
+          "elicitation_prompt (runtime elicitation unit).",
+          "- These corpus numbers are fit-to-corpus: the rule families were designed with these fixtures in view. The "
+          "generalization evidence is the class-derived battery (tests/test_lure_heldout.py, run with pytest).",
           "- Not in this scorecard: agent susceptibility (ASR). That is scorecard A, and the two are never blended.",
           f"- INCONCLUSIVE targets: {scores['inconclusive']}. They are excluded from every rate and never counted as cleared.",
           ""]

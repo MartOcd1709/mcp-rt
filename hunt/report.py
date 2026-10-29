@@ -52,6 +52,10 @@ CLASS_META = {
         title="Tool-Metadata Concealment (Tool Poisoning)",
         fix="Reject invisible/non-printable Unicode (TAG block U+E0000-E007F, zero-width, bidi, "
             "variation selectors) in tool names/descriptions/schemas; show the model's exact input in the approval view."),
+    "lure_text": dict(sev="Medium", cwe="CWE-74", owasp=["MCP03", "MCP06"],   # lead-only, see LEAD_ONLY_CLASSES
+        title="Model-Directed Lure Text (static lead)",
+        fix="Keep credentials out of model-facing text: never tell the model to take one from its context or pass one "
+            "to a tool, and state an operator's auth requirement in documentation, not in tool or prompt text."),
     "token_passthrough": dict(sev="High", cwe="CWE-287", owasp=["MCP01", "MCP07"],
         title="Token Passthrough / Confused Deputy",
         fix="Never forward the client's bearer token downstream; use the server's own credential or "
@@ -155,10 +159,13 @@ OWASP_MCP_TOP10 = {
     "MCP10": "Context Injection and Over Sharing",
 }
 # Controls this engine actively tests (others are out of active scope -> NOT TESTED, stated honestly).
-TESTED_CONTROLS = {c for m in CLASS_META.values() for c in m["owasp"]}
+# Lead-only classes (rework): a SUSPECTED lead may move a control's status, but a clean or inconclusive result from
+# these classes never establishes PASS (no PASS on a non-oracle negative). They are excluded from TESTED_CONTROLS.
+LEAD_ONLY_CLASSES = frozenset({"lure_text"})
+TESTED_CONTROLS = {c for name, m in CLASS_META.items() if name not in LEAD_ONLY_CLASSES for c in m["owasp"]}
 # Classes that need NO working tool call — they read tool metadata or the static package, so they stay
 # trustworthy even when the server is auth-gated. Everything else is execution-dependent.
-_NO_CRED_SAFE_CLASSES = {"tool_poisoning", "supply_chain"}
+_NO_CRED_SAFE_CLASSES = {"tool_poisoning", "supply_chain", "lure_text"}
 _SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
 
 # Crosswalk from the OWASP MCP controls we test to the standard audit frameworks, so the report
@@ -237,10 +244,18 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
         return CLASS_META.get(cls, {}).get("owasp", [])
     suspected_controls = {c for cls, v in cls_verdicts.items() if SUSPECTED in v for c in _controls(cls)}
     real_controls = {c for cls, v in cls_verdicts.items()
-                     if v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
+                     if cls not in LEAD_ONLY_CLASSES and v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
     inconclusive_controls = {c for cls, v in cls_verdicts.items() if v <= {INCONCLUSIVE}
                              for c in _controls(cls)} - real_controls
-    tested = set(TESTED_CONTROLS)
+    # Tested = controls whose classes produced evidence in THIS run, not every class in CLASS_META: demo-only classes
+    # never run in a scan, and mapping them to a control used to make it PASS with no evidence (MCP06). A lead can make
+    # a control tested; a lead-only class can never make it PASS.
+    ran = {c for cls in cls_verdicts if cls not in LEAD_ONLY_CLASSES for c in _controls(cls)}
+    if tok.verdict in (VULNERABLE, CLEAN):
+        ran |= set(_controls("token_passthrough"))
+    if sc_dir:
+        ran |= set(_controls("supply_chain"))
+    tested = ran | suspected_controls
     if not sc_dir:                       # supply chain didn't run for this target -> MCP04 not tested here
         tested.discard("MCP04")
     compliance = []

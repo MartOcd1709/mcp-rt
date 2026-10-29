@@ -248,12 +248,20 @@ def test_static_method_is_suspected_never_vulnerable():
 
 
 def test_calibration_safe_server_and_benign_controls_stay_quiet():
-    servers = [REPO / "hunt" / "probe_fixtures" / "safe_server.py",
-               *sorted((REPO / "fixtures" / "_controls").glob("*/server.py"))]
-    assert len(servers) >= 4
-    for path in servers:
-        flagged = _suspected(_scan(path))
-        assert not flagged, f"{path.name}: {[r.evidence for r in flagged]}"
+    """safe_server stays quiet and no control is ever CONFIRMED. A lure LEAD on a control is allowed only where the
+    control's description sentence is identical to an attack's: a text-level twin that no text rule can separate. Today
+    that is exactly benign_invoice, which shares its description sentence with the tool_description_injection attack."""
+    assert not _suspected(_scan(REPO / "hunt" / "probe_fixtures" / "safe_server.py"))
+    controls = sorted((REPO / "fixtures" / "_controls").glob("*/server.py"))
+    assert len(controls) >= 3
+    confirmed, leads = [], set()
+    for path in controls:
+        results = _scan(path)
+        confirmed += [r for r in results if r.verdict == VULNERABLE]
+        if _suspected(results):
+            leads.add(path.parent.name)
+    assert not confirmed
+    assert leads == {"benign_invoice"}, leads
 
 
 def test_resource_bodies_are_read_once_per_scan(tmp_path, monkeypatch):
@@ -291,6 +299,9 @@ class _FakeSession:
         if self._list_error is not None:
             raise self._list_error
         return SimpleNamespace(resources=self._resources)
+
+    async def list_prompts(self):
+        return SimpleNamespace(prompts=[])
 
     async def read_resource(self, uri):
         return SimpleNamespace(contents=self._contents)

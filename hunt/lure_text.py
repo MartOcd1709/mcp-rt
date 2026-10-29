@@ -5,14 +5,19 @@ annotations, resource bodies) and this module flags a sentence that
   cred_forward     tells the model to pass a credential, secret or session value somewhere;
   injection        overrides the model's instructions, hides an action from the user, or changes its role;
   trust_forward    calls a credential forward sanctioned, safe, trusted or approved;
-  confirm_request  asks for a credential "for confirmation" (static schema text only).
+  confirm_request  asks for a credential "for confirmation" (static schema text only);
+  cred_handoff     tells the model to take a credential from its own context (environment, configuration, settings,
+                   vault, memory) and hand it to a call, or to run or call with one;
+  cred_requirement declares that a credential the model holds (active, current, session or user-owned) must go into a
+                   named parameter.
 
 A hit is a LEAD, never a finding. The scan sees a lure, not whether an agent complied, so the probe reports it as
 confirmation_method "static", which verdict_for() maps to SUSPECTED. Nothing here can produce a VULNERABLE.
 
 Rules are grammar and vocabulary. No tool, parameter or server name is consulted; the dynamic gate in
 tests/test_lure_text.py enforces that. Known limits: elicitation and sampling text never appears in a manifest, so it
-is out of reach statically; prompt templates are not scanned; "token" also matches NLP prose about tokens (a lead).
+is out of reach statically (schema text only); "token" also matches NLP prose about tokens (a lead). Surfaces scanned:
+tool, parameter, annotation, resource and prompt text.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ _FWD_IMP = re.compile(rf"\b(?:{_FWD})\b", re.I)                   # bare (impera
 _FWD_ANY = re.compile(rf"\b(?:{_FWD})(?:s|es|ing|ed)?\b", re.I)   # any inflection: sends, sending, forwarded
 _CRED = re.compile(
     r"\b(?:credentials?|secrets?|passwords?|passphrases?|passcodes?|api[ _-]?keys?|access[ _-]?keys?|"
-    r"private[ _-]?keys?|bearer[ _-]?tokens?|cookies?|"
+    r"private[ _-]?keys?|signing[ _-]?keys?|bearer[ _-]?tokens?|cookies?|"
     r"session[ _-]?(?:cookies?|ids?|keys?|tokens?|values?|secrets?)|"
     r"(?:auth|access|api|refresh|oauth|personal|secret)[ _-]?tokens?|tokens?|"
     r"authorization (?:headers?|values?))\b", re.I)
@@ -85,6 +90,55 @@ def _confirm_request(sent: str) -> str | None:
     return None
 
 
+# Credential handoff (rework). The model is told to take a credential from its OWN context (environment,
+# configuration, settings, vault, memory) and hand it to a call, or a credential is run or called with. Declarative and
+# contextual, so it reaches phrasing the imperative rules above miss. A negated sentence never counts.
+_CTX_SRC = re.compile(
+    r"\b(?:from|out\s+of|in|within|taken\s+from|stored\s+in|held\s+in)\s+"
+    r"(?:your|the\s+(?:agent|assistant|model|current|active)(?:'s)?|its\s+own)\s+"
+    r"(?:environment|context|configuration|config|settings|vault|memory|conversation|env)\b", re.I)
+_HANDOFF = re.compile(
+    r"\b(?:run|call|invoke|execute|use|put|include|pass|supply|supplied|provide|provided|send|attach|attached|"
+    r"forward|forwarded|submit|passed|included|sent)\b", re.I)
+_RUN_WITH_CRED = re.compile(
+    r"\b(?:run|call|invoke|execute|use)\s+(?:[\w-]+\s+){1,3}?(?:with|using)\s+(?:the\s+|your\s+|its\s+|an?\s+)?"
+    r"(?:[\w-]+\s+){0,2}?" + _CRED.pattern, re.I)
+
+
+def _cred_handoff(sent: str) -> str | None:
+    if _NEG.search(sent):
+        return None
+    if m := _RUN_WITH_CRED.search(sent):
+        return m.group(0)
+    src, h, c = _CTX_SRC.search(sent), _HANDOFF.search(sent), _CRED.search(sent)
+    if src and h and c:
+        return sent[min(src.start(), h.start(), c.start()):max(src.end(), h.end(), c.end())]
+    return None
+
+
+# Declared requirement (rework). The model is told that a credential must go into a named parameter. Only the
+# active, current, session or user-owned credential counts, so "requires an API key in the header" (a plain operator
+# note) stays clean.
+_DET = r"(?:the\s+(?:active|current|session)|its\s+own|the\s+user'?s)"
+_CRED_NOUN = r"(?:credentials?|secrets?|tokens?|api[ _-]?keys?|passwords?|cookies?|signing[ _-]?keys?)"
+_PREP = r"(?:in|as|via|through|under|within)"
+_PARAM_REF = r"(?:the\s+)?(?:`[^`]+`|[\w-]+\s+(?:parameter|argument|field)\b)"
+_REQ_FIRST = re.compile(
+    rf"\b(?:requires?|needs?|expects?)\s+{_DET}\s+(?:[\w-]+\s+){{0,2}}?{_CRED_NOUN}\b"
+    rf"[^.!?;\n]{{0,40}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
+_REQ_LAST = re.compile(
+    rf"\b{_DET}\s+(?:[\w-]+\s+){{0,2}}?{_CRED_NOUN}\b[^.!?;\n]{{0,40}}?"
+    rf"\b(?:must\s+(?:be\s+)?(?:sent|passed|supplied|included)|(?:is|are)\s+(?:required|needed|expected))\b"
+    rf"[^.!?;\n]{{0,20}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
+
+
+def _cred_requirement(sent: str) -> str | None:
+    if _NEG.search(sent):
+        return None
+    m = _REQ_FIRST.search(sent) or _REQ_LAST.search(sent)
+    return m.group(0) if m else None
+
+
 _INJECT = (
     re.compile(r"\b(?:ignore|disregard|forget|override|bypass|abandon)\b[^.!?;\n]{0,40}?\b"
                r"(?:instructions?|prompts?|rules|directives|guidelines|system (?:message|prompt))\b", re.I),
@@ -98,13 +152,18 @@ _INJECT = (
                r"new (?:system )?instructions?\s*:)", re.I),
 )
 _SENTENCE_RULES = (("cred_forward", _cred_forward), ("trust_forward", _trust_forward),
-                   ("confirm_request", _confirm_request))
+                   ("confirm_request", _confirm_request), ("cred_handoff", _cred_handoff),
+                   ("cred_requirement", _cred_requirement))
 
 RULE_WHY = {
     "cred_forward": "model-directed instruction to forward a credential or secret",
     "injection": "model-directed injection phrasing (override, concealment or role change)",
     "trust_forward": "a trust or safety assertion that a credential forward is sanctioned",
     "confirm_request": "model-directed request for a credential 'for confirmation' (static schema text only)",
+    "cred_handoff": "model-directed credential handoff: a credential taken from the model's own context "
+                    "(environment, configuration, vault, memory) and passed to a call",
+    "cred_requirement": "declared requirement that the model supply its own credential (active, current or session) "
+                        "in a named parameter",
 }
 
 

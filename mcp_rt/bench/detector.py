@@ -27,10 +27,12 @@ ENTRYPOINT = "hunt.report.run_full_scan (the engine behind `mcp-rt check`): impl
 EXCLUDED = ("model-driven modes excluded: the credential-exfil scan (runs a live client), agent, hunt-agent, pentest",)
 TAINT_NOTE = ("N/A: the runtime taint monitor (mcp_rt/detect) models file-read then egress (MCP-25); none of the corpus "
               "classes has that shape, so it is reported as not applicable, not as zero recall")
-
-_OBSERVABILITY = ("the fixture forwards to MCPRT_CANARY, a channel the detector's harness does not observe "
-                  "(observability gap)")
-_MODEL_MISMATCH = "token passthrough tests a server's own env credential, not an agent-supplied lure (model mismatch)"
+# Scorecard text only, never read by a verdict. Corpus classes ruled out of Unit 1 by the CIO. They stay in the table.
+SCOPE_NOTES = {
+    "tool_annotation": "out of Unit 1 scope (CIO ruling): a false-trust annotation needs observed egress to confirm, "
+                       "which is Unit 2 + Unit 3",
+    "elicitation_prompt": "out of Unit 1 scope (CIO ruling): runtime elicitation text needs a runtime/elicitation unit",
+}
 
 
 def sha256_of(path: Path) -> str:
@@ -56,16 +58,22 @@ def scan_target(server_py: Path) -> dict:
 
 
 def gap_reasons(protocol_features) -> list[str]:
-    """Why the detector cannot flag a lure class. Derived from the fixture's protocol features (data), not from names."""
+    """Why a lure class is not flagged, derived from the fixture's protocol features (data, never names). The last
+    reason is the most specific one; the scorecard prints it."""
     features = set(protocol_features or [])
-    reasons = [_OBSERVABILITY, _MODEL_MISMATCH]
+    reasons = ["lure_text reads this text statically (SUSPECTED ceiling); a miss means the phrasing sits outside the "
+               "rule families: a coverage limit, reported, never a verdict"]
     if "elicitation" in features:
-        reasons.append("the lure is an elicitation request, and no deterministic check inspects elicitation requests")
-    elif "resources" in features:
-        reasons.append("the lure is in resource text, and no deterministic check reads resource text for instructions")
-    else:
-        reasons.append("the lure sits in a tool description or handler, and no deterministic check reads tool "
-                       "descriptions for instructions (tool_poisoning detects invisible unicode only)")
+        reasons.append("the lure text exists only at call time (an elicitation request); the static scan sees schema "
+                       "text only, so runtime text needs a runtime/elicitation unit")
+    return reasons
+
+
+def reasons_for(name: str, protocol_features) -> list[str]:
+    """Scorecard text: gap_reasons plus any CIO scope ruling for this corpus class. Reporting only, never a verdict."""
+    reasons = gap_reasons(protocol_features)
+    if name in SCOPE_NOTES:
+        reasons.append(SCOPE_NOTES[name])
     return reasons
 
 
