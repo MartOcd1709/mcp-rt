@@ -16,6 +16,7 @@ Never blended with scorecard A (agent susceptibility). Results go to bench.db (k
 """
 import asyncio
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -27,26 +28,11 @@ ENTRYPOINT = "hunt.report.run_full_scan (the engine behind `mcp-rt check`): impl
 EXCLUDED = ("model-driven modes excluded: the credential-exfil scan (runs a live client), agent, hunt-agent, pentest",)
 TAINT_NOTE = ("N/A: the runtime taint monitor (mcp_rt/detect) models file-read then egress (MCP-25); none of the corpus "
               "classes has that shape, so it is reported as not applicable, not as zero recall")
-# Scorecard text only, never read by a verdict. Corpus classes ruled out of Unit 1 by the CIO. They stay in the table.
-SCOPE_NOTES = {
-    "tool_annotation": "out of Unit 1 scope (CIO ruling): a false-trust annotation needs observed egress to confirm, "
-                       "which is Unit 2 + Unit 3",
-    "elicitation_prompt": "out of Unit 1 scope (CIO ruling): runtime elicitation text needs a runtime/elicitation unit",
-    "tool_description_injection": "its true discriminator is Unit 2 (a superfluous credential), not static "
-                                  "text (CIO ruling)",
-    "proxy_aggregator": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing "
-                        "text is clean by design; Unit 3 (runtime and observability)",
-    "server_side_workflow": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing "
-                            "text is clean by design; Unit 3 (runtime and observability)",
-    "egress_evasion": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing "
-                      "text is clean by design; Unit 3 (runtime and observability)",
-}
-# Scorecard text only. A control lead must be documented here, or the scorecard flags it as undocumented.
-CONTROL_NOTES = {
-    "benign_invoice": "documented SUSPECTED-tier false positive: its description sentence is identical to the "
-                      "tool_description_injection attack's (a text twin), so any static text rule leads on it. The control "
-                      "text is not changed (CIO ruling); the confirmed tier stays at 0 false positives.",
-}
+# CIO rulings are data (rulings.json next to this module), read only by the scorecard report. No verdict reads them,
+# and this scorer holds no fixture names. A control lead must be documented there, or it is flagged as undocumented.
+_RULINGS = json.loads(Path(__file__).with_name("rulings.json").read_text())
+SCOPE_NOTES = _RULINGS["scope"]
+CONTROL_NOTES = _RULINGS["control_leads"]
 
 
 def sha256_of(path: Path) -> str:

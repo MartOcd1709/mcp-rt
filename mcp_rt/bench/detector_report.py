@@ -103,14 +103,12 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
           "- Lure text is read statically by the lure_text probe: tool, parameter, annotation, resource and prompt text. "
           "Its ceiling is SUSPECTED, never a confirmed finding.",
           "- Soft-wrapped text is read as one sentence. List items and blank lines stay boundaries (CIO-approved parser rule).",
-          "- CIO ruling: 2/7 is the honest static ceiling for this corpus. The attacks outside it are either out of "
-          "static-lure scope (the forward lives in handler code and the model-facing text is clean by design: Unit 3, "
-          "runtime and observability) or out of Unit 1 scope (tool_annotation: Unit 2 + Unit 3; elicitation_prompt: "
-          "runtime unit). tool_description_injection reaches a lead only; its true discriminator is Unit 2 "
-          "(a superfluous credential), not static text.",
+          "- CIO ruling: 2/7 is the honest static ceiling for this corpus. Each attack outside it is listed with its reason "
+          "in the Why column, drawn from the CIO rulings file: out of static-lure scope, out of Unit 1 scope, or a lead "
+          "whose confirmation needs a later unit.",
           "- A control lead is documented only where the control shares an attack's exact description sentence (a text "
-          "twin). benign_invoice is that case. Its control text is not changed, and the confirmed tier stays at 0 false "
-          "positives.",
+          "twin). The documented control leads are listed above, from the rulings file. Control text is never changed, and "
+          "the confirmed tier stays at 0 false positives.",
           "- Known limits this scorecard does not close: the canary observability gap (each attack forwards to MCPRT_CANARY, "
           "a loopback channel the detector does not observe, so a class proven by a forward cannot be confirmed here) and "
           "the family-B model mismatch (token passthrough tests a server's own environment credential, not an "
