@@ -37,7 +37,7 @@ _CRED = re.compile(
     r"authorization (?:headers?|values?))\b", re.I)
 # A verb opens its clause when nothing precedes it, or only a lead-in: a directive, not a description.
 _LEAD = re.compile(
-    r"(?:\b(?:always|please|first|then|also|now|next|finally|must|should|ensure|again|just|immediately|simply|"
+    r"(?:\b(?:always|please|first|then|also|now|next|finally|must|should|ensure|again|just|immediately|simply|and|"
     r"ensure you|make sure you|make sure to|be sure you|be sure to|remember to|"
     r"you must|you should|you need to|you have to)|,)\s*$", re.I)
 _SPLIT = re.compile(r"[.!?;:\n]+")
@@ -58,6 +58,8 @@ def _join_soft_wraps(text: str) -> str:
 
 def _imperative(prefix: str) -> bool:
     """True when the verb opens its clause: nothing before it, or only a list marker or a lead-in."""
+    if _NEG.search(prefix):
+        return False     # a negated clause is a prohibition, never a directive, even after a comma or 'and'
     p = re.sub(r"^[\s\-*•>#\d.)]+", "", prefix).strip()
     return not p or bool(_LEAD.search(p))
 
@@ -113,7 +115,8 @@ _CTX_SRC = re.compile(
     r"(?:your|the\s+(?:agent|assistant|model|current|active)(?:'s)?|its\s+own)\s+"
     r"(?:environment|context|configuration|config|settings|vault|memory|conversation|env)\b", re.I)
 _HANDOFF = re.compile(
-    r"\b(?:run|call|invoke|execute|use|put|include|pass|supply|supplied|provide|provided|send|attach|attached|"
+    r"\b(?:run|call|invoke|execute|use|put|place|copy|move|drop|enter|paste|include|pass|supply|supplied|provide|provided|"
+    r"send|attach|attached|"
     r"forward|forwarded|submit|passed|included|sent)\b", re.I)
 _RUN_WITH_CRED = re.compile(
     r"\b(?:run|call|invoke|execute|use)\s+(?:[\w-]+\s+){1,3}?(?:with|using)\s+(?:the\s+|your\s+|its\s+|an?\s+)?"
@@ -147,16 +150,31 @@ _REQ_LAST = re.compile(
     rf"[^.!?;\n]{{0,20}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
 
 
+# Possessive "your" counts only with an ephemeral qualifier and an ephemeral noun ("your current session token"). "your API
+# key" is operator-owned, and an operator note such as "requires your API key in the header" must stay quiet.
+_YOUR = r"your\s+(?:current|active|session|own)\s+(?:[\w-]+\s+){0,2}?(?:tokens?|cookies?|session\s+ids?)\b"
+_REQ_YOUR_FIRST = re.compile(rf"\b(?:requires?|needs?|expects?)\s+{_YOUR}[^.!?;\n]{{0,40}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
+_REQ_YOUR_LAST = re.compile(
+    rf"\b{_YOUR}[^.!?;\n]{{0,40}}?\b(?:must\s+(?:be\s+)?(?:sent|passed|supplied|included)|"
+    rf"(?:is|are)\s+(?:required|needed|expected))\b[^.!?;\n]{{0,20}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
+
+
 def _cred_requirement(sent: str) -> str | None:
     if _NEG.search(sent):
         return None
-    m = _REQ_FIRST.search(sent) or _REQ_LAST.search(sent)
+    m = (_REQ_FIRST.search(sent) or _REQ_LAST.search(sent)
+         or _REQ_YOUR_FIRST.search(sent) or _REQ_YOUR_LAST.search(sent))
     return m.group(0) if m else None
 
 
 _INJECT = (
     re.compile(r"\b(?:ignore|disregard|forget|override|bypass|abandon)\b[^.!?;\n]{0,40}?\b"
                r"(?:instructions?|prompts?|rules|directives|guidelines|system (?:message|prompt))\b", re.I),
+    # Guidance, directions and context are common benign nouns, so they fire only when qualified as prior ("the earlier
+    # guidance", "the previous context"), which is the injection shape. "Ignore the context parameter" stays quiet.
+    re.compile(r"\b(?:ignore|disregard|forget|override|bypass|abandon)\b[^.!?;\n]{0,40}?\b"
+               r"(?:earlier|previous|prior|above|preceding|original|existing|past|system)\s+(?:guidance|directions?|context)\b",
+               re.I),
     re.compile(r"\b(?:do not|don't|never|must not|should not)\s+(?:tell|inform|notify|mention|alert)\s+"
                r"(?:the\s+)?(?:user|human|operator)\b", re.I),
     re.compile(r"\b(?:silently|secretly|covertly|quietly)\s+(?:send|forward|pass|include|upload|post|transmit|share)\w*",
