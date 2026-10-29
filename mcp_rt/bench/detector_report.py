@@ -19,13 +19,14 @@ def _coverage_text(coverage: dict) -> str:
 
 
 def _why(r: dict) -> str:
-    """The Why column. A lead is not a miss: it says the lure was matched and that confirming it needs other evidence."""
-    scope = SCOPE_NOTES.get(r["name"], "")
+    """The Why column. A lead is not a miss: it says the lure was matched and that confirming it needs other evidence.
+    For a miss, reasons[-1] is already the most specific reason (the CIO scope note is appended by reasons_for)."""
     if r["flagged"]:
         return ""
     if r["any_flag"]:
+        scope = SCOPE_NOTES.get(r["name"], "")
         return "lead: static text matched, not confirmed (not a verdict)" + (f"; {scope}" if scope else "")
-    return "; ".join(x for x in (r["reasons"][-1], scope) if x)
+    return r["reasons"][-1]
 
 
 def _attack_section(rows: list[dict]) -> list[str]:

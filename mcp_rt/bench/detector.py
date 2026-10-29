@@ -32,7 +32,7 @@ SCOPE_NOTES = {
     "tool_annotation": "out of Unit 1 scope (CIO ruling): a false-trust annotation needs observed egress to confirm, "
                        "which is Unit 2 + Unit 3",
     "elicitation_prompt": "out of Unit 1 scope (CIO ruling): runtime elicitation text needs a runtime/elicitation unit",
-    "tool_description_injection": "a lead only: its true discriminator is Unit 2 (a superfluous credential), not static "
+    "tool_description_injection": "its true discriminator is Unit 2 (a superfluous credential), not static "
                                   "text (CIO ruling)",
     "proxy_aggregator": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing "
                         "text is clean by design; Unit 3 (runtime and observability)",
