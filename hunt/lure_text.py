@@ -14,6 +14,8 @@ annotations, resource bodies) and this module flags a sentence that
 A hit is a LEAD, never a finding. The scan sees a lure, not whether an agent complied, so the probe reports it as
 confirmation_method "static", which verdict_for() maps to SUSPECTED. Nothing here can produce a VULNERABLE.
 
+Soft line wraps are joined into their sentence; list items and blank lines stay boundaries.
+
 Rules are grammar and vocabulary. No tool, parameter or server name is consulted; the dynamic gate in
 tests/test_lure_text.py enforces that. Known limits: elicitation and sampling text never appears in a manifest, so it
 is out of reach statically (schema text only); "token" also matches NLP prose about tokens (a lead). Surfaces scanned:
@@ -39,6 +41,19 @@ _LEAD = re.compile(
     r"ensure you|make sure you|make sure to|be sure you|be sure to|remember to|"
     r"you must|you should|you need to|you have to)|,)\s*$", re.I)
 _SPLIT = re.compile(r"[.!?;:\n]+")
+_LIST_START = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s")
+
+
+def _join_soft_wraps(text: str) -> str:
+    """A lone newline inside a sentence is a soft wrap, not a boundary: it joins the line before with a space. List
+    items and blank lines stay boundaries, so separate items or paragraphs never fuse into one false sentence."""
+    out: list[str] = []
+    for line in text.split("\n"):
+        if not out or not line.strip() or not out[-1].strip() or _LIST_START.match(line):
+            out.append(line)
+        else:
+            out[-1] = out[-1] + " " + line.lstrip()
+    return "\n".join(out)
 
 
 def _imperative(prefix: str) -> bool:
@@ -169,7 +184,7 @@ RULE_WHY = {
 
 def scan_text(text: str) -> list[tuple[str, str]]:
     """(rule, matched span) for every lure in one piece of model-facing text, first-seen order, no duplicates."""
-    text = text or ""
+    text = _join_soft_wraps(text or "")
     hits: list[tuple[str, str]] = []
     for sent in _sentences(text):
         for rule, fn in _SENTENCE_RULES:
