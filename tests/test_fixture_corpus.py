@@ -123,7 +123,8 @@ async def _tool_surface(cls: str):
 # ---- corpus structure and label ground truth -------------------------------------------------------
 
 def test_corpus_has_exactly_the_seven_listed_classes():
-    assert sorted(p.name for p in ROOT.iterdir() if p.is_dir()) == sorted(CLASSES)
+    # Folders starting with "_" are not attack classes (fixtures/_controls/ holds the benign controls).
+    assert sorted(p.name for p in ROOT.iterdir() if p.is_dir() and not p.name.startswith("_")) == sorted(CLASSES)
 
 
 @pytest.mark.parametrize("cls", CLASSES)
