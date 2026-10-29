@@ -42,6 +42,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from hunt.lure_text import RULE_WHY, scan_text
+
 VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
     "VULNERABLE", "SUSPECTED", "CLEAN", "INCONCLUSIVE", "NOT_APPLICABLE")
 
@@ -1090,6 +1092,25 @@ def _res_text(result) -> str:
     return "\n".join(out)
 
 
+_RES_CACHE: dict | None = None      # per-scan memo, set by scan_target: body-reading probes share one read per URI
+
+
+async def _read_resource(session, uri):
+    """resources/read, shared within one scan: context_oversharing and lure_text read each body once."""
+    if _RES_CACHE is None:                                    # outside scan_target: no sharing
+        return await asyncio.wait_for(session.read_resource(uri), _CALL_TIMEOUT_S)
+    key = (id(session), str(uri))             # keyed by session too: two servers can expose the same URI
+    if key not in _RES_CACHE:
+        try:
+            _RES_CACHE[key] = (await asyncio.wait_for(session.read_resource(uri), _CALL_TIMEOUT_S), None)
+        except Exception as exc:  # noqa: BLE001 — cache the failure too, so every reader sees the same outcome
+            _RES_CACHE[key] = (None, exc)
+    res, err = _RES_CACHE[key]
+    if err is not None:
+        raise err
+    return res
+
+
 async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     """Context oversharing (OWASP MCP10, CWE-200): a tool or resource hands the model data from the
     server's environment it was never scoped to see. Ground truth: scan_target plants a unique secret
@@ -1115,7 +1136,7 @@ async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     try:                                              # and every resource the server exposes
         for res in (await session.list_resources()).resources:
             try:
-                text = _res_text(await session.read_resource(res.uri))
+                text = _res_text(await _read_resource(session, res.uri))
                 returned.append(text)
             except Exception as exc:  # noqa: BLE001
                 raised.append(str(exc))
@@ -1132,9 +1153,106 @@ async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     return out
 
 
+_SCHEMA_DOC_KEYS = ("title", "description", "examples", "default")
+
+
+def _schema_docs(node, path: str = "") -> list[tuple[str, str]]:
+    """(path, text) for every documentation string in a JSON schema: titles, descriptions, examples, defaults."""
+    out: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = f"{path}.{k}" if path else k
+            if k in _SCHEMA_DOC_KEYS and isinstance(v, str):
+                out.append((p, v))
+            elif k in _SCHEMA_DOC_KEYS and isinstance(v, list):
+                out += [(p, x) for x in v if isinstance(x, str)]
+            elif isinstance(v, (dict, list)):
+                out += _schema_docs(v, p)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out += _schema_docs(v, f"{path}[{i}]")
+    return out
+
+
+def _lure_rows(owner: str, surfaces: list[tuple[str, str]]) -> list[ProbeResult]:
+    """One SUSPECTED row per lure, with its surface and matched span as evidence. A CLEAN row when none is found,
+    so coverage shows the text was read; that CLEAN is only the static scan's own negative."""
+    rows = []
+    for path, text in surfaces:
+        for rule, span in scan_text(text):
+            rows.append(ProbeResult("lure_text", owner, "static", marker=rule,
+                                    evidence=f'{owner} / {path}: "{span}"', rationale=RULE_WHY[rule]))
+    if not rows:
+        rows.append(ProbeResult("lure_text", owner, "oracle_negative",
+                                rationale="static scan of the model-facing text found no lure (runtime elicitation "
+                                          "and sampling text is not visible without a call)"))
+    return rows
+
+
+async def probe_lure_text(session, tools) -> list[ProbeResult]:
+    """Model-directed lure text (Detector Unit 1): tool descriptions, parameter text, annotations, resource bodies and prompt text
+    that tell the model to forward a credential, override what it was told to do, call a forward safe, or request
+    a credential "for confirmation". Static, so every hit is a SUSPECTED lead, never VULNERABLE."""
+    out: list[ProbeResult] = []
+    for t in tools:
+        a = getattr(t, "annotations", None)
+        ann = a.model_dump(exclude_none=True) if hasattr(a, "model_dump") else dict(a or {})
+        surfaces = [("description", t.description or ""), ("title", getattr(t, "title", None) or "")]
+        surfaces += [(f"annotations.{k}", v) for k, v in ann.items() if isinstance(v, str)]
+        surfaces += [(f"schema.{p}", v) for p, v in _schema_docs(_schema(t))]
+        out += _lure_rows(t.name, surfaces)
+    try:
+        resources = (await session.list_resources()).resources
+    except Exception as exc:  # noqa: BLE001
+        resources = []
+        if getattr(getattr(exc, "error", None), "code", None) != -32601:    # -32601: no resources endpoint
+            out.append(ProbeResult("lure_text", "(resources)", "error",
+                                   rationale=f"resources/list failed: {_unwrap(exc)[:120]}"))
+    for r in resources:
+        owner = f"resource:{r.uri}"
+        try:
+            res = await _read_resource(session, r.uri)
+        except Exception as exc:  # noqa: BLE001
+            out.append(ProbeResult("lure_text", owner, "error",
+                                   rationale=f"resources/read failed: {_unwrap(exc)[:120]}"))
+            continue
+        contents = getattr(res, "contents", None) or []
+        texts = [c.text for c in contents if getattr(c, "text", None)]
+        if contents and not texts:                  # binary only: nothing was decoded, so nothing was scanned
+            out.append(ProbeResult("lure_text", owner, "error",
+                                   rationale="binary-only resource: body not decoded, lure text not scanned"))
+            continue
+        out += _lure_rows(owner, [("name", r.name or ""), ("description", r.description or ""),
+                                  ("body", "\n".join(texts))])
+    try:    # prompts are model-facing text too: a template's messages are what the model is handed
+        prompts = (await session.list_prompts()).prompts
+    except Exception as exc:  # noqa: BLE001
+        prompts = []
+        if getattr(getattr(exc, "error", None), "code", None) != -32601:    # -32601: no prompts endpoint
+            out.append(ProbeResult("lure_text", "(prompts)", "error",
+                                   rationale=f"prompts/list failed: {_unwrap(exc)[:120]}"))
+    for p in prompts:
+        owner = f"prompt:{p.name}"
+        args = list(p.arguments or [])
+        meta = [("name", p.name or ""), ("description", p.description or "")]
+        meta += [(f"argument.{a.name}", a.description or "") for a in args]
+        try:    # rendered with placeholder values, so the text the model would receive is what gets scanned
+            res = await asyncio.wait_for(session.get_prompt(p.name, {a.name: "example" for a in args}), _CALL_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            out.append(ProbeResult("lure_text", owner, "error", rationale=f"prompts/get failed: {_unwrap(exc)[:120]}"))
+            continue
+        texts = [m.content.text for m in (res.messages or []) if getattr(m.content, "text", None)]
+        out += _lure_rows(owner, meta + [("messages", "\n".join(texts))])
+    if not out:
+        out.append(ProbeResult("lure_text", "(server)", "not_applicable",
+                               rationale="no tools, resources or prompts exposed"))
+    return out
+
+
 ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
-              probe_arg_injection, probe_deserialization, probe_context_oversharing]
+              probe_arg_injection, probe_deserialization, probe_context_oversharing,
+              probe_lure_text]
 
 
 class ScanError(RuntimeError):
@@ -1183,8 +1301,9 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     # Plant a unique secret in the server's environment. If any tool/resource surfaces it to the model,
     # the server overshares its context (MCP10) — ground truth, since a random UUID can't be coincidence.
     # ponytail: module global = one-scan-at-a-time; add a context arg if we ever scan concurrently.
-    global _CTX_CANARY
+    global _CTX_CANARY, _RES_CACHE
     _CTX_CANARY = "mcprt-ctx-" + uuid.uuid4().hex
+    _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=child_env, cwd=workdir)
@@ -1226,6 +1345,7 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     except Exception as exc:   # unwrap anyio/TaskGroup noise into a readable root cause (timeouts/cancel still propagate)
         raise ScanError(_unwrap(exc) or f"{type(exc).__name__}: {exc}"[:200]) from exc
     finally:
+        _RES_CACHE = None
         shutil.rmtree(workdir, ignore_errors=True)
     return results
 

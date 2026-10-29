@@ -37,7 +37,7 @@ def _detect(args) -> int:
         server = fixture.path / "server.py"
         rows.append({"name": fixture.name, "role": fixture.kind, "subtlety": fixture.label.get("subtlety", "?"),
                      "cousin": fixture.label.get("cousin", "?"), "features": features,
-                     "reasons": detector.gap_reasons(features) if fixture.kind == "attack" else [],
+                     "reasons": detector.reasons_for(fixture.name, features) if fixture.kind == "attack" else [],
                      "path": str(server), "manifest": fixture.manifest(), **detector.scan_target(server)})
     for name, expect in detector.CALIBRATION:
         server = detector.CALIBRATION_DIR / f"{name}.py"

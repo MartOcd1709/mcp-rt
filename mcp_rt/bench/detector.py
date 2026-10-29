@@ -16,6 +16,7 @@ Never blended with scorecard A (agent susceptibility). Results go to bench.db (k
 """
 import asyncio
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -27,10 +28,11 @@ ENTRYPOINT = "hunt.report.run_full_scan (the engine behind `mcp-rt check`): impl
 EXCLUDED = ("model-driven modes excluded: the credential-exfil scan (runs a live client), agent, hunt-agent, pentest",)
 TAINT_NOTE = ("N/A: the runtime taint monitor (mcp_rt/detect) models file-read then egress (MCP-25); none of the corpus "
               "classes has that shape, so it is reported as not applicable, not as zero recall")
-
-_OBSERVABILITY = ("the fixture forwards to MCPRT_CANARY, a channel the detector's harness does not observe "
-                  "(observability gap)")
-_MODEL_MISMATCH = "token passthrough tests a server's own env credential, not an agent-supplied lure (model mismatch)"
+# CIO rulings are data (rulings.json next to this module), read only by the scorecard report. No verdict reads them,
+# and this scorer holds no fixture names. A control lead must be documented there, or it is flagged as undocumented.
+_RULINGS = json.loads(Path(__file__).with_name("rulings.json").read_text())
+SCOPE_NOTES = _RULINGS["scope"]
+CONTROL_NOTES = _RULINGS["control_leads"]
 
 
 def sha256_of(path: Path) -> str:
@@ -56,16 +58,23 @@ def scan_target(server_py: Path) -> dict:
 
 
 def gap_reasons(protocol_features) -> list[str]:
-    """Why the detector cannot flag a lure class. Derived from the fixture's protocol features (data), not from names."""
+    """Why a lure class is not flagged, derived from the fixture's protocol features (data, never names). The last
+    reason is the most specific one; the scorecard prints it."""
     features = set(protocol_features or [])
-    reasons = [_OBSERVABILITY, _MODEL_MISMATCH]
+    reasons = ["lure_text reads model-facing text statically (SUSPECTED ceiling); no lure matched, so either the phrasing "
+               "sits outside the rule families or the lure lives in server behavior that model-facing text cannot show: "
+               "a coverage limit, never a verdict"]
     if "elicitation" in features:
-        reasons.append("the lure is an elicitation request, and no deterministic check inspects elicitation requests")
-    elif "resources" in features:
-        reasons.append("the lure is in resource text, and no deterministic check reads resource text for instructions")
-    else:
-        reasons.append("the lure sits in a tool description or handler, and no deterministic check reads tool "
-                       "descriptions for instructions (tool_poisoning detects invisible unicode only)")
+        reasons.append("the lure text exists only at call time (an elicitation request); the static scan sees schema "
+                       "text only, so runtime text needs a runtime/elicitation unit")
+    return reasons
+
+
+def reasons_for(name: str, protocol_features) -> list[str]:
+    """Scorecard text: gap_reasons plus any CIO scope ruling for this corpus class. Reporting only, never a verdict."""
+    reasons = gap_reasons(protocol_features)
+    if name in SCOPE_NOTES:
+        reasons.append(SCOPE_NOTES[name])
     return reasons
 
 

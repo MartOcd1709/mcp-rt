@@ -72,13 +72,13 @@ def test_a_failed_calibration_is_reported_as_failed():
     assert [c["result"] for c in s["calibration"]] == ["FAIL", "PASS"]
 
 
-def test_gap_reasons_follow_the_fixture_protocol_features():
-    shared = detector.gap_reasons([])
-    assert any("observability gap" in r for r in shared)
-    assert any("model mismatch" in r for r in shared)
-    assert any("elicitation" in r for r in detector.gap_reasons(["tools", "elicitation"]))
-    assert any("resource text" in r for r in detector.gap_reasons(["resources", "tools"]))
-    assert any("tool description" in r for r in detector.gap_reasons(["tools"]))
+def test_gap_reasons_describe_current_coverage_not_the_pre_unit1_gap():
+    plain = detector.gap_reasons(["tools"])
+    assert any("lure_text reads model-facing text statically" in r for r in plain)     # lure text IS read now
+    assert not any("no deterministic check" in r for r in plain + detector.gap_reasons(["tools", "elicitation"]))
+    assert "elicitation" in detector.gap_reasons(["tools", "elicitation"])[-1]   # runtime gap kept, most specific
+    assert detector.reasons_for("tool_annotation", ["tools"])[-1] == detector.SCOPE_NOTES["tool_annotation"]
+    assert "Unit 2" in detector.SCOPE_NOTES["tool_annotation"]
 
 
 def test_scorecard_b_never_renders_the_asr_figures():

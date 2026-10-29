@@ -166,6 +166,10 @@ TAXONOMY: list[Item] = [
     Item("MISSING-AUTH", "Insufficient Authentication/Authorization", ("OWASP-MCP:MCP07", "MCP38:MCP-29", "CoSAI:CoSAI-18", "CIS:CIS-3"), None, PARTIAL, notes="missing-auth enforcement probed; full OAuth-flow attacks pending (hunt/oauth_harness.py)", gap_ticket="SAM1-15"),
     # --- tool / schema / description poisoning ---
     Item("TOOL-POISON", "Tool Description Poisoning", ("MCP38:MCP-10", "OWASP-MCP:MCP03", "ASI:ASI01", "CoSAI:CoSAI-2"), "tool_poisoning", COVERED, _PROBE),
+    Item("LURE-TEXT", "Model-Directed Lure Text (static lead)", ("OWASP-MCP:MCP03", "OWASP-MCP:MCP06"), "lure_text", PARTIAL,
+         evidence="tests/test_lure_text.py, tests/test_lure_heldout.py, tests/test_lure_rework.py",
+         notes="SUSPECTED ceiling: static rule families over tool, parameter, annotation, resource and prompt text; never a "
+               "finding and never proof of agent compliance; runtime elicitation and sampling text are out of scope"),
     Item("SCHEMA-POISON", "Full Schema Poisoning", ("MCP38:MCP-11", "OWASP-MCP:MCP03", "CoSAI:CoSAI-3"), "schema_examples_steering", COVERED, _AGENT),
     Item("UNICODE-CONCEAL", "Unicode / Hidden-Character Concealment", ("MCP38:MCP-11",), "hidden_unicode", COVERED, _AGENT),
     Item("TOOL-SHADOW", "Tool Shadowing", ("MCP38:MCP-13", "CoSAI:CoSAI-5"), "tool_shadowing", COVERED, _AGENT),
