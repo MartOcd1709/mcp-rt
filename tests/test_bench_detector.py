@@ -74,7 +74,7 @@ def test_a_failed_calibration_is_reported_as_failed():
 
 def test_gap_reasons_describe_current_coverage_not_the_pre_unit1_gap():
     plain = detector.gap_reasons(["tools"])
-    assert any("lure_text reads this text statically" in r for r in plain)     # lure text IS read now
+    assert any("lure_text reads model-facing text statically" in r for r in plain)     # lure text IS read now
     assert not any("no deterministic check" in r for r in plain + detector.gap_reasons(["tools", "elicitation"]))
     assert "elicitation" in detector.gap_reasons(["tools", "elicitation"])[-1]   # runtime gap kept, most specific
     assert detector.reasons_for("tool_annotation", ["tools"])[-1] == detector.SCOPE_NOTES["tool_annotation"]
