@@ -62,7 +62,7 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
          "## Detector recall — attacks (one fixture per class)", ""]
     L += _attack_section(rows)
     L += ["", f"**Recall:** confirmed {scores['recall_confirmed']} · including leads {scores['recall_any']}", "",
-          "The last column gives the reason a target was not flagged: a coverage limit of the static rule families, or a "
+          "The last column gives the reason a target was not flagged: a coverage limit (phrasing outside the rule families, or a lure in server behavior), or a "
           "CIO scope ruling for classes outside Unit 1.", "",
           "## Precision and specificity — controls", ""]
     L += _control_section(rows)
@@ -75,7 +75,8 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
     L += ["", f"**Calibration: {cal}.**", "",
           "## Reading this", "",
           "- Lure text is read statically by the lure_text probe: tool, parameter, annotation, resource and prompt text. "
-          "Its ceiling is SUSPECTED. A miss shows in the last column as a coverage limit, not as a verdict.",
+          "Its ceiling is SUSPECTED. A miss means either a phrasing outside the rule families or a lure that lives in server "
+          "behavior, which model-facing text cannot show. Both are coverage limits, not verdicts.",
           "- Known limits this scorecard does not close: the canary observability gap (each attack forwards to MCPRT_CANARY, "
           "a loopback channel the detector does not observe, so a class proven by a forward cannot be confirmed here) and "
           "the family-B model mismatch (token passthrough tests a server's own environment credential, not an "

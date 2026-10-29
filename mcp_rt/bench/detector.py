@@ -61,8 +61,9 @@ def gap_reasons(protocol_features) -> list[str]:
     """Why a lure class is not flagged, derived from the fixture's protocol features (data, never names). The last
     reason is the most specific one; the scorecard prints it."""
     features = set(protocol_features or [])
-    reasons = ["lure_text reads this text statically (SUSPECTED ceiling); a miss means the phrasing sits outside the "
-               "rule families: a coverage limit, reported, never a verdict"]
+    reasons = ["lure_text reads model-facing text statically (SUSPECTED ceiling); no lure matched, so either the phrasing "
+               "sits outside the rule families or the lure lives in server behavior that model-facing text cannot show: "
+               "a coverage limit, never a verdict"]
     if "elicitation" in features:
         reasons.append("the lure text exists only at call time (an elicitation request); the static scan sees schema "
                        "text only, so runtime text needs a runtime/elicitation unit")
