@@ -4,7 +4,7 @@ The seal needs a rootless user+net namespace (`unshare -rn`). GitHub-hosted runn
 one (`write failed /proc/self/uid_map: Operation not permitted`), so tests that require a BUILT seal must
 skip there — the same gating idea as the mitmproxy/weasyprint-dependent tests. This does NOT weaken
 production: with no seal, the runtime verdict is INCONCLUSIVE (sandbox_unproven), fail-closed, which is the
-correct behavior and is covered by the always-on pure tests.
+correct behavior and is covered by the always-on pure tests in test_runtime_observe.py.
 """
 import functools
 import shutil
