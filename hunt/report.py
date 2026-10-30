@@ -56,6 +56,10 @@ CLASS_META = {
         title="Model-Directed Lure Text (static lead)",
         fix="Keep credentials out of model-facing text: never tell the model to take one from its context or pass one "
             "to a tool, and state an operator's auth requirement in documentation, not in tool or prompt text."),
+    "session_argument": dict(sev="Medium", cwe="CWE-522", owasp=["MCP01"],   # lead-only, see LEAD_ONLY_CLASSES
+        title="Session-Type Credential Requested as a Tool Argument (static lead)",
+        fix="Authenticate through the server's own configuration, never through a model-filled argument: remove "
+            "session-type credential arguments and resolve the credential server-side."),
     "token_passthrough": dict(sev="High", cwe="CWE-287", owasp=["MCP01", "MCP07"],
         title="Token Passthrough / Confused Deputy",
         fix="Never forward the client's bearer token downstream; use the server's own credential or "
@@ -161,11 +165,11 @@ OWASP_MCP_TOP10 = {
 # Controls this engine actively tests (others are out of active scope -> NOT TESTED, stated honestly).
 # Lead-only classes (rework): a SUSPECTED lead may move a control's status, but a clean or inconclusive result from
 # these classes never establishes PASS (no PASS on a non-oracle negative). They are excluded from TESTED_CONTROLS.
-LEAD_ONLY_CLASSES = frozenset({"lure_text"})
+LEAD_ONLY_CLASSES = frozenset({"lure_text", "session_argument"})
 TESTED_CONTROLS = {c for name, m in CLASS_META.items() if name not in LEAD_ONLY_CLASSES for c in m["owasp"]}
 # Classes that need NO working tool call — they read tool metadata or the static package, so they stay
 # trustworthy even when the server is auth-gated. Everything else is execution-dependent.
-_NO_CRED_SAFE_CLASSES = {"tool_poisoning", "supply_chain", "lure_text"}
+_NO_CRED_SAFE_CLASSES = {"tool_poisoning", "supply_chain", "lure_text", "session_argument"}
 _SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
 
 # Crosswalk from the OWASP MCP controls we test to the standard audit frameworks, so the report

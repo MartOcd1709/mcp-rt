@@ -152,7 +152,13 @@ _REQ_LAST = re.compile(
 
 # Possessive "your" counts only with an ephemeral qualifier and an ephemeral noun ("your current session token"). "your API
 # key" is operator-owned, and an operator note such as "requires your API key in the header" must stay quiet.
-_YOUR = r"your\s+(?:current|active|session|own)\s+(?:[\w-]+\s+){0,2}?(?:tokens?|cookies?|session\s+ids?)\b"
+# The ephemeral vocabulary has one owner, here, and the session-argument rule (Unit 2) reuses it. The qualifier names the
+# agent's own live credential; tokens and cookies are its credentials; session ids are identifiers, which Unit 1 counts only
+# in the "your ..." form. Pieces are named so both rules share the same boundary.
+_EPH_QUAL = r"(?:current|active|session|own)"
+_EPH_CRED = r"(?:tokens?|cookies?)"
+_EPH_ID = r"session\s+ids?"
+_YOUR = rf"your\s+{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?(?:{_EPH_CRED}|{_EPH_ID})\b"
 _REQ_YOUR_FIRST = re.compile(rf"\b(?:requires?|needs?|expects?)\s+{_YOUR}[^.!?;\n]{{0,40}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
 _REQ_YOUR_LAST = re.compile(
     rf"\b{_YOUR}[^.!?;\n]{{0,40}}?\b(?:must\s+(?:be\s+)?(?:sent|passed|supplied|included)|"
@@ -214,3 +220,19 @@ def scan_text(text: str) -> list[tuple[str, str]]:
         if m:
             hits.append(("injection", m.group(0)[:160]))
     return list(dict.fromkeys(hits))
+
+
+# Session-type credential as a tool argument (Unit 2). A well-built server authenticates through its own configuration, not
+# a model-filled argument, so an argument whose own description asks for the agent's session-type credential is a static lead.
+# The vocabulary is the ephemeral vocabulary above, so operator-style keys and ordinary identifiers stay quiet.
+_SESSION_ARG = re.compile(
+    rf"\b(?:the\s+|your\s+|its\s+|own\s+)?{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?{_EPH_CRED}\b|\bsession\s+{_EPH_CRED}\b", re.I)
+
+
+def scan_argument_text(text: str) -> list[tuple[str, str]]:
+    """(rule, span) when one argument's own description asks for the agent's session-type credential. Negated text never counts."""
+    text = text or ""
+    if _NEG.search(text):
+        return []
+    m = _SESSION_ARG.search(text)
+    return [("session_argument", m.group(0)[:160])] if m else []
