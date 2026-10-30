@@ -9,6 +9,6 @@
     "egress_evasion": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing text is clean by design; Unit 3 (runtime and observability)"
   },
   "control_leads": {
-    "benign_invoice": "documented SUSPECTED-tier false positive: its description sentence is identical to the tool_description_injection attack's (a text twin), so any static text rule leads on it. The control text is not changed (CIO ruling); the confirmed tier stays at 0 false positives."
+    "benign_invoice": "documented SUSPECTED-tier false positive: its manifest is identical to the tool_description_injection attack's (same tools, parameters and descriptions: a static text twin), so the static rules lead on it, from lure_text on the description sentence and from session_argument on the argument description. The control text is not changed (CIO ruling); the confirmed tier stays at 0 false positives."
   }
 }
