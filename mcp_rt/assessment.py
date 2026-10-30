@@ -56,6 +56,8 @@ def run_assessment(target: str, *, model=None, client=None, save: bool = False, 
     from mcp_rt import oracle as _oracle
     from mcp_rt import planner as _planner
     if client is None:
+        from mcp_rt.lab_guard import require_lab_target   # about to spawn the real target on the host
+        require_lab_target(target, mode="pentest")
         from mcp_rt.mcp_client import MCPClient
         client = MCPClient(target)
 
@@ -128,6 +130,12 @@ def main(argv=None) -> int:
     p.add_argument("--quiet", action="store_true", help="suppress live progress on stderr")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
+    from mcp_rt.lab_guard import UnsandboxedTargetRefused, require_lab_target
+    try:   # pre-seal mode: refuse a non-lab target (unsandboxed host execution + model-chosen args)
+        require_lab_target(args.target_stdio, mode="pentest")
+    except UnsandboxedTargetRefused as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     prog = None if args.quiet else (lambda m: print(f"  ▸ {m}", file=sys.stderr, flush=True))
     model = None

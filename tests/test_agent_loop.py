@@ -116,7 +116,7 @@ def test_claimed_findings_are_unconfirmed():
         def chat(self, messages):
             return json.dumps({"thought": "found it", "action": "conclude",
                                "findings": [{"class": "command_injection", "detail": "x", "evidence": "y"}]})
-    res = al.run_agent("t", model=Claimer(), with_context=False)
+    res = al.run_agent("t", model=Claimer(), with_context=False, mcp_client=FakeClient())
     assert res.agent_claimed and "require ground-truth confirmation" in res.note   # not a verdict
 
 
@@ -127,7 +127,7 @@ def test_bad_action_is_nudged_not_crashed():
         def chat(self, messages):
             self.n += 1
             return "not json at all" if self.n == 1 else json.dumps({"action": "conclude", "findings": []})
-    res = al.run_agent("t", model=Garbage(), max_steps=4, with_context=False)
+    res = al.run_agent("t", model=Garbage(), max_steps=4, with_context=False, mcp_client=FakeClient())
     assert res.steps >= 2 and "conclude" in res.note   # recovered, didn't crash
 
 
