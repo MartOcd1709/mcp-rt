@@ -229,10 +229,29 @@ _SESSION_ARG = re.compile(
     rf"\b(?:the\s+|your\s+|its\s+|own\s+)?{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?{_EPH_CRED}\b|\bsession\s+{_EPH_CRED}\b", re.I)
 
 
+# Metadata about a credential rather than the credential: a count, usage, limit, expiry, type, length or identifier of it. Such a
+# word within two words of a credential phrase means the argument describes the token; it does not carry it. This is a guard
+# list, not credential vocabulary: the credential terms above are unchanged.
+_CRED_META = re.compile(
+    r"count|counts|number|used|usage|limit|limits|quota|budget|remaining|expiry|expires?|expiration|ttl|length|size|"
+    r"type|scope|validity|ids?|max|min", re.I)
+
+
+def name_words(name: str) -> str:
+    """An argument name split into lowercase words (snake_case, kebab-case, camelCase). Manifest data, never a verdict key."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name or "")
+    return re.sub(r"[\s_\-]+", " ", spaced).strip().lower()
+
+
 def scan_argument_text(text: str) -> list[tuple[str, str]]:
-    """(rule, span) when one argument's own description asks for the agent's session-type credential. Negated text never counts."""
+    """(rule, span) when an argument's own text (description, title or name words) asks for the agent's session-type credential.
+    Negated text never counts, and a credential phrase described by a count, limit or identifier is not the credential."""
     text = text or ""
     if _NEG.search(text):
         return []
-    m = _SESSION_ARG.search(text)
-    return [("session_argument", m.group(0)[:160])] if m else []
+    for m in _SESSION_ARG.finditer(text):
+        around = text[:m.start()].split()[-2:] + text[m.end():].split()[:2]
+        if any(_CRED_META.fullmatch(w.strip(".,;:()`'\"").lower()) for w in around):
+            continue
+        return [("session_argument", m.group(0)[:160])]
+    return []

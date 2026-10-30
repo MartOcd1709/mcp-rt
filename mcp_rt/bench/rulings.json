@@ -1,7 +1,7 @@
 {
   "_note": "CIO rulings, read as data by the scorecard report. Reporting text only: no verdict reads this file, and the scorer code holds no fixture names.",
   "scope": {
-    "tool_annotation": "out of Unit 1 scope (CIO ruling): a false-trust annotation needs observed egress to confirm, which is Unit 2 + Unit 3",
+    "tool_annotation": "its session argument is a weaker Unit 2 lead (its stated purpose involves sessions); its false trust needs observed egress to confirm, which is Unit 3. Out of Unit 1 scope (CIO ruling).",
     "elicitation_prompt": "out of Unit 1 scope (CIO ruling): runtime elicitation text needs a runtime/elicitation unit",
     "tool_description_injection": "its attack and its control twin have identical manifests (same tools, parameters and descriptions) and differ only in server behavior, so no static check can separate them; only Unit 3 can (CIO correction)",
     "proxy_aggregator": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing text is clean by design; Unit 3 (runtime and observability)",
