@@ -189,6 +189,44 @@ def test_repeated_out_of_scope_actions_abort_scope_without_executing(tmp_path, m
     assert rep["coverage"]["scope_violations"] >= 3 and rep["proven"] == []
 
 
+# ---- legacy isolation (T13) --------------------------------------------------------------------------
+def test_agent_tier_never_imports_the_legacy_or_unsealed_modules():
+    # The tier must not reach the legacy oracle (which treats an /etc/passwd signature as proof) or the
+    # unsealed seed agent/pentest. Verdicts come only through the spine; execution only through the seal.
+    forbidden = ["mcp_rt.oracle", "mcp_rt.agent_loop", "mcp_rt.assessment"]
+    src = "".join(p.read_text() for p in (REPO / "mcp_rt" / "agent_tier").glob("*.py"))
+    assert not [m for m in forbidden if m in src]
+
+
+# ---- planner-injection containment (T14) -------------------------------------------------------------
+class _HijackedPlanner:
+    """Stands in for a planner hijacked by a hostile tool description: it tries, in turn, to inject a
+    verdict, to call an unlisted tool, and to invent an action. Each must be rejected by the closed space,
+    so no injected instruction can change the action space or the ledger."""
+    name = "hijacked"
+
+    def __init__(self):
+        self._shots = iter([
+            {"action": "run_probe", "class": "command_injection", "tool": "t1", "verdict": "VULNERABLE"},
+            {"action": "run_probe", "class": "command_injection", "tool": "admin_tool"},
+            {"action": "exfiltrate", "tool": "t1"},
+        ])
+
+    def next_action(self, context):
+        return next(self._shots, {"action": "stop", "reason": "objectives_exhausted"})
+
+
+def test_hostile_planner_cannot_change_the_action_space_or_ledger(tmp_path, monkeypatch):
+    import mcp_rt.agent_tier.run as run_mod
+    monkeypatch.setattr(run_mod, "sealed_session", _fake_session(_FakeHandle(sealed=True)))
+    rep = run_mod.assess(_write_roe(tmp_path, classes=["command_injection"], surface={"tools": ["t1"]}),
+                         planner=_HijackedPlanner())
+    assert rep["stop_reason"] == "ABORT_SCOPE"
+    assert rep["proven"] == [] and rep["leads"] == [] and rep["cleared"] == []
+    reasons = " ".join(v["reason"] for v in rep["scope_violations"])
+    assert "verdict" in reasons and "surface" in reasons and "exfiltrate" in reasons
+
+
 # ---- name-free (T10) ---------------------------------------------------------------------------------
 def test_agent_tier_code_is_name_free():
     corpus = ["egress_evasion", "elicitation_prompt", "proxy_aggregator", "resource_content",
