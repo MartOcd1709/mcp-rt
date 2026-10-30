@@ -7,7 +7,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from mcp_rt.runtime import runner
+from tests.seal_capability import SEAL_REASON, can_seal
+
+# These start real namespaces / prove the seal. Where the seal can't be built (CI runners without
+# unshare -rn / CAP), skip — do not assert. Production stays fail-closed (INCONCLUSIVE) regardless.
+pytestmark = pytest.mark.skipif(not can_seal(), reason=SEAL_REASON)
 
 REPO = Path(__file__).resolve().parents[1]
 SENTINEL_SERVER = (

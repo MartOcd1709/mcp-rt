@@ -6,6 +6,11 @@ import sys
 import pytest
 
 from mcp_rt.runtime import runner
+from tests.seal_capability import SEAL_REASON, can_seal
+
+# Every case here runs a server inside a BUILT seal. Where the seal can't be built (CI runners without
+# unshare -rn / CAP), skip — do not assert. Production stays fail-closed (INCONCLUSIVE) regardless.
+pytestmark = pytest.mark.skipif(not can_seal(), reason=SEAL_REASON)
 
 SERVER = '''import asyncio, base64, json, os, urllib.request
 import mcp.types as types
