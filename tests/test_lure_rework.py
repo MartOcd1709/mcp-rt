@@ -147,6 +147,6 @@ def test_demo_only_classes_cannot_make_mcp06_pass_without_evidence(monkeypatch):
 
 
 def test_lure_text_is_lead_only_and_outside_the_tested_set():
-    assert LEAD_ONLY_CLASSES == {"lure_text"}
+    assert LEAD_ONLY_CLASSES == {"lure_text", "session_argument"}
     assert set(CLASS_META["lure_text"]["owasp"]) == {"MCP03", "MCP06"}
     assert TESTED_CONTROLS == {c for n, m in CLASS_META.items() if n not in LEAD_ONLY_CLASSES for c in m["owasp"]}

@@ -166,6 +166,10 @@ TAXONOMY: list[Item] = [
     Item("MISSING-AUTH", "Insufficient Authentication/Authorization", ("OWASP-MCP:MCP07", "MCP38:MCP-29", "CoSAI:CoSAI-18", "CIS:CIS-3"), None, PARTIAL, notes="missing-auth enforcement probed; full OAuth-flow attacks pending (hunt/oauth_harness.py)", gap_ticket="SAM1-15"),
     # --- tool / schema / description poisoning ---
     Item("TOOL-POISON", "Tool Description Poisoning", ("MCP38:MCP-10", "OWASP-MCP:MCP03", "ASI:ASI01", "CoSAI:CoSAI-2"), "tool_poisoning", COVERED, _PROBE),
+    Item("SESSION-ARG", "Session-Type Credential Requested as a Tool Argument (static lead)", ("OWASP-MCP:MCP01",),
+         "session_argument", PARTIAL, evidence="tests/test_session_arg_heldout.py",
+         notes="SUSPECTED ceiling: an argument-level static lead; never a finding and never proof that an agent supplied the "
+               "credential. Well-built servers authenticate through their own configuration; the confirming behavior is Unit 3."),
     Item("LURE-TEXT", "Model-Directed Lure Text (static lead)", ("OWASP-MCP:MCP03", "OWASP-MCP:MCP06"), "lure_text", PARTIAL,
          evidence="tests/test_lure_text.py, tests/test_lure_heldout.py, tests/test_lure_rework.py",
          notes="SUSPECTED ceiling: static rule families over tool, parameter, annotation, resource and prompt text; never a "

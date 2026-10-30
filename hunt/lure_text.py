@@ -152,7 +152,13 @@ _REQ_LAST = re.compile(
 
 # Possessive "your" counts only with an ephemeral qualifier and an ephemeral noun ("your current session token"). "your API
 # key" is operator-owned, and an operator note such as "requires your API key in the header" must stay quiet.
-_YOUR = r"your\s+(?:current|active|session|own)\s+(?:[\w-]+\s+){0,2}?(?:tokens?|cookies?|session\s+ids?)\b"
+# The ephemeral vocabulary has one owner, here, and the session-argument rule (Unit 2) reuses it. The qualifier names the
+# agent's own live credential; tokens and cookies are its credentials; session ids are identifiers, which Unit 1 counts only
+# in the "your ..." form. Pieces are named so both rules share the same boundary.
+_EPH_QUAL = r"(?:current|active|session|own)"
+_EPH_CRED = r"(?:tokens?|cookies?)"
+_EPH_ID = r"session\s+ids?"
+_YOUR = rf"your\s+{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?(?:{_EPH_CRED}|{_EPH_ID})\b"
 _REQ_YOUR_FIRST = re.compile(rf"\b(?:requires?|needs?|expects?)\s+{_YOUR}[^.!?;\n]{{0,40}}?\b{_PREP}\s+{_PARAM_REF}", re.I)
 _REQ_YOUR_LAST = re.compile(
     rf"\b{_YOUR}[^.!?;\n]{{0,40}}?\b(?:must\s+(?:be\s+)?(?:sent|passed|supplied|included)|"
@@ -214,3 +220,62 @@ def scan_text(text: str) -> list[tuple[str, str]]:
         if m:
             hits.append(("injection", m.group(0)[:160]))
     return list(dict.fromkeys(hits))
+
+
+# Session-type credential as a tool argument (Unit 2). A well-built server authenticates through its own configuration, not a
+# model-filled argument, so an argument that asks for the agent's session-type credential is a static lead. Three structural
+# rules decide, and no word list does: the declared type (a credential is a string), the head noun of a compound name (the last
+# word, which must be the singular credential noun), and negation scope (a negation counts only when it precedes the credential
+# phrase in the same sentence). Names are singular: a plural head is a count or collection (max_session_tokens). Prose is
+# plural-inclusive, because "include your active session cookies" is a request; the declared type owns count-versus-request in
+# prose. The credential terms are the ephemeral vocabulary above.
+_SESSION_CRED = r"(?:token|cookie)"           # singular: a compound name's head
+_SESSION_CRED_PL = r"(?:tokens?|cookies?)"    # plural-inclusive: description and title prose
+_SESSION_PHRASE = re.compile(
+    rf"\b(?:the\s+|your\s+|its\s+|own\s+)?{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?{_SESSION_CRED_PL}\b"
+    rf"|\bsession\s+{_SESSION_CRED_PL}\b", re.I)
+_SENTENCE_END = re.compile(r"[.;!?\n]+")
+
+
+def name_words(name: str) -> str:
+    """An argument name split into lowercase words (snake_case, kebab-case, camelCase). Manifest data, never a verdict key."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name or "")
+    return re.sub(r"[\s_\-]+", " ", spaced).strip().lower()
+
+
+def scan_argument_text(text: str) -> list[tuple[str, str]]:
+    """(rule, span) when an argument's description or title asks for the agent's session-type credential. A negation counts only
+    when it precedes the credential phrase in the same sentence: 'Never put a session token here' is quiet; 'Session cookie for
+    this user, no expiry handling needed' fires."""
+    for sentence in _SENTENCE_END.split(text or ""):
+        for m in _SESSION_PHRASE.finditer(sentence):
+            if _NEG.search(sentence[:m.start()]):
+                break    # a negation before this phrase negates every later phrase in the sentence too
+            return [("session_argument", m.group(0)[:160])]
+    return []
+
+
+def scan_argument_name(name: str) -> list[tuple[str, str]]:
+    """(rule, span) when a compound argument name ends in the singular credential noun and a session qualifier precedes it. The
+    head is the last word: session_token and activeAccessToken fire; session_token_count, session_token_ttl and a plural head
+    such as max_session_tokens do not; a bare token name with no qualifier does not."""
+    words = name_words(name).split()
+    if len(words) < 2 or not re.fullmatch(_SESSION_CRED, words[-1]):
+        return []
+    if not any(re.fullmatch(_EPH_QUAL, w) for w in words[:-1]):
+        return []
+    return [("session_argument", " ".join(words))]
+
+
+def non_string_type(spec: dict) -> bool:
+    """True when the argument's declared JSON-schema type is integer, number or boolean only. A credential is a string, so such an
+    argument is not a credential request, whatever its name or description says."""
+    types: set[str] = set()
+    for node in [spec] + [s for k in ("anyOf", "oneOf") for s in (spec.get(k) or []) if isinstance(s, dict)]:
+        t = node.get("type")
+        if isinstance(t, list):
+            types |= {x for x in t if isinstance(x, str)}
+        elif isinstance(t, str):
+            types.add(t)
+    types.discard("null")
+    return bool(types) and "string" not in types

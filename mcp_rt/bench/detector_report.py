@@ -103,7 +103,7 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
           "- Lure text is read statically by the lure_text probe: tool, parameter, annotation, resource and prompt text. "
           "Its ceiling is SUSPECTED, never a confirmed finding.",
           "- Soft-wrapped text is read as one sentence. List items and blank lines stay boundaries (CIO-approved parser rule).",
-          "- CIO ruling: 2/7 is the honest static ceiling for this corpus. Each attack outside it is listed with its reason "
+          "- CIO ruling: the leads in the table above are the static ceiling for this corpus. Each attack without a lead is listed with its reason "
           "in the Why column, drawn from the CIO rulings file: out of static-lure scope, out of Unit 1 scope, or a lead "
           "whose confirmation needs a later unit.",
           "- A control lead is documented only where the control shares an attack's exact description sentence (a text "
@@ -116,6 +116,10 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
           "- These corpus numbers are fit-to-corpus: the rule families were designed with these fixtures in view. "
           "Generalization evidence comes from an independent battery written from the threat model (CIO verification), not "
           "from this corpus or from the repo's held-out guard (tests/test_lure_heldout.py, written by the same author).",
+          "- Residual known gaps, documented and not chased in Unit 1: (a) a bare destination handoff with no stated source, such as "
+          "'place your session token into the field', does not fire, because the sourced-handoff rule needs the credential's "
+          "origin in the agent's own context; (b) a passive declarative requirement, such as 'once the token is supplied', is a "
+          "phrasing the rule families do not cover, with no measured precision boundary; confirming it needs behavior, so it belongs to Unit 3.",
           "- Not in this scorecard: agent susceptibility (ASR). That is scorecard A, and the two are never blended.",
           f"- INCONCLUSIVE targets: {scores['inconclusive']}. They are excluded from every rate and never counted as cleared.",
           ""]

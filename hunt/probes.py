@@ -42,7 +42,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from hunt.lure_text import RULE_WHY, scan_text
+from hunt.lure_text import RULE_WHY, non_string_type, scan_argument_name, scan_argument_text, scan_text
 
 VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
     "VULNERABLE", "SUSPECTED", "CLEAN", "INCONCLUSIVE", "NOT_APPLICABLE")
@@ -1249,10 +1249,38 @@ async def probe_lure_text(session, tools) -> list[ProbeResult]:
     return out
 
 
+async def probe_session_argument(session, tools) -> list[ProbeResult]:
+    """A session-type credential requested as a tool argument (Unit 2). Static and argument-level: one argument's own
+    description asks the model for the agent's session-type credential. A well-built server authenticates through its own
+    configuration, so a hit is a SUSPECTED lead, never VULNERABLE. The vocabulary and boundary are Unit 1's (hunt/lure_text.py)."""
+    out: list[ProbeResult] = []
+    for t in tools:
+        purpose_sessions = bool(re.search(r"\bsessions?\b", t.description or "", re.I))
+        found = False
+        for arg, spec in (_schema(t).get("properties") or {}).items():
+            spec = spec if isinstance(spec, dict) else {}
+            if non_string_type(spec):      # a credential is a string: an integer, number or boolean argument is not one
+                continue
+            desc, title = spec.get("description"), spec.get("title")
+            hits = [("description", r, s) for r, s in scan_argument_text(desc if isinstance(desc, str) else "")]
+            hits += [("title", r, s) for r, s in scan_argument_text(title if isinstance(title, str) else "")]
+            hits += [("name", r, s) for r, s in scan_argument_name(arg)]
+            for surface, rule, span in hits:
+                found = True
+                weaker = "; weaker: the tool's stated purpose involves sessions" if purpose_sessions else ""
+                out.append(ProbeResult("session_argument", t.name, "static", marker=rule,
+                                       evidence=f'{t.name} / argument {arg} ({surface}): "{span}"',
+                                       rationale="a tool argument asks the model for the agent's session-type credential" + weaker))
+        if not found:
+            out.append(ProbeResult("session_argument", t.name, "oracle_negative",
+                                   rationale="no argument requests the agent's session-type credential"))
+    return out
+
+
 ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
               probe_arg_injection, probe_deserialization, probe_context_oversharing,
-              probe_lure_text]
+              probe_lure_text, probe_session_argument]
 
 
 class ScanError(RuntimeError):
