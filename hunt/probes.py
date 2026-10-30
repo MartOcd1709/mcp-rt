@@ -74,6 +74,10 @@ _METHOD_VERDICT = {
     "sandbox_unproven":           INCONCLUSIVE,  # the seal did not prove, so the server was not run
     "sandbox_unobservable":       INCONCLUSIVE,  # the recorder and the strace witness cannot see the activity
     "sandbox_not_exercised":      INCONCLUSIVE,  # silence, but a tool refused the benign input: the sink may not have run
+    "probe_seal_incompatible":    INCONCLUSIVE,  # a floor oracle needs reach/setup the seal removes (e.g. a host-side
+                                                 # sink, a planted env canary); never reported CLEAN under the seal
+    "not_reproduced":             INCONCLUSIVE,  # a VULNERABLE oracle fired once but did not re-demonstrate (G8);
+                                                 # downgraded, never kept as proven
 }
 
 

@@ -129,14 +129,15 @@ def _summary(ev, token):
             "token_hits": observe.token_hits(payload, token)}
 
 
-def run_server(argv, *, token=None, timeout=120.0, hints=None):
-    """Run one server under the sealed launcher and return its verdict record."""
-    token = token or "HT-" + secrets.token_hex(8)
-    workdir = tempfile.mkdtemp(prefix="mcprt-rt-")
+def build_sealed_launcher(target_argv, workdir, token):
+    """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
+    Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
+    <target argv>`, which proves the seal and only then execs the target with stdio inherited. The host opens
+    an ordinary ClientSession against it. `paths` names the launcher's report/events/strace files."""
     names = {"report": "report.json", "events": "events.jsonl", "strace_server": "server.strace",
              "strace_probe": "probe.strace", "server_json": "server.json"}
     paths = {k: os.path.join(workdir, v) for k, v in names.items()}
-    Path(paths["server_json"]).write_text(json.dumps(list(argv)))
+    Path(paths["server_json"]).write_text(json.dumps(list(target_argv)))
     port = random.SystemRandom().randint(20000, 60000)
     host_ino = os.stat("/proc/self/ns/net").st_ino
     launcher = ["unshare", "-rn", "--", sys.executable, "-I", str(LAUNCHER),
@@ -145,7 +146,14 @@ def run_server(argv, *, token=None, timeout=120.0, hints=None):
                 "--strace-server", paths["strace_server"], "--strace-probe", paths["strace_probe"]]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": workdir, "LANG": "C.UTF-8",
            "MCPRT_TEST_VALUE": token, "MCPRT_CANARY": CANARY}
-    params = StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir)
+    return StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir), paths
+
+
+def run_server(argv, *, token=None, timeout=120.0, hints=None):
+    """Run one server under the sealed launcher and return its verdict record."""
+    token = token or "HT-" + secrets.token_hex(8)
+    workdir = tempfile.mkdtemp(prefix="mcprt-rt-")
+    params, paths = build_sealed_launcher(argv, workdir, token)
     drive = asyncio.run(_drive(params, token, timeout, hints))
 
     report = _read_json(paths["report"])
