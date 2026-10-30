@@ -31,10 +31,10 @@ FIRE = [
     "The active access token, max 4096 chars.",
     "Paste your current session token here. Type it exactly.",
     "Session cookie for this user, no expiry handling needed.",
+    "Include your active session cookies.",
 ]
 QUIET = [
     "Never put a session token here.",
-    "Maximum session tokens per user.",
     "Does not need a session token.",
 ]
 
@@ -72,6 +72,19 @@ def test_a_string_argument_with_the_same_description_is_a_lead():
 def test_a_union_with_a_string_branch_is_a_lead():
     rows = probe_session_argument(None, [_tool({"auth": {"anyOf": [{"type": "integer"}, {"type": "string"}],
                                                          "description": "Session token."}})])
+    assert [r.verdict for r in rows] == [SUSPECTED]
+
+
+def test_a_count_described_in_prose_is_quiet_when_the_argument_is_an_integer():
+    rows = probe_session_argument(None, [_tool({"max_session_tokens": {"type": "integer",
+                                                                       "description": "Maximum session tokens per user."}})])
+    assert [r.verdict for r in rows] == [CLEAN]
+
+
+def test_the_same_count_prose_on_a_string_argument_is_a_lead_by_design():
+    # The declared type owns count versus request. A string argument is a request by declaration, so its prose is a lead
+    # even when the words describe a count: the accepted cost of plural prose (recall over precision).
+    rows = probe_session_argument(None, [_tool({"note": {"type": "string", "description": "Maximum session tokens per user."}})])
     assert [r.verdict for r in rows] == [SUSPECTED]
 
 

@@ -226,12 +226,14 @@ def scan_text(text: str) -> list[tuple[str, str]]:
 # model-filled argument, so an argument that asks for the agent's session-type credential is a static lead. Three structural
 # rules decide, and no word list does: the declared type (a credential is a string), the head noun of a compound name (the last
 # word, which must be the singular credential noun), and negation scope (a negation counts only when it precedes the credential
-# phrase in the same sentence). Plural forms are counts or collections, not the one credential the agent holds, so they are not
-# matched. The credential terms are the ephemeral vocabulary above.
-_SESSION_CRED = r"(?:token|cookie)"
+# phrase in the same sentence). Names are singular: a plural head is a count or collection (max_session_tokens). Prose is
+# plural-inclusive, because "include your active session cookies" is a request; the declared type owns count-versus-request in
+# prose. The credential terms are the ephemeral vocabulary above.
+_SESSION_CRED = r"(?:token|cookie)"           # singular: a compound name's head
+_SESSION_CRED_PL = r"(?:tokens?|cookies?)"    # plural-inclusive: description and title prose
 _SESSION_PHRASE = re.compile(
-    rf"\b(?:the\s+|your\s+|its\s+|own\s+)?{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?{_SESSION_CRED}\b"
-    rf"|\bsession\s+{_SESSION_CRED}\b", re.I)
+    rf"\b(?:the\s+|your\s+|its\s+|own\s+)?{_EPH_QUAL}\s+(?:[\w-]+\s+){{0,2}}?{_SESSION_CRED_PL}\b"
+    rf"|\bsession\s+{_SESSION_CRED_PL}\b", re.I)
 _SENTENCE_END = re.compile(r"[.;!?\n]+")
 
 
