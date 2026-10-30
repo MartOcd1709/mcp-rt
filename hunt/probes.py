@@ -138,6 +138,43 @@ _DEDICATED_FETCH = re.compile(
 _FETCH_NAME = re.compile(
     r"\b(fetch|curl|wget|download|scrape|crawl|http_?get|get_?url|open_?url|"
     r"web_?(fetch|get|search|request)|url_?(fetch|get))\b", re.I)
+# ORACLE vs BY-DESIGN (the general lesson, not just SSRF): an oracle firing proves the EFFECT happened
+# (the loopback sink was reached). It does NOT by itself prove a VULNERABILITY. Before VULNERABLE we must
+# rule out that the effect is the tool's OWN DECLARED PURPOSE. For SSRF that purpose is accessing a web
+# resource. Beyond fetch/curl (above), a tool whose job is to NAVIGATE/open/load/visit a URL, or to
+# RENDER/screenshot/pdf a page, or to PROXY/mirror a site, reaches arbitrary URLs by design — reaching
+# loopback is informational (no egress filtering), not a finding. This is derived from the tool's declared
+# surface (name + description), matched as phrases/name-tokens (same discipline as the fetch patterns) so a
+# bare data verb like "fetch analytics" is NOT caught. A DATA-operation tool (summarize/notify/convert/
+# store/analyze) that merely fetches a URL is the real SSRF and stays VULNERABLE. Generalization (not a
+# fixed tool-name allowlist) is proven on synthetic fixtures whose names are not in this file
+# (tests/test_ssrf_precision.py).
+# The web-resource nouns a navigation/render verb may govern (kept in step with _URL_PARAM):
+_RES = r"(url|uri|page|web ?page|website|web|site|link|address|endpoint|resource|browser)"
+_NAV_DESC = re.compile(
+    rf"navigat\w+ (to |a |an |the )?|go(es)? to (a |an |the )?{_RES}|"
+    rf"(open|visit|load|render|preview|reload)\w* (to |a |an |the )?{_RES}|"
+    rf"brows\w+ (to |a |an |the )|(take|capture|grab|save|generate|produce)\w* .{{0,20}}(screenshot|snapshot)|"
+    rf"screenshot\w* (of |a |an |the )|(render|convert|print|export|save)\w* .{{0,24}}(to |as |into )?pdf|"
+    rf"pdf\w* (of|from) (a |an |the )?{_RES}|proxy\w* (requests?|traffic|a |an |the )|"
+    rf"mirror\w* (a |an |the )?{_RES}", re.I)
+# NAME tokens that declare URL access as the tool's job (navigation / rendering / proxy):
+_NAV_NAME = re.compile(
+    r"\b(navigate|goto|go_?to|browse|browser|open_?(url|page|site)|visit|load_?(url|page|site)|"
+    r"render(_?(page|url|site))?|screenshot|snapshot|capture_?(page|url|site)|(page|url|web)_?to_?pdf|"
+    r"pdf_?of|print_?page|web_?view|webview|proxy|mirror|preview)\b", re.I)
+
+
+def _url_access_by_design(name: str, desc: str) -> bool:
+    """True when the tool's declared surface says accessing a caller-supplied URL IS its primary job:
+    fetch/download, navigate/open/load/visit, render/screenshot/pdf, or proxy/mirror. See the note above —
+    this is the precision control that separates an oracle EFFECT from an SSRF FINDING. Data-op tools that
+    merely fetch (summarize/notify/convert/store/analyze) are NOT captured here and remain VULNERABLE."""
+    text = f"{desc} {name}"
+    return bool(_DEDICATED_FETCH.search(text) or _FETCH_NAME.search(name)
+                or _NAV_DESC.search(text) or _NAV_NAME.search(name))
+
+
 _CMD_DESC = re.compile(r"\brun\b|execute|shell|command|exec|spawn|subprocess|process", re.I)
 _READ_DESC = re.compile(r"read|open|file|path|document|load|\bcat\b|contents", re.I)
 _WRITE_DESC = re.compile(r"write|create|save|edit|append|\bput\b|modify", re.I)
@@ -317,14 +354,15 @@ async def probe_ssrf(session, tools) -> list[ProbeResult]:
                 out.append(ProbeResult("ssrf", tool.name, _negative_method(returned, raised), marker=marker,
                                        rationale="did not fetch the loopback URL"))
                 continue
-            desc = (tool.description or "") + " " + tool.name
-            dedicated = bool(_DEDICATED_FETCH.search(desc) or _FETCH_NAME.search(tool.name))
             follows = sink.hit(f"followed-{marker}")
-            if dedicated:   # a general fetch/curl tool reaching a URL is its stated job — not a vuln
+            if _url_access_by_design(tool.name, tool.description or ""):
+                # The tool's declared purpose IS accessing the URL (fetch/navigate/render/proxy): reaching
+                # loopback is its advertised capability, not SSRF. The oracle proved the effect, not a vuln.
                 out.append(ProbeResult("ssrf", tool.name, "by_design", marker=marker,
                                        evidence=f"{tool.name} -> loopback sink",
-                                       rationale="dedicated fetch/curl tool reached internal/loopback — "
-                                                 "by-design capability (informational: no SSRF egress "
+                                       rationale="tool whose declared purpose is accessing a caller-supplied "
+                                                 "URL (fetch/navigate/render/proxy) reached internal/loopback "
+                                                 "— by-design capability (informational: no SSRF egress "
                                                  "filtering), not a finding"))
             else:           # a tool NOT meant as a general fetcher made an outbound request -> SSRF
                 out.append(ProbeResult("ssrf", tool.name, "oracle", marker=marker,
