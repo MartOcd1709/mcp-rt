@@ -63,6 +63,17 @@ _METHOD_VERDICT = {
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
     "error":           INCONCLUSIVE,    # the call / transport failed — the test could not be run
     "not_applicable":  NOT_APPLICABLE,  # no candidate tool/param, or nothing to test
+    # Unit 3, runtime observation in a sealed namespace. Only the token leaving is proof. Everything else is
+    # a lead, a clean result that the seal and the inspection support, or INCONCLUSIVE (never a silent CLEAN).
+    # A leak of this run's planted test value is "oracle" (a per-run planted marker fired), not a new method.
+    "sandbox_claim_mismatch":     SUSPECTED,     # says it makes no external calls, and it sent something
+    "sandbox_unexplained_egress": SUSPECTED,     # outbound, and its declared text has no network purpose
+    "sandbox_explained_egress":   CLEAN,         # outbound, every payload inspected, no token, fits its purpose
+    "sandbox_no_egress":          CLEAN,         # nothing left the server
+    "sandbox_opaque_payload":     INCONCLUSIVE,  # outbound we could not inspect: never CLEAN
+    "sandbox_unproven":           INCONCLUSIVE,  # the seal did not prove, so the server was not run
+    "sandbox_unobservable":       INCONCLUSIVE,  # the recorder and the strace witness cannot see the activity
+    "sandbox_not_exercised":      INCONCLUSIVE,  # silence, but a tool refused the benign input: the sink may not have run
 }
 
 
