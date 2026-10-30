@@ -1,0 +1,4 @@
+{
+  "_comment": "Control gates from the signed-off Unit 3 matrix: these targets must come back CLEAN. Data, not code, so the runtime code stays name-free.",
+  "control_gates": ["benign_update_check", "benign_routing"]
+}
