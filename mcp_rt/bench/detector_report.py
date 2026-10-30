@@ -103,7 +103,7 @@ def _markdown(meta: dict, scores: dict, rows: list[dict]) -> str:
           "- Lure text is read statically by the lure_text probe: tool, parameter, annotation, resource and prompt text. "
           "Its ceiling is SUSPECTED, never a confirmed finding.",
           "- Soft-wrapped text is read as one sentence. List items and blank lines stay boundaries (CIO-approved parser rule).",
-          "- CIO ruling: 2/7 is the honest static ceiling for this corpus. Each attack outside it is listed with its reason "
+          "- CIO ruling: the leads in the table above are the static ceiling for this corpus. Each attack without a lead is listed with its reason "
           "in the Why column, drawn from the CIO rulings file: out of static-lure scope, out of Unit 1 scope, or a lead "
           "whose confirmation needs a later unit.",
           "- A control lead is documented only where the control shares an attack's exact description sentence (a text "
