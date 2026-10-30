@@ -226,7 +226,7 @@ def scan_text(text: str) -> list[tuple[str, str]]:
 # model-filled argument, so an argument that asks for the agent's session-type credential is a static lead. Three structural
 # rules decide, and no word list does: the declared type (a credential is a string), the head noun of a compound name (the last
 # word, which must be the singular credential noun), and negation scope (a negation counts only when it precedes the credential
-# phrase in the same sentence). Names are singular: a plural head is a count or collection (max_session_tokens). Prose is
+# phrase in the same sentence). Names are singular: a plural head is a count or collection, not a credential. Prose is
 # plural-inclusive, because "include your active session cookies" is a request; the declared type owns count-versus-request in
 # prose. The credential terms are the ephemeral vocabulary above.
 _SESSION_CRED = r"(?:token|cookie)"           # singular: a compound name's head
@@ -257,8 +257,8 @@ def scan_argument_text(text: str) -> list[tuple[str, str]]:
 
 def scan_argument_name(name: str) -> list[tuple[str, str]]:
     """(rule, span) when a compound argument name ends in the singular credential noun and a session qualifier precedes it. The
-    head is the last word: session_token and activeAccessToken fire; session_token_count, session_token_ttl and a plural head
-    such as max_session_tokens do not; a bare token name with no qualifier does not."""
+    head is the last word: a qualified singular credential head fires (a session token name, an activeAccessToken name); a
+    count, ttl or plural head does not; a bare token name with no qualifier does not."""
     words = name_words(name).split()
     if len(words) < 2 or not re.fullmatch(_SESSION_CRED, words[-1]):
         return []
