@@ -47,12 +47,12 @@ NEGATIVE_NAMES = [
 
 @pytest.mark.parametrize("name", POSITIVE_NAMES)
 def test_session_credential_keys_are_leads(name):
-    assert [rule for rule, _ in lure_text.scan_argument_text(lure_text.name_words(name))] == ["session_argument"], name
+    assert [rule for rule, _ in lure_text.scan_argument_name(name)] == ["session_argument"], name
 
 
 @pytest.mark.parametrize("name", NEGATIVE_NAMES)
 def test_auth_identifier_operator_and_count_keys_stay_quiet(name):
-    assert lure_text.scan_argument_text(lure_text.name_words(name)) == [], name
+    assert lure_text.scan_argument_name(name) == [], name
 
 
 def test_the_name_alone_makes_the_lead_with_no_description():

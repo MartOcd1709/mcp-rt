@@ -42,7 +42,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from hunt.lure_text import RULE_WHY, name_words, scan_argument_text, scan_text
+from hunt.lure_text import RULE_WHY, non_string_type, scan_argument_name, scan_argument_text, scan_text
 
 VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
     "VULNERABLE", "SUSPECTED", "CLEAN", "INCONCLUSIVE", "NOT_APPLICABLE")
@@ -1259,14 +1259,18 @@ async def probe_session_argument(session, tools) -> list[ProbeResult]:
         found = False
         for arg, spec in (_schema(t).get("properties") or {}).items():
             spec = spec if isinstance(spec, dict) else {}
-            surfaces = [("description", spec.get("description")), ("title", spec.get("title")), ("name", name_words(arg))]
-            for surface, text in surfaces:
-                for rule, span in scan_argument_text(text if isinstance(text, str) else ""):
-                    found = True
-                    weaker = "; weaker: the tool's stated purpose involves sessions" if purpose_sessions else ""
-                    out.append(ProbeResult("session_argument", t.name, "static", marker=rule,
-                                           evidence=f'{t.name} / argument {arg} ({surface}): "{span}"',
-                                           rationale="a tool argument asks the model for the agent's session-type credential" + weaker))
+            if non_string_type(spec):      # a credential is a string: an integer, number or boolean argument is not one
+                continue
+            desc, title = spec.get("description"), spec.get("title")
+            hits = [("description", r, s) for r, s in scan_argument_text(desc if isinstance(desc, str) else "")]
+            hits += [("title", r, s) for r, s in scan_argument_text(title if isinstance(title, str) else "")]
+            hits += [("name", r, s) for r, s in scan_argument_name(arg)]
+            for surface, rule, span in hits:
+                found = True
+                weaker = "; weaker: the tool's stated purpose involves sessions" if purpose_sessions else ""
+                out.append(ProbeResult("session_argument", t.name, "static", marker=rule,
+                                       evidence=f'{t.name} / argument {arg} ({surface}): "{span}"',
+                                       rationale="a tool argument asks the model for the agent's session-type credential" + weaker))
         if not found:
             out.append(ProbeResult("session_argument", t.name, "oracle_negative",
                                    rationale="no argument requests the agent's session-type credential"))
