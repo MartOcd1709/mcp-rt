@@ -114,12 +114,36 @@ def test_inconclusive_is_never_folded_into_clean():
 
 
 def test_unreproduced_vulnerable_is_not_proven():
+    from hunt.probes import verdict_for
     led = Ledger()
     led.record([{"class": "command_injection", "tool": "t1", "method": "oracle", "verdict": "VULNERABLE", "evidence": "n"}])
     led.mark_reproduction("command_injection", "t1", reproduced=False, evidence="silent")
     rep = led.report()
     assert rep["proven"] == [] and rep["coverage"]["inconclusive"] == 1
     assert rep["inconclusive"][0]["method"] == "not_reproduced"
+    assert verdict_for("not_reproduced") == "INCONCLUSIVE"   # the downgrade's verdict comes from the spine, not a literal
+
+
+def test_integrity_downgrade_routes_through_the_spine():
+    from hunt.probes import verdict_for
+    led = Ledger()
+    led.record([{"class": "egress", "tool": "t1", "method": "oracle", "verdict": "VULNERABLE", "evidence": "leak"}])
+    led.mark_reproduction("egress", "t1", reproduced=True)
+    led.downgrade_unobservable("recorder and witness disagree")
+    rep = led.report()
+    assert rep["proven"] == [] and len(rep["inconclusive"]) == 1
+    row = rep["inconclusive"][0]
+    assert row["method"] == "sandbox_unobservable" and verdict_for(row["method"]) == "INCONCLUSIVE"
+
+
+def test_no_literal_verdict_string_is_assigned_in_the_tier():
+    # G2 credibility claim: the tier never writes a verdict string; it only routes method -> verdict_for.
+    import re
+    src = (REPO / "mcp_rt" / "agent_tier" / "ledger.py").read_text()
+    # No ASSIGNMENT or RETURN of a bare verdict literal (comparisons like `== "VULNERABLE"` and the _RANK
+    # lookup keys are fine — they READ a verdict, they do not SOURCE one). `(?<![=!<>])=` excludes ==/!=/<=/>=.
+    verds = "VULNERABLE|SUSPECTED|CLEAN|INCONCLUSIVE|NOT_APPLICABLE"
+    assert not re.search(rf'(?:\breturn\s+|(?<![=!<>])=\s*)["\'](?:{verds})["\']', src)
 
 
 def test_reproduced_vulnerable_is_proven():

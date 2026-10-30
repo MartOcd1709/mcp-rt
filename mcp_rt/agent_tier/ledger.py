@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from hunt.probes import verdict_for
+
 _RANK = {"VULNERABLE": 4, "SUSPECTED": 3, "CLEAN": 2, "INCONCLUSIVE": 1, "NOT_APPLICABLE": 0}
 
 
@@ -62,20 +64,23 @@ class Ledger:
         self.integrity_note = note
         for f in self._by_key.values():
             if f.cls == "egress" and f.verdict in ("VULNERABLE", "CLEAN"):
-                f.method, f.verdict = "sandbox_unobservable", "INCONCLUSIVE"
+                f.method = "sandbox_unobservable"
+                f.verdict = verdict_for(f.method)       # single source: never a literal verdict string
                 f.evidence = f"integrity broke after the fact: {note}"[:300]
 
-    def _effective(self, f: Finding) -> str:
+    def _effective(self, f: Finding) -> tuple[str, str]:
+        """The method and verdict to report. A VULNERABLE that did not reproduce is downgraded to the
+        not_reproduced method; the verdict ALWAYS comes from verdict_for, never a literal (G2)."""
         if f.verdict == "VULNERABLE" and f.reproduced is False:
-            return "INCONCLUSIVE"
-        return f.verdict
+            return "not_reproduced", verdict_for("not_reproduced")
+        return f.method, verdict_for(f.method)
 
     def report(self) -> dict:
         proven, leads, cleared, inconclusive = [], [], [], []
         for f in self._by_key.values():
-            row = {"class": f.cls, "tool": f.tool, "method": f.method, "evidence": f.evidence,
+            method, v = self._effective(f)
+            row = {"class": f.cls, "tool": f.tool, "method": method, "evidence": f.evidence,
                    "reproduced": f.reproduced}
-            v = self._effective(f)
             if v == "VULNERABLE":
                 proven.append(row)
             elif v == "SUSPECTED":
@@ -83,8 +88,6 @@ class Ledger:
             elif v == "CLEAN":
                 cleared.append(row)
             else:
-                if f.verdict == "VULNERABLE" and f.reproduced is False:
-                    row = {**row, "method": "not_reproduced"}
                 inconclusive.append(row)
         tested = len(self._by_key)
         return {
