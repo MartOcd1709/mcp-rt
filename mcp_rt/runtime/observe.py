@@ -76,29 +76,37 @@ def inspectable(payload, truncated, port):
     return texty / len(head) >= 0.9
 
 
-def verdict(*, sealed, server_started, events, strace_text, token, claim_text, refused_calls=()):
-    """events: the server-phase recorder records. strace_text: witness output, or None if it is missing."""
+def _out(method, evidence, **extra):
+    return {"verdict": verdict_for(method), "method": method, "evidence": evidence, **extra}
 
-    def out(method, evidence, **extra):
-        return {"verdict": verdict_for(method), "method": method, "evidence": evidence, **extra}
 
+def integrity_problem(sealed, server_started, strace_text, events):
+    """An out-dict when the seal/observability is not sound (so no egress verdict can be trusted), else None.
+    Shared gate: the agent tier runs it once per sealed session; verdict() runs it per one-shot scan."""
     if not sealed:
-        return out("sandbox_unproven", "sandbox proof failed; server not run")
+        return _out("sandbox_unproven", "sandbox proof failed; server not run")
     if not server_started:
-        return out("sandbox_unproven", "server did not start after the proof; server not run")
+        return _out("sandbox_unproven", "server did not start after the proof; server not run")
     if strace_text is None:
-        return out("sandbox_unobservable", "strace witness missing")
+        return _out("sandbox_unobservable", "strace witness missing")
     if has_ipv6_attempt(strace_text):
-        return out("sandbox_unobservable", "IPv6 attempt: the IPv4 recorder cannot capture it")
+        return _out("sandbox_unobservable", "IPv6 attempt: the IPv4 recorder cannot capture it")
     if any(e["dst"] is None for e in events):
-        return out("sandbox_unobservable", "recorder could not read an original destination")
+        return _out("sandbox_unobservable", "recorder could not read an original destination")
     recorded = {(e["dst"], e["port"]) for e in events}
     witnessed = strace_destinations(strace_text)
     if recorded != witnessed:
-        return out("sandbox_unobservable",
-                   f"recorder and strace witness disagree: recorder-only {sorted(recorded - witnessed)}, "
-                   f"witness-only {sorted(witnessed - recorded)}")
+        return _out("sandbox_unobservable",
+                    f"recorder and strace witness disagree: recorder-only {sorted(recorded - witnessed)}, "
+                    f"witness-only {sorted(witnessed - recorded)}")
+    return None
 
+
+def classify_egress(events, token, claim_text, refused_calls=()):
+    """The egress verdict for a set of recorder events (integrity already established by the caller): a token
+    leak is oracle (VULNERABLE, overrides all); an opaque payload is never CLEAN; silence after a refusal is
+    not_exercised (never a silent CLEAN); otherwise claim-mismatch / unexplained / opaque / explained.
+    Reused per action by the agent tier and per one-shot scan by verdict()."""
     leaks, opaque = [], []
     for e in events:
         payload = base64.b64decode(e["payload"])
@@ -110,24 +118,29 @@ def verdict(*, sealed, server_started, events, strace_text, token, claim_text, r
     if leaks:
         e, hits = leaks[0]
         # "oracle" is the existing proof method: a per-run planted marker fired. Our token is exactly that.
-        return out("oracle",
-                   f"planted test value observed leaving: {e['proto']} to {e['dst']}:{e['port']} ({'/'.join(hits)} form)",
-                   attempts=len(events))
-
+        return _out("oracle",
+                    f"planted test value observed leaving: {e['proto']} to {e['dst']}:{e['port']} ({'/'.join(hits)} form)",
+                    attempts=len(events))
     if not events:
         if refused_calls:
             # Silence after a refusal proves nothing: the sink may never have been reached. Never a silent CLEAN.
-            return out("sandbox_not_exercised",
-                       f"no outbound attempt, but {', '.join(sorted(set(refused_calls)))} refused the benign input; "
-                       "its sink may not have run")
-        return out("sandbox_no_egress", "no outbound attempt observed")
+            return _out("sandbox_not_exercised",
+                        f"no outbound attempt, but {', '.join(sorted(set(refused_calls)))} refused the benign input; "
+                        "its sink may not have run")
+        return _out("sandbox_no_egress", "no outbound attempt observed")
     where = ", ".join(sorted({f"{e['proto']} {e['dst']}:{e['port']}" for e in events}))
     note = f"; {len(opaque)} payload(s) not inspectable" if opaque else ""
     claim = NEGATIVE_CLAIM.search(claim_text)
     if claim:
-        return out("sandbox_claim_mismatch", f'says "{claim.group(0)[:60]}" but sent {where}{note}')
+        return _out("sandbox_claim_mismatch", f'says "{claim.group(0)[:60]}" but sent {where}{note}')
     if not NETWORK_TERM.search(claim_text):
-        return out("sandbox_unexplained_egress", f"sent {where}; no network purpose in its declared text{note}")
+        return _out("sandbox_unexplained_egress", f"sent {where}; no network purpose in its declared text{note}")
     if opaque:
-        return out("sandbox_opaque_payload", f"sent {where}, which fits its purpose, but the payload is not inspectable")
-    return out("sandbox_explained_egress", f"sent {where}; payloads inspected, no test value, fits its declared purpose")
+        return _out("sandbox_opaque_payload", f"sent {where}, which fits its purpose, but the payload is not inspectable")
+    return _out("sandbox_explained_egress", f"sent {where}; payloads inspected, no test value, fits its declared purpose")
+
+
+def verdict(*, sealed, server_started, events, strace_text, token, claim_text, refused_calls=()):
+    """events: the server-phase recorder records. strace_text: witness output, or None if it is missing."""
+    problem = integrity_problem(sealed, server_started, strace_text, events)
+    return problem if problem is not None else classify_egress(events, token, claim_text, refused_calls)

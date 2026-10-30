@@ -61,6 +61,7 @@ _COMMANDS = {
     "assess-report": ("hunt.assess_report", "main"),  # triaged assessment report (markdown) from the ledger
     "agent": ("mcp_rt.agent_loop", "main"),      # autonomous sandboxed assessment agent (ReAct loop)
     "pentest": ("mcp_rt.assessment", "main"),    # coordinated multi-agent assessment (plan->prove->refine)
+    "assess-agent": ("mcp_rt.agent_tier.__main__", "main"),  # agent tier: bounded, oracle-gated, sealed, RoE-scoped
     "discover": ("hunt.discover", "main"),       # find MCP servers on this host (configs + packages)
     "hunt-all": ("hunt.pipeline", "main"),       # end-to-end: discover -> assess each -> correlate -> report
     "registry": ("hunt.registry", "main"),       # build a static attestation registry from a folder
