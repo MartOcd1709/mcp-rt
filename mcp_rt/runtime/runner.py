@@ -53,8 +53,21 @@ def _sample(spec, token, depth=0):
     return token
 
 
-async def _drive(params, token, timeout):
-    out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "error": None}
+HINTS_PATH = Path(__file__).with_name("hints.json")
+
+
+def apply_hints(spec, token):
+    """Operator-supplied argument values for one tool. A string may carry {token}, replaced by this run's test value."""
+    return {k: v.replace("{token}", token) if isinstance(v, str) else v for k, v in (spec or {}).items()}
+
+
+def load_hints():
+    """Per-target operator inputs, as data (hints.json). The runtime code never names a target."""
+    return json.loads(HINTS_PATH.read_text())["targets"]
+
+
+async def _drive(params, token, timeout, hints=None):
+    out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "hinted_tools": [], "error": None}
 
     async def elicit(context, request):
         # Every elicitation is answered with the token, so a server that asks for a secret gets ours.
@@ -73,6 +86,9 @@ async def _drive(params, token, timeout):
                     out["tools"].append({"name": tool.name, "description": tool.description or "",
                                          "inputSchema": schema})
                     args = {k: _sample(v, token) for k, v in (schema.get("properties") or {}).items()}
+                    if hints and tool.name in hints:
+                        args.update(apply_hints(hints[tool.name], token))
+                        out["hinted_tools"].append(tool.name)
                     try:
                         res = await asyncio.wait_for(session.call_tool(tool.name, args), CALL_TIMEOUT)
                         text = " ".join(getattr(c, "text", "") or "" for c in res.content)[:200]
@@ -113,7 +129,7 @@ def _summary(ev, token):
             "token_hits": observe.token_hits(payload, token)}
 
 
-def run_server(argv, *, token=None, timeout=120.0):
+def run_server(argv, *, token=None, timeout=120.0, hints=None):
     """Run one server under the sealed launcher and return its verdict record."""
     token = token or "HT-" + secrets.token_hex(8)
     workdir = tempfile.mkdtemp(prefix="mcprt-rt-")
@@ -130,7 +146,7 @@ def run_server(argv, *, token=None, timeout=120.0):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": workdir, "LANG": "C.UTF-8",
            "MCPRT_TEST_VALUE": token, "MCPRT_CANARY": CANARY}
     params = StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir)
-    drive = asyncio.run(_drive(params, token, timeout))
+    drive = asyncio.run(_drive(params, token, timeout, hints))
 
     report = _read_json(paths["report"])
     server_events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
@@ -152,4 +168,5 @@ def run_server(argv, *, token=None, timeout=120.0):
             "proof": report.get("checks", {}), "proof_error": report.get("error"),
             "tools": [t["name"] for t in drive["tools"]], "calls": drive["calls"],
             "driver_error": drive["error"], "elicitations": drive["elicitations"], "refused": refused,
+            "hinted": bool(hints), "hinted_tools": drive["hinted_tools"],
             "limits": LIMITS, "workdir": workdir}

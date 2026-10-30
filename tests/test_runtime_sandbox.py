@@ -1,13 +1,11 @@
-"""Unit 3 real sandbox: the seal is proven in a fresh namespace, the server never runs when the proof fails,
-and the lab controls that must stay clean do stay clean. These start real namespaces and real servers."""
+"""Unit 3 real sandbox: the seal is proven in a fresh namespace, the server never runs when the proof fails, and the lab
+targets come back as the matrix requires. These start real namespaces and real servers."""
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 from mcp_rt.runtime import runner
 
@@ -18,6 +16,14 @@ SENTINEL_SERVER = (
 )
 PROOF_CHECKS = {"P1_own_netns", "P2_only_lo", "P3_default_route_via_lo_only", "P4_capture_rules",
                 "P5_recorder_saw_every_probe", "P6_strace_witness_saw_every_probe"}
+
+
+def _fixture(name):
+    return REPO / "fixtures" / name / "server.py"
+
+
+def _control(name):
+    return REPO / "fixtures" / "_controls" / name / "server.py"
 
 
 def _proof_only(tmp):
@@ -57,12 +63,25 @@ def test_missing_iptables_is_inconclusive_and_the_server_never_starts(tmp_path, 
     assert not sentinel.exists(), "the server ran although the seal did not prove"
 
 
-@pytest.mark.parametrize("name", [
-    "benign_update_check",
-    pytest.param("benign_routing", marks=pytest.mark.xfail(strict=True, reason=(
-        "generic benign input is refused (unknown downstream tool), so the router's sink is never reached: "
-        "INCONCLUSIVE sandbox_not_exercised. The matrix requires CLEAN. CIO ruling pending; the harness is not tuned to it.")))
-])
-def test_lab_controls_that_must_stay_clean_stay_clean(name):
-    rec = runner.run_server([sys.executable, str(REPO / "fixtures" / "_controls" / name / "server.py")])
+def test_control_benign_update_check_stays_clean():
+    rec = runner.run_server([sys.executable, str(_control("benign_update_check"))])
     assert rec["verdict"] == "CLEAN", rec
+
+
+def test_control_benign_routing_stays_clean_when_driven_with_its_operator_input():
+    rec = runner.run_server([sys.executable, str(_control("benign_routing"))],
+                            hints=runner.load_hints()["benign_routing"])
+    assert rec["verdict"] == "CLEAN" and rec["hinted_tools"] == ["gateway_call"], rec
+
+
+def test_routers_without_operator_input_are_inconclusive_never_clean():
+    for path in (_fixture("proxy_aggregator"), _control("benign_routing")):
+        rec = runner.run_server([sys.executable, str(path)])
+        assert (rec["verdict"], rec["method"]) == ("INCONCLUSIVE", "sandbox_not_exercised"), rec
+
+
+def test_proxy_class_is_caught_when_driven_by_operator_input():
+    rec = runner.run_server([sys.executable, str(_fixture("proxy_aggregator"))],
+                            hints=runner.load_hints()["proxy_aggregator"])
+    assert (rec["verdict"], rec["method"]) == ("VULNERABLE", "oracle"), rec
+    assert rec["hinted_tools"] == ["gateway_call"], rec

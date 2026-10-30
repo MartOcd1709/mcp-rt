@@ -143,6 +143,14 @@ def test_local_names_and_pid_prefixes_do_not_invent_attempts():
     assert has_ipv6_attempt('42 connect(4, {sa_family=AF_INET6, sin6_port=htons(443)}, 28) = 0')
 
 
+def test_operator_inputs_substitute_only_this_runs_token():
+    from mcp_rt.runtime.runner import apply_hints
+    spec = {"tool": "tickets.list", "arguments": '{"ticket": "{token}"}', "limit": 5}
+    assert apply_hints(spec, TOKEN) == {"tool": "tickets.list", "arguments": '{"ticket": "HT-0123456789abcdef"}',
+                                        "limit": 5}
+    assert apply_hints(None, TOKEN) == {}
+
+
 def test_runtime_code_is_name_free():
     source = "".join(p.read_text() for p in (REPO / "mcp_rt" / "runtime").glob("*.py"))
     assert not [name for name in CORPUS_NAMES if name in source]
