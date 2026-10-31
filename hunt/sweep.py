@@ -45,6 +45,7 @@ def _missing_env(reason: str) -> list[str]:
 from hunt.benchmark import grade_report
 from hunt.findings_db import DB
 from hunt.report import CLASS_META, preserve, record, run_full_scan
+from mcp_rt import engine_version
 
 FS_DIR = "/tmp/fs_allowed"
 GIT_REPO = "/tmp/gitrepo"
@@ -281,10 +282,10 @@ def prewarm(cmd: str) -> None:
         pass
 
 
-def _record_inc(db: DB, t: dict, verdict: str, cat: str, why: str, source: str) -> dict:
+def _record_inc(db: DB, t: dict, verdict: str, cat: str, why: str, source: str, ev: str = "") -> dict:
     """Record a non-graded outcome (INCONCLUSIVE / SETUP_FAILED) to the ledger and return its result dict."""
     tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-    db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}")
+    db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}", engine_version=ev)
     print(f"   -> {verdict} [{cat}] ({why[:70]})")
     return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
 
@@ -316,6 +317,7 @@ def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
 
     from mcp_rt.runtime import observe
     print(f"== {t['name']} ==")
+    ev = engine_version()                                # resume key: a probe-source change re-scans (#19 B2)
     t["cmd"] = _resolve_launch(t["cmd"])                 # recover 'needs a subcommand' servers
     prewarm(t["cmd"])
     token = "HT-" + secrets.token_hex(8)
@@ -325,7 +327,7 @@ def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
         rep, sealed, report, events = asyncio.run(_sealed_scan(target_argv, token, timeout, t["name"]))
     except (asyncio.TimeoutError, TimeoutError):
         return _record_inc(db, t, "INCONCLUSIVE", "SCAN_TIMEOUT",
-                           f"sealed scan exceeded {timeout}s (server started but slow; raise --timeout)", source)
+                           f"sealed scan exceeded {timeout}s (server started but slow; raise --timeout)", source, ev)
     except Exception:  # noqa: BLE001
         why = _diagnose(t["cmd"]); cat = _classify(why)  # honest category, not "ExceptionGroup"
         miss = _missing_env(why) if cat == "NEEDS_CONFIG" else []
@@ -338,11 +340,11 @@ def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
             except Exception:  # noqa: BLE001
                 rep = None
         if rep is None:
-            return _record_inc(db, t, _verdict_for(cat), cat, why, source)
+            return _record_inc(db, t, _verdict_for(cat), cat, why, source, ev)
     # Fail-closed: no host fallback. A scan we can't prove was sealed is INCONCLUSIVE, never a trusted CLEAN.
     if not sealed:
         return _record_inc(db, t, "INCONCLUSIVE", "SANDBOX_UNPROVEN",
-                           f"seal not proven: {(report or {}).get('error') or 'unknown'}", source)
+                           f"seal not proven: {(report or {}).get('error') or 'unknown'}", source, ev)
     # Merge the Unit-3 egress oracle over the sealed server-phase events (outbound the floor probes don't see).
     claim = " \n ".join(s.get("name", "") for s in (rep.get("surface", {}).get("tools") or []))
     eg = observe.classify_egress(events, token, claim)
@@ -352,10 +354,14 @@ def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
         f.update(CLASS_META.get("egress", dict(sev="High", cwe="CWE-200", owasp=[], title="egress", fix="")))
         rep["findings"].append(f)
         rep["verdict"] = "VULNERABLE"
+    rep["target"] = " ".join(target_argv)                # record/report under the REAL target, not the launcher
     rdir = preserve(rep)
     record(rep, rdir)
     b = grade_report(rep)
     fired = ", ".join(f"{f['cls']}:{f['tool']}" for f in rep["findings"]) or "clean"
+    tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
+    db.add_scan(tid, mode="sweep", verdict=rep["verdict"], agent="n/a", evidence=rdir,
+                notes=fired, engine_version=ev)          # resume anchor: this target @ this engine_version
     print(f"   -> [SEALED] Grade {b['grade']} ({b['score']}/100)  {fired}")
     return {"name": t["name"], "verdict": rep["verdict"], "grade": b["grade"],
             "score": b["score"], "findings": rep["findings"], "report_dir": rdir, "sealed": True}
@@ -423,6 +429,46 @@ def discover_pypi(cap: int, seen: set | None = None) -> list[dict]:
     return out
 
 
+# --- B3: one honest, ranked batch-triage report over a sweep run -----------------------------------
+_VERDICT_RANK = {"VULNERABLE": 0, "SUSPECTED": 1, "INCONCLUSIVE": 2, "SETUP_FAILED": 3, "CLEAN": 4}
+
+
+def batch_report(db: DB, ev: str) -> str:
+    """Ranked Markdown triage over the sweep rows at engine_version `ev`: VULNERABLE → SUSPECTED →
+    INCONCLUSIVE → SETUP_FAILED → CLEAN. INCONCLUSIVE and SETUP_FAILED are kept visible and NEVER folded into
+    clean (the honest denominator is the asset). One row per target (its latest sweep scan at this engine)."""
+    rows = db.conn.execute(
+        "SELECT t.name, s.verdict, s.notes, s.evidence, s.scanned_at FROM scans s "
+        "JOIN targets t ON t.id = s.target_id WHERE s.mode='sweep' AND s.engine_version=? "
+        "ORDER BY s.scanned_at", (ev,)).fetchall()
+    latest = {r["name"]: r for r in rows}                       # last sweep row per target wins
+    items = sorted(latest.values(), key=lambda r: (_VERDICT_RANK.get(r["verdict"], 9), r["name"]))
+    c = Counter(r["verdict"] for r in items)
+    graded = c.get("VULNERABLE", 0) + c.get("SUSPECTED", 0) + c.get("CLEAN", 0)
+    ran = graded + c.get("INCONCLUSIVE", 0)                     # setup-failed never ran
+    out = ["# mcp-rt batch sweep — triage report", "",
+           f"engine_version: `{ev}`  ·  targets: {len(items)}", "",
+           "## Coverage (INCONCLUSIVE / SETUP_FAILED never folded into clean)",
+           f"- **VULNERABLE**: {c.get('VULNERABLE', 0)}",
+           f"- SUSPECTED (leads): {c.get('SUSPECTED', 0)}",
+           f"- CLEAN: {c.get('CLEAN', 0)}",
+           f"- INCONCLUSIVE: {c.get('INCONCLUSIVE', 0)}  (ran, no verdict reached)",
+           f"- SETUP_FAILED: {c.get('SETUP_FAILED', 0)}  (never ran — excluded from the reliability denominator)",
+           f"- verdict rate: {graded}/{ran} of servers that ran reached a verdict" if ran else "", "",
+           "## Targets (ranked)", "", "| target | verdict | detail |", "|---|---|---|"]
+    out += [f"| {r['name']} | {r['verdict']} | {(r['notes'] or '')[:90]} |" for r in items]
+    return "\n".join(x for x in out if x is not None) + "\n"
+
+
+def write_batch_report(db: DB, ev: str, outdir: str = "bench_results") -> str:
+    """Write the batch triage report to bench_results/ (gitignored, like the Unit-3 scorecard)."""
+    d = __import__("pathlib").Path(outdir)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"batch_sweep_{ev}.md"
+    p.write_text(batch_report(db, ev))
+    return str(p)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="hunt.sweep", description="mass-sweep MCP servers")
     p.add_argument("--cap", type=int, default=10, help="max servers to test")
@@ -463,8 +509,13 @@ def main(argv=None) -> int:
     print(f"sweep: {len(targets)} target(s)\n")
 
     db = DB()
-    grades, classes, inconclusive, setup_failed, incat = Counter(), Counter(), 0, 0, Counter()
+    ev = engine_version()
+    grades, classes, inconclusive, setup_failed, incat, skipped = Counter(), Counter(), 0, 0, Counter(), 0
     for t in targets:
+        if db.scanned_at_engine(t["name"], ev):          # resume: already scanned at the current engine (#19 B2)
+            print(f"== {t['name']} == skip (already scanned at engine {ev})")
+            skipped += 1
+            continue
         r = scan_one(t, db, timeout=args.timeout, source="npm")
         if r["verdict"] in ("INCONCLUSIVE", "SETUP_FAILED"):
             incat[r["cat"]] += 1
@@ -476,11 +527,14 @@ def main(argv=None) -> int:
             grades[r["grade"]] += 1
             for f in r["findings"]:
                 classes[f["cls"]] += 1
+    report_path = write_batch_report(db, ev)              # B3: one honest, ranked batch triage report
     db.close()
 
     graded = sum(grades.values())
     ran = graded + inconclusive          # servers that actually started (setup_failed never did)
     print("\n=== sweep summary ===")
+    if skipped:
+        print(f"resumed:          {skipped} skipped (already scanned at engine {ev})")
     print(f"servers tested:   {graded}  (+{inconclusive} inconclusive, +{setup_failed} setup-failed)")
     if ran:
         print(f"verdict rate:     {graded}/{ran} = {100*graded//ran}% of servers that ran reached a verdict")
@@ -489,6 +543,7 @@ def main(argv=None) -> int:
     print(f"grade distribution: {dict(grades)}")
     print(f"findings by class:  {dict(classes)}")
     print(f"total findings:     {sum(classes.values())}")
+    print(f"batch report:     {report_path}")
     print("ledger:", DB().summary())
     return 0
 
