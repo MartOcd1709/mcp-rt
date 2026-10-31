@@ -44,7 +44,7 @@ def _missing_env(reason: str) -> list[str]:
 
 from hunt.benchmark import grade_report
 from hunt.findings_db import DB
-from hunt.report import preserve, record, run_full_scan
+from hunt.report import CLASS_META, preserve, record, run_full_scan
 
 FS_DIR = "/tmp/fs_allowed"
 GIT_REPO = "/tmp/gitrepo"
@@ -281,50 +281,84 @@ def prewarm(cmd: str) -> None:
         pass
 
 
+def _record_inc(db: DB, t: dict, verdict: str, cat: str, why: str, source: str) -> dict:
+    """Record a non-graded outcome (INCONCLUSIVE / SETUP_FAILED) to the ledger and return its result dict."""
+    tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
+    db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}")
+    print(f"   -> {verdict} [{cat}] ({why[:70]})")
+    return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
+
+
+async def _sealed_scan(target_argv, token, timeout, pkg_name, extra_env=None):
+    """B1: run the full floor scan INSIDE the Unit-3 seal. Build the launcher (unshare -rn sandbox.py …),
+    run run_full_scan against it (so every floor probe runs against the sealed target with no probe change),
+    then read the launcher's report.json (seal proof) + events.jsonl (recorder egress).
+    Returns (rep, sealed, report, server_events)."""
+    from mcp_rt.runtime.runner import _read_events, _read_json, build_sealed_launcher
+    workdir = tempfile.mkdtemp(prefix="mcprt-sweep-seal-")
+    params, paths = build_sealed_launcher(list(target_argv), workdir, token, extra_env=extra_env)
+    launcher_argv = [params.command, *params.args]
+    rep = await asyncio.wait_for(
+        run_full_scan(launcher_argv, env=params.env, pkg_name=pkg_name, sealed=True), timeout)
+    report = _read_json(paths["report"])
+    events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
+    return rep, bool(report.get("sealed")), report, events
+
+
 def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
-    """Resolve launch → prewarm → full scan (with dummy-env config recovery) → record to the ledger.
-    The single per-target unit shared by `sweep` and `daily`; the opaque anyio TaskGroup is already
-    unwrapped to a real reason upstream (hunt.probes.scan_target). Returns a result dict."""
+    """B1 sealed sweep unit: resolve launch → run the full floor scan INSIDE the Unit-3 seal (fail-closed)
+    → merge the egress oracle → record. NO host fallback: a target whose seal is not proven is INCONCLUSIVE
+    (SANDBOX_UNPROVEN), never retried on the host. Launch-resolution/prewarm/diagnose are brief pre-seal host
+    runs (how we figure out HOW to launch); for an untrusted mass-run the OPERATOR performs the install in a
+    throwaway container — the one unsealed step (see docs/BATCH_AUDIT_DESIGN.md). Shared by `sweep` and
+    `daily`; `daily` inherits the seal for free."""
+    import secrets
+
+    from mcp_rt.runtime import observe
     print(f"== {t['name']} ==")
     t["cmd"] = _resolve_launch(t["cmd"])                 # recover 'needs a subcommand' servers
     prewarm(t["cmd"])
-    rep = None
+    token = "HT-" + secrets.token_hex(8)
+    target_argv = shlex.split(t["cmd"])
+    rep = sealed = report = events = None
     try:
-        rep = asyncio.run(asyncio.wait_for(run_full_scan(shlex.split(t["cmd"])), timeout=timeout))
+        rep, sealed, report, events = asyncio.run(_sealed_scan(target_argv, token, timeout, t["name"]))
     except (asyncio.TimeoutError, TimeoutError):
-        # Got far enough to be slow (a fast crash raises ScanError, not a timeout): the server is
-        # probeable, just over budget (e.g. a live network call per tool). Distinct from can't-start.
-        cat = "SCAN_TIMEOUT"
-        why = f"scan exceeded {timeout}s (server started but slow — probeable; raise --timeout to complete)"
-        tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-        db.add_scan(tid, mode="sweep", verdict="INCONCLUSIVE", agent="n/a", notes=f"[{cat}] {why}")
-        print(f"   -> INCONCLUSIVE [{cat}] (over {timeout}s; raise --timeout to complete)")
-        return {"name": t["name"], "verdict": "INCONCLUSIVE", "cat": cat, "why": why}
+        return _record_inc(db, t, "INCONCLUSIVE", "SCAN_TIMEOUT",
+                           f"sealed scan exceeded {timeout}s (server started but slow; raise --timeout)", source)
     except Exception:  # noqa: BLE001
         why = _diagnose(t["cmd"]); cat = _classify(why)  # honest category, not "ExceptionGroup"
         miss = _missing_env(why) if cat == "NEEDS_CONFIG" else []
-        if miss:                                          # config recovery: retry with dummy env
+        if miss:                                          # config recovery: retry SEALED with dummy target env
             try:
-                rep = asyncio.run(asyncio.wait_for(
-                    run_full_scan(shlex.split(t["cmd"]),
-                                  env={**os.environ, **{v: "mcprt-dummy" for v in miss}}),
-                    timeout=timeout))
+                rep, sealed, report, events = asyncio.run(
+                    _sealed_scan(target_argv, token, timeout, t["name"],
+                                 extra_env={v: "mcprt-dummy" for v in miss}))
                 print(f"   (config-recovered via dummy env: {', '.join(miss)})")
             except Exception:  # noqa: BLE001
                 rep = None
         if rep is None:
-            verdict = _verdict_for(cat)
-            tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-            db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}")
-            print(f"   -> {verdict} [{cat}] ({why[:70]})")
-            return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
+            return _record_inc(db, t, _verdict_for(cat), cat, why, source)
+    # Fail-closed: no host fallback. A scan we can't prove was sealed is INCONCLUSIVE, never a trusted CLEAN.
+    if not sealed:
+        return _record_inc(db, t, "INCONCLUSIVE", "SANDBOX_UNPROVEN",
+                           f"seal not proven: {(report or {}).get('error') or 'unknown'}", source)
+    # Merge the Unit-3 egress oracle over the sealed server-phase events (outbound the floor probes don't see).
+    claim = " \n ".join(s.get("name", "") for s in (rep.get("surface", {}).get("tools") or []))
+    eg = observe.classify_egress(events, token, claim)
+    if isinstance(eg, dict) and eg.get("verdict") == "VULNERABLE":
+        f = {"cls": "egress", "tool": eg.get("tool") or "(server)",
+             "evidence": (eg.get("evidence") or "")[:300], "detail": eg.get("rationale", "")}
+        f.update(CLASS_META.get("egress", dict(sev="High", cwe="CWE-200", owasp=[], title="egress", fix="")))
+        rep["findings"].append(f)
+        rep["verdict"] = "VULNERABLE"
     rdir = preserve(rep)
     record(rep, rdir)
     b = grade_report(rep)
     fired = ", ".join(f"{f['cls']}:{f['tool']}" for f in rep["findings"]) or "clean"
-    print(f"   -> Grade {b['grade']} ({b['score']}/100)  {fired}")
+    print(f"   -> [SEALED] Grade {b['grade']} ({b['score']}/100)  {fired}")
     return {"name": t["name"], "verdict": rep["verdict"], "grade": b["grade"],
-            "score": b["score"], "findings": rep["findings"], "report_dir": rdir}
+            "score": b["score"], "findings": rep["findings"], "report_dir": rdir, "sealed": True}
 
 
 # --- PyPI / uvx discovery (the Python MCP ecosystem — npm's search misses it entirely) -----------

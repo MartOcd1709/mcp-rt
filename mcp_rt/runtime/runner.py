@@ -129,7 +129,7 @@ def _summary(ev, token):
             "token_hits": observe.token_hits(payload, token)}
 
 
-def build_sealed_launcher(target_argv, workdir, token):
+def build_sealed_launcher(target_argv, workdir, token, extra_env=None):
     """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
     Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
     <target argv>`, which proves the seal and only then execs the target with stdio inherited. The host opens
@@ -146,6 +146,8 @@ def build_sealed_launcher(target_argv, workdir, token):
                 "--strace-server", paths["strace_server"], "--strace-probe", paths["strace_probe"]]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": workdir, "LANG": "C.UTF-8",
            "MCPRT_TEST_VALUE": token, "MCPRT_CANARY": CANARY}
+    if extra_env:                     # e.g. dummy vars for config recovery; sandbox.py execs the target with
+        env.update(extra_env)         # no env= so the target inherits this env (see sandbox.py Popen)
     return StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir), paths
 
 
