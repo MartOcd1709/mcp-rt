@@ -1330,7 +1330,81 @@ async def probe_session_argument(session, tools) -> list[ProbeResult]:
     return out
 
 
-ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal,
+# --- XXE (XML external entity): a tool parses attacker XML with external-entity resolution ----------
+# Oracle only, per-run: FIRES iff OUR planted-file nonce comes back (CWE-611 arbitrary file read) or OUR
+# loopback canary records the parser's out-of-band fetch (XXE-driven SSRF). A safe parser disables external
+# entities (defusedxml / resolve_entities=False) and never resolves our entity. Reflection is NOT proof: the
+# file nonce is independent of the payload text, so echoing the payload can never satisfy the oracle.
+# NON-DESTRUCTIVE: every payload is a SINGLE external-entity / external-DTD reference — no nested or parameter
+# entities, no expansion/amplification (never a billion-laughs). The file entity targets ONLY our own planted
+# nonce file, never a real system path. These invariants are asserted structurally in tests/test_xxe.py.
+_XML_PARAM = re.compile(r"xml|svg|xsl|xslt|dtd|soap|rss|feed|doc|document|content|markup|profile|body|data|payload|config", re.I)
+_XML_DESC = re.compile(r"\bxml\b|svg|xsl|xslt|\bparse|document|\bfeed\b|\brss\b|import|markup|\bdtd\b|entity|\bsoap\b", re.I)
+_XXE_FILE_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file://{path}">]><r>&x;</r>'
+_XXE_OOB_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "{url}">]><r>&x;</r>'
+_XXE_DTD_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r SYSTEM "{url}"><r>ok</r>'
+_XXE_PAYLOAD_TEMPLATES = (_XXE_FILE_PAYLOAD, _XXE_OOB_PAYLOAD, _XXE_DTD_PAYLOAD)
+
+
+async def probe_xxe(session, tools) -> list[ProbeResult]:
+    """XML external entity. Send XML payloads to string args (XML/markup-named prioritized, else the first
+    couple — name-free: the vocabulary only ORDERS attempts, the oracle DECIDES). Oracle = our planted-file
+    nonce in the output (file-read XXE) or our loopback canary recording the parser's outbound fetch (OOB)."""
+    out = []
+    sink = _Sink().start()
+    workdir = tempfile.mkdtemp(prefix="mcprt_xxe_")
+    try:
+        for tool in tools:
+            # Name-free: XML/markup-named params, else (when the tool's name/description says it parses
+            # documents) its first string params. The vocabulary only ORDERS; the oracle DECIDES. We do NOT
+            # blast XML at every string arg — a url/cmd param never parses XML, and driving one triggers real
+            # network/exec timeouts for zero added coverage (same discipline as every other probe).
+            params = _candidate_params(tool, _XML_PARAM, _XML_DESC, ["xml", "document", "content", "data", "body"])
+            if not params:
+                out.append(ProbeResult("xxe", tool.name, "not_applicable",
+                                       rationale="no XML/document argument to carry an entity payload"))
+                continue
+            tok = uuid.uuid4().hex[:12]                        # path + OOB token
+            nonce = "XXE" + uuid.uuid4().hex[:16]              # file CONTENTS — independent of the payload text
+            planted = os.path.join(workdir, f"xf_{tok}.txt")   # OUR file only; never a real system path
+            with open(planted, "w", encoding="utf-8") as f:
+                f.write(nonce)
+            oob = f"http://127.0.0.1:{sink.port}/{tok}"
+            payloads = [_XXE_FILE_PAYLOAD.format(path=planted),
+                        _XXE_OOB_PAYLOAD.format(url=oob),
+                        _XXE_DTD_PAYLOAD.format(url=oob + ".dtd")]
+            returned, raised = [], []
+            for param in params:
+                for pl in payloads:
+                    try:
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, pl)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001 — a failed call is an observation, not a crash
+                        raised.append(str(exc))
+            await asyncio.sleep(0.3)
+            if any(nonce in t for t in returned):              # A: an external entity resolved OUR planted file
+                out.append(ProbeResult("xxe", tool.name, "oracle", marker=nonce,
+                                       evidence=f"{tool.name}: planted-file nonce returned via XML entity",
+                                       rationale="resolved an external entity to an arbitrary planted file "
+                                                 "(XXE / arbitrary file read); a safe parser disables "
+                                                 "external-entity resolution"))
+            elif sink.hit(f"/{tok}"):                          # B/C: the parser made the out-of-band fetch
+                out.append(ProbeResult("xxe", tool.name, "oracle", marker=tok,
+                                       evidence=f"{tool.name} -> loopback canary via XML entity/DTD",
+                                       rationale="resolved an external entity/DTD to an attacker-controlled "
+                                                 "URL (out-of-band XXE / SSRF-via-XXE); a safe parser disables "
+                                                 "external-entity resolution"))
+            else:
+                out.append(ProbeResult("xxe", tool.name, _negative_method(returned, raised), marker=tok,
+                                       rationale="no external entity resolved (no planted-file read, no "
+                                                 "out-of-band fetch)"))
+    finally:
+        sink.stop()
+        shutil.rmtree(workdir, ignore_errors=True)
+    return out
+
+
+ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal, probe_xxe,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
               probe_arg_injection, probe_deserialization, probe_context_oversharing,
               probe_lure_text, probe_session_argument]
