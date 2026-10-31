@@ -56,6 +56,7 @@ class RoE:
     sha256: str
     classes: list[str]
     surface_tools: list[str] = field(default_factory=list)
+    env: dict = field(default_factory=dict)        # generic env overrides for the sealed target (e.g. HOME)
     mode: str = "offline"
     budget: Budget = field(default_factory=Budget)
     kill_switch: str = ""
@@ -100,6 +101,12 @@ def load_roe(path: str | Path) -> RoE:
         patience=int(b.get("patience", 5)),
         probe_calls_per_objective=int(b.get("probe_calls_per_objective", 1)),
     ).clamped()
+    env = d.get("env") or {}
+    # Generic env overrides for the sealed target (e.g. {"HOME": "/tmp/.../confined-home"} so a server reads a
+    # seeded config). String->string only; NO server-specific keys here (a server is DATA, not code). Applied
+    # only inside the seal (build_sealed_launcher extra_env) — it cannot widen scope or touch the host.
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        raise RoEError('env must be an object of string->string (e.g. {"HOME": "/path"})')
     surface = d.get("surface") or {}
     return RoE(
         target_id=str(target.get("id") or "unnamed"),
@@ -107,6 +114,7 @@ def load_roe(path: str | Path) -> RoE:
         sha256=str(target.get("sha256") or ""),
         classes=[str(c) for c in classes],
         surface_tools=[str(t) for t in (surface.get("tools") or [])],
+        env=dict(env),
         mode=str(d.get("mode") or "offline"),
         budget=budget,
         kill_switch=str(d.get("kill_switch") or ""),

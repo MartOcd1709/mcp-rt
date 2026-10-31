@@ -65,8 +65,9 @@ class SealedHandle:
 
 
 @asynccontextmanager
-async def sealed_session(target_argv, *, token=None, connect_timeout=30.0):
-    """Open one sealed session against the target. Yields a SealedHandle (check .sealed before probing)."""
+async def sealed_session(target_argv, *, token=None, connect_timeout=30.0, env=None):
+    """Open one sealed session against the target. Yields a SealedHandle (check .sealed before probing).
+    `env` (generic string->string) overrides the sealed target's environment (e.g. HOME) — sealed-only."""
     import shutil
     import tempfile
     token = token or "HT-" + secrets.token_hex(8)
@@ -74,7 +75,7 @@ async def sealed_session(target_argv, *, token=None, connect_timeout=30.0):
     # The launcher runs in workdir, so resolve any relative target-file path against the CURRENT cwd first,
     # or the target would not be found and would never start.
     argv = [str(Path(t).resolve()) if Path(t).exists() else t for t in target_argv]
-    params, paths = build_sealed_launcher(argv, workdir, token)
+    params, paths = build_sealed_launcher(argv, workdir, token, extra_env=env)
     handle = SealedHandle(token, paths)
 
     async def elicit(context, request):
