@@ -14,7 +14,7 @@ import asyncio
 from hunt.probes import (probe_arg_injection, probe_command_injection, probe_context_oversharing,
                          probe_deserialization, probe_lure_text, probe_path_traversal, probe_rug_pull,
                          probe_session_argument, probe_sql_injection, probe_ssrf, probe_ssti,
-                         probe_tool_poisoning, verdict_for)
+                         probe_tool_poisoning, probe_xxe, verdict_for)
 from mcp_rt.runtime import observe
 from mcp_rt.runtime.runner import _sample
 
@@ -24,7 +24,7 @@ PROBE_BY_CLASS = {
     "sql_injection": probe_sql_injection, "ssti": probe_ssti, "deserialization": probe_deserialization,
     "context_oversharing": probe_context_oversharing, "arg_injection": probe_arg_injection,
     "tool_poisoning": probe_tool_poisoning, "lure_text": probe_lure_text,
-    "session_argument": probe_session_argument, "rug_pull": probe_rug_pull,
+    "session_argument": probe_session_argument, "rug_pull": probe_rug_pull, "xxe": probe_xxe,
 }
 PROBE_CLASSES = frozenset(PROBE_BY_CLASS)
 ALL_CLASSES = PROBE_CLASSES | {"egress"}
@@ -34,6 +34,13 @@ ALL_CLASSES = PROBE_CLASSES | {"egress"}
 # they are INCONCLUSIVE (probe_seal_incompatible). Outbound reach is still covered by the egress class via the
 # recorder. Adapting these to run under the seal is U2 (R6).
 SEAL_INCOMPATIBLE = frozenset({"ssrf", "context_oversharing"})
+# Partially seal-affected: the class CAN confirm under the seal (xxe's file-read oracle reads our planted
+# nonce over the shared fs), but one dimension cannot — xxe's out-of-band arm fetches an attacker URL whose
+# sink the seal makes unreachable, and run_egress (benign args) never triggers the external entity. So a
+# NEGATIVE xxe under the seal cannot rule out out-of-band XXE and must be INCONCLUSIVE, never a silent CLEAN.
+# (Proven: hunt/probe_fixtures/xxe_oob_server.py is cleared by neither xxe nor egress as-is.)
+# VULNERABLE/NOT_APPLICABLE stand.
+SEAL_PARTIAL = frozenset({"xxe"})
 CALL_TIMEOUT = 10.0
 EGRESS_GRACE = 1.5
 
@@ -70,8 +77,15 @@ async def execute(action, handle) -> list[dict]:
             return [_obs(action.cls, action.tool, "error", f"probe raised: {type(exc).__name__}: {exc}"[:160])]
         if not results:
             return [_obs(action.cls, action.tool, "not_applicable", "probe found nothing to test on this tool")]
-        return [_obs(action.cls, r.tool, r.confirmation_method, (r.evidence or r.rationale or "")[:200])
-                for r in results]
+        obs = []
+        for r in results:
+            if action.cls in SEAL_PARTIAL and r.confirmation_method == "oracle_negative":
+                obs.append(_obs(action.cls, r.tool, "sandbox_unobservable",
+                                "no file-read XXE; the external-entity out-of-band fetch is unobservable "
+                                "under the seal (sink unreachable) -> INCONCLUSIVE, not clean"))
+            else:
+                obs.append(_obs(action.cls, r.tool, r.confirmation_method, (r.evidence or r.rationale or "")[:200]))
+        return obs
 
     # run_egress: exercise the tool with benign token-bearing args, then classify this action's events.
     handle.new_events()   # drain any prior window so we attribute only this action's egress
