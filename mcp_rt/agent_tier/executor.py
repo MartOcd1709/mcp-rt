@@ -14,7 +14,7 @@ import asyncio
 from hunt.probes import (probe_arg_injection, probe_command_injection, probe_context_oversharing,
                          probe_deserialization, probe_lure_text, probe_path_traversal, probe_rug_pull,
                          probe_session_argument, probe_sql_injection, probe_ssrf, probe_ssti,
-                         probe_tool_poisoning, verdict_for)
+                         probe_tool_poisoning, probe_xxe, verdict_for)
 from mcp_rt.runtime import observe
 from mcp_rt.runtime.runner import _sample
 
@@ -24,7 +24,7 @@ PROBE_BY_CLASS = {
     "sql_injection": probe_sql_injection, "ssti": probe_ssti, "deserialization": probe_deserialization,
     "context_oversharing": probe_context_oversharing, "arg_injection": probe_arg_injection,
     "tool_poisoning": probe_tool_poisoning, "lure_text": probe_lure_text,
-    "session_argument": probe_session_argument, "rug_pull": probe_rug_pull,
+    "session_argument": probe_session_argument, "rug_pull": probe_rug_pull, "xxe": probe_xxe,
 }
 PROBE_CLASSES = frozenset(PROBE_BY_CLASS)
 ALL_CLASSES = PROBE_CLASSES | {"egress"}

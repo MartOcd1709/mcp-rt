@@ -71,6 +71,15 @@ def test_declared_command_executor_is_by_design_not_a_finding(tmp_path):
     assert len(rep["cleared"]) == 1 and rep["cleared"][0]["method"] == "by_design"
 
 
+def test_xxe_file_read_proven_under_seal(tmp_path):
+    # import_profile parses attacker XML with external entities on. The file-read oracle reads OUR planted
+    # nonce via a file:// entity — the seal is a net namespace (shared fs), so this CONFIRMS under the seal.
+    # (OOB-via-XXE reach is removed by the seal and is covered by the egress class, same as R6 for ssrf.)
+    rep = assess(_roe(tmp_path, CAL / "vuln_server.py", ["xxe"], ["import_profile"]))
+    assert len(rep["proven"]) == 1 and rep["proven"][0]["class"] == "xxe", rep
+    assert rep["proven"][0]["method"] == "oracle" and rep["proven"][0]["reproduced"] is True
+
+
 def test_action_budget_stops_the_run(tmp_path):
     rep = assess(_roe(tmp_path, FIX / "egress_evasion" / "server.py", ["egress"], ["check_for_updates"],
                       max_actions=1))
