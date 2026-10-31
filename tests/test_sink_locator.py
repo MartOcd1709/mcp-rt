@@ -14,11 +14,11 @@ VULN = str(Path(__file__).parents[1] / "hunt" / "probe_fixtures" / "vuln_server.
 
 # ---- happy path: readable source, unambiguous sink per §2 baseline ----
 @pytest.mark.parametrize("cls,tool,line,needle", [
-    ("command_injection", "restricted_cmd", 120, "getoutput"),
-    ("command_injection", "run_cmd", 113, "getoutput"),
-    ("path_traversal", "read_doc", 115, "open("),
-    ("ssti", "render_message", 46, "eval("),          # one hop: handler -> _render -> eval
-    ("sql_injection", "search_notes", 128, "execute"),
+    ("command_injection", "restricted_cmd", 142, "getoutput"),
+    ("command_injection", "run_cmd", 135, "getoutput"),
+    ("path_traversal", "read_doc", 137, "open("),
+    ("ssti", "render_message", 49, "eval("),          # one hop: handler -> _render -> eval
+    ("sql_injection", "search_notes", 150, "execute"),
 ])
 def test_source_sink_unambiguous(cls, tool, line, needle):
     res = SL.locate_sink(cls, tool, source_path=VULN)
@@ -33,7 +33,7 @@ def test_chain_renders_for_confirmed():
     proof = Proof(tool="restricted_cmd", vuln_class="command_injection", confirmed=True, signal="canary touch fired")
     chain = SL.explain_chain(proof, source_path=VULN)
     assert chain and "VULNERABLE: command_injection in restricted_cmd" in chain
-    assert "vuln_server.py:120" in chain and "canary touch fired" in chain
+    assert "vuln_server.py:142" in chain and "canary touch fired" in chain
     assert "Fix:" in chain
 
 
