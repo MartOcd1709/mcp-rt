@@ -34,6 +34,12 @@ ALL_CLASSES = PROBE_CLASSES | {"egress"}
 # they are INCONCLUSIVE (probe_seal_incompatible). Outbound reach is still covered by the egress class via the
 # recorder. Adapting these to run under the seal is U2 (R6).
 SEAL_INCOMPATIBLE = frozenset({"ssrf", "context_oversharing"})
+# Partially seal-affected: the class CAN confirm under the seal (xxe's file-read oracle reads our planted
+# nonce over the shared fs), but one dimension cannot — xxe's out-of-band arm fetches an attacker URL whose
+# sink the seal makes unreachable, and run_egress (benign args) never triggers the external entity. So a
+# NEGATIVE xxe under the seal cannot rule out out-of-band XXE and must be INCONCLUSIVE, never a silent CLEAN.
+# (Proven: fixtures/xxe_oob is cleared by neither xxe nor egress as-is.) VULNERABLE/NOT_APPLICABLE stand.
+SEAL_PARTIAL = frozenset({"xxe"})
 CALL_TIMEOUT = 10.0
 EGRESS_GRACE = 1.5
 
@@ -70,8 +76,15 @@ async def execute(action, handle) -> list[dict]:
             return [_obs(action.cls, action.tool, "error", f"probe raised: {type(exc).__name__}: {exc}"[:160])]
         if not results:
             return [_obs(action.cls, action.tool, "not_applicable", "probe found nothing to test on this tool")]
-        return [_obs(action.cls, r.tool, r.confirmation_method, (r.evidence or r.rationale or "")[:200])
-                for r in results]
+        obs = []
+        for r in results:
+            if action.cls in SEAL_PARTIAL and r.confirmation_method == "oracle_negative":
+                obs.append(_obs(action.cls, r.tool, "sandbox_unobservable",
+                                "no file-read XXE; the external-entity out-of-band fetch is unobservable "
+                                "under the seal (sink unreachable) -> INCONCLUSIVE, not clean"))
+            else:
+                obs.append(_obs(action.cls, r.tool, r.confirmation_method, (r.evidence or r.rationale or "")[:200]))
+        return obs
 
     # run_egress: exercise the tool with benign token-bearing args, then classify this action's events.
     handle.new_events()   # drain any prior window so we attribute only this action's egress
