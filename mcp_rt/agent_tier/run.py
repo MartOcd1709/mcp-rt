@@ -40,7 +40,7 @@ async def _run(roe, planner) -> dict:
     ledger = Ledger()
     kill = Path(roe.kill_switch) if roe.kill_switch else None
     handle = None
-    async with sealed_session(roe.argv) as h:
+    async with sealed_session(roe.argv, env=roe.env) as h:
         handle = h
         if not h.sealed:
             objs = _objectives(classes, roe.surface_tools or ["(target)"])

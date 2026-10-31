@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS scans (
     channel     TEXT,                       -- http_post / dns / ...
     destination TEXT,                       -- undeclared host the secret reached
     evidence    TEXT,                       -- path to a report/evidence json
-    notes       TEXT
+    notes       TEXT,
+    engine_version TEXT                     -- detection-logic digest at scan time (resume key, #19 B2)
 );
 CREATE TABLE IF NOT EXISTS disclosures (
     id           INTEGER PRIMARY KEY,
@@ -197,6 +198,9 @@ class DB:
         for col in ("meta TEXT", "last_seen REAL"):          # discovery asset metadata + freshness
             if col.split()[0] not in cols:
                 self.conn.execute(f"ALTER TABLE targets ADD COLUMN {col}")
+        scols = {r["name"] for r in self.conn.execute("PRAGMA table_info(scans)")}
+        if "engine_version" not in scols:                    # #19 B2 resume key
+            self.conn.execute("ALTER TABLE scans ADD COLUMN engine_version TEXT")
 
     def add_target(self, name: str, repo_url: str = "", install_cmd: str = "",
                    source: str = "", language: str = "", stars: int | None = None,
@@ -224,16 +228,24 @@ class DB:
 
     def add_scan(self, target_id: int, *, mode: str, verdict: str, agent: str = "",
                  marker: str = "", channel: str = "", destination: str = "",
-                 evidence: str = "", notes: str = "") -> int:
+                 evidence: str = "", notes: str = "", engine_version: str = "") -> int:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict {verdict!r} not in {sorted(VERDICTS)}")
         cur = self.conn.execute(
             "INSERT INTO scans(target_id,scanned_at,mode,verdict,agent,marker,channel,"
-            "destination,evidence,notes) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "destination,evidence,notes,engine_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (target_id, time.time(), mode, verdict, agent, marker, channel,
-             destination, evidence, notes))
+             destination, evidence, notes, engine_version))
         self.conn.commit()
         return cur.lastrowid
+
+    def scanned_at_engine(self, name: str, engine_version: str) -> bool:
+        """True if this target name already has a scan recorded at this engine_version — the resume-skip key
+        (#19 B2). A changed probe source changes engine_version, so stale-engine scans do NOT match → re-scan."""
+        row = self.conn.execute(
+            "SELECT 1 FROM scans s JOIN targets t ON t.id = s.target_id "
+            "WHERE t.name = ? AND s.engine_version = ? LIMIT 1", (name, engine_version)).fetchone()
+        return row is not None
 
     def add_disclosure(self, target_id: int, scan_id: int | None = None, *,
                        status: str = "draft", advisory_id: str = "", cwe: str = "",

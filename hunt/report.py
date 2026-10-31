@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 from hunt.family_b import probe_token_passthrough
-from hunt.probes import CLEAN, INCONCLUSIVE, SUSPECTED, VULNERABLE, ScanError, scan_target
+from hunt.probes import CLEAN, INCONCLUSIVE, SUSPECTED, VULNERABLE, ScanError, scan_target, verdict_for
 from hunt.supply_chain import installed_dir, analyze_path, _bare_name
 
 # --- class metadata: severity, CWE, OWASP MCP Top 10 mapping, remediation ----------------
@@ -202,10 +202,25 @@ def _mcp06_exposure(surface: dict) -> dict:
     return {"exposed": bool(reasons), "reasons": reasons}
 
 
-async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
-    """Run every detection class against one target; return a structured report dict."""
+async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str | None = None,
+                        sealed: bool = False) -> dict:
+    """Run every detection class against one target; return a structured report dict.
+
+    `pkg_name` names the real package for the supply-chain (node_modules) analysis when `argv` is NOT the
+    package launch itself — e.g. the sealed-sweep path, where argv is the `unshare -rn sandbox.py …` launcher
+    and deriving the name from argv would resolve "unshare". Omitted: derive the name from argv as before."""
     surface: dict = {}
     probe_results = await scan_target(argv, env, surface=surface)   # also inventories the surface
+    if sealed:
+        # R6 honesty (sealed sweep): under the seal the ssrf host-sink and the context_oversharing env-canary
+        # are unreachable, and xxe's out-of-band arm can't reach its sink — so a NEGATIVE there cannot clear
+        # the class. Remap those negatives to INCONCLUSIVE, never a sealed false-CLEAN (outbound reach is still
+        # caught by the egress oracle the sealed sweep merges). VULNERABLE/other verdicts are untouched.
+        for r in probe_results:
+            if r.verdict == CLEAN and r.probe in ("ssrf", "context_oversharing"):
+                r.confirmation_method, r.verdict = "probe_seal_incompatible", verdict_for("probe_seal_incompatible")
+            elif r.verdict == CLEAN and r.probe == "xxe":
+                r.confirmation_method, r.verdict = "sandbox_unobservable", verdict_for("sandbox_unobservable")
     tok = await probe_token_passthrough(argv, env)               # Family B
 
     findings = []
@@ -220,7 +235,7 @@ async def run_full_scan(argv: list[str], env: dict | None = None) -> dict:
 
     # MCP04 supply chain: analyze the installed package (static install-risk + OSV known-vuln deps).
     # Resolved only for npm/npx targets; a uvx/PyPI target has no node_modules -> not run for this scan.
-    sc_dir = await asyncio.to_thread(installed_dir, _bare_name(_target_name(" ".join(argv))))
+    sc_dir = await asyncio.to_thread(installed_dir, _bare_name(pkg_name or _target_name(" ".join(argv))))
     supply_posture = []
     if sc_dir:
         for f in await asyncio.to_thread(analyze_path, sc_dir):
