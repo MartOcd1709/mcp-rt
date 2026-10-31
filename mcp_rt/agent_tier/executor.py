@@ -38,7 +38,8 @@ SEAL_INCOMPATIBLE = frozenset({"ssrf", "context_oversharing"})
 # nonce over the shared fs), but one dimension cannot — xxe's out-of-band arm fetches an attacker URL whose
 # sink the seal makes unreachable, and run_egress (benign args) never triggers the external entity. So a
 # NEGATIVE xxe under the seal cannot rule out out-of-band XXE and must be INCONCLUSIVE, never a silent CLEAN.
-# (Proven: fixtures/xxe_oob is cleared by neither xxe nor egress as-is.) VULNERABLE/NOT_APPLICABLE stand.
+# (Proven: hunt/probe_fixtures/xxe_oob_server.py is cleared by neither xxe nor egress as-is.)
+# VULNERABLE/NOT_APPLICABLE stand.
 SEAL_PARTIAL = frozenset({"xxe"})
 CALL_TIMEOUT = 10.0
 EGRESS_GRACE = 1.5

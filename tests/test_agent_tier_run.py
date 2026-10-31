@@ -84,7 +84,7 @@ def test_oob_only_xxe_under_seal_is_inconclusive_not_clean(tmp_path):
     # An OOB-only XXE (fetches an external entity, never returns the content) can't be caught by the file-read
     # oracle, and the OOB sink is unreachable under the seal while run_egress drives only benign args. It must
     # be INCONCLUSIVE (sandbox_unobservable), NEVER a silent CLEAN — proving the tool is not cleared.
-    rep = assess(_roe(tmp_path, FIX / "xxe_oob" / "server.py", ["xxe"], ["import_doc"]))
+    rep = assess(_roe(tmp_path, CAL / "xxe_oob_server.py", ["xxe"], ["import_doc"]))
     assert rep["proven"] == [] and rep["cleared"] == [], rep
     assert any(r["class"] == "xxe" and r["method"] == "sandbox_unobservable"
                for r in rep["inconclusive"]), rep
