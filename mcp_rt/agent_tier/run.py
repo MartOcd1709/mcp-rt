@@ -27,7 +27,16 @@ def assess(roe_path, *, planner=None, allow_live=False, now=None) -> dict:
     `planner` may be injected (tests, or a live planner in U4); default is the DeterministicPlanner."""
     roe = load_roe(roe_path)
     validate_for_run(roe, allow_live=allow_live, now=now)
-    return asyncio.run(_run(roe, planner))
+    report = asyncio.run(_run(roe, planner))
+    if roe.upstream_url_keys:
+        # #28 upstream-redirect SSRF: a SEPARATE sealed pass — the oracle needs the recorder configured with
+        # the sentinel/canary AT LAUNCH, so it cannot ride the main loop's already-open session. Sealed +
+        # loopback-only (nothing leaves the netns), so it is offline-safe; routed through the spine like all.
+        from mcp_rt.runtime.runner import assess_redirect_follow
+        rr = assess_redirect_follow(roe.argv, upstream_keys=roe.upstream_url_keys, env=roe.env)
+        report["redirect_ssrf"] = {"verdict": rr["verdict"], "method": rr["method"], "evidence": rr["evidence"],
+                                   "upstream_keys": list(roe.upstream_url_keys), "attempts": rr.get("attempts", [])}
+    return report
 
 
 def _objectives(classes, tools):

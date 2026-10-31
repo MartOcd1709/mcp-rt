@@ -129,11 +129,15 @@ def _summary(ev, token):
             "token_hits": observe.token_hits(payload, token)}
 
 
-def build_sealed_launcher(target_argv, workdir, token, extra_env=None):
+def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=None):
     """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
     Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
     <target argv>`, which proves the seal and only then execs the target with stdio inherited. The host opens
-    an ordinary ClientSession against it. `paths` names the launcher's report/events/strace files."""
+    an ordinary ClientSession against it. `paths` names the launcher's report/events/strace files.
+
+    `redirect` (#28, optional): {sentinel_port, canary_host, canary_port, nonce}. When set, the sealed
+    recorder answers EXACTLY the sentinel dst with a 302 to the internal canary in the SERVER phase — the
+    upstream-redirect SSRF oracle. Everything still routes to the one recorder; nothing leaves the seal."""
     names = {"report": "report.json", "events": "events.jsonl", "strace_server": "server.strace",
              "strace_probe": "probe.strace", "server_json": "server.json"}
     paths = {k: os.path.join(workdir, v) for k, v in names.items()}
@@ -144,6 +148,8 @@ def build_sealed_launcher(target_argv, workdir, token, extra_env=None):
                 "--report", paths["report"], "--events", paths["events"], "--workdir", workdir,
                 "--host-netns-ino", str(host_ino), "--port", str(port), "--server-json", paths["server_json"],
                 "--strace-server", paths["strace_server"], "--strace-probe", paths["strace_probe"]]
+    if redirect:
+        launcher += ["--redirect", json.dumps(redirect)]
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": workdir, "LANG": "C.UTF-8",
            "MCPRT_TEST_VALUE": token, "MCPRT_CANARY": CANARY}
     if extra_env:                     # e.g. dummy vars for config recovery; sandbox.py execs the target with
@@ -180,3 +186,42 @@ def run_server(argv, *, token=None, timeout=120.0, hints=None):
             "driver_error": drive["error"], "elicitations": drive["elicitations"], "refused": refused,
             "hinted": bool(hints), "hinted_tools": drive["hinted_tools"],
             "limits": LIMITS, "workdir": workdir}
+
+
+def assess_redirect_follow(argv, *, upstream_keys, env=None, token=None, timeout=120.0):
+    """#28 upstream-redirect SSRF oracle (sealed, black-box). Point the server's CONFIGURED upstream — the
+    RoE-supplied env key(s) that hold its base URL (server is DATA; NO hardcoded key) — at a loopback
+    sentinel. The sealed recorder answers that sentinel with a 302 to an internal canary and records whether
+    the server FOLLOWS it. Integrity first (seal proven, recorder vs strace), then classify_redirect_follow.
+    Returns a verdict record (run_server shape)."""
+    if not upstream_keys:
+        return {"server": list(argv), "verdict": "INCONCLUSIVE", "method": "redirect_not_confirmed",
+                "evidence": "no upstream URL key supplied (the RoE must name the env/config key that holds the "
+                            "server's base URL); cannot configure the sentinel", "attempts": []}
+    token = token or "HT-" + secrets.token_hex(8)
+    workdir = tempfile.mkdtemp(prefix="mcprt-rr-")
+    rnd = random.SystemRandom()
+    p1 = rnd.randint(20000, 60000)
+    p2 = rnd.randint(20000, 60000)
+    while p2 == p1:
+        p2 = rnd.randint(20000, 60000)
+    nonce = "rr" + secrets.token_hex(8)
+    redirect = {"sentinel_port": p1, "canary_host": "127.0.0.1", "canary_port": p2, "nonce": nonce}
+    merged = dict(env or {})                                          # RoE-supplied auth/config (reach the vuln branch)
+    merged.update({k: "http://127.0.0.1:%d/" % p1 for k in upstream_keys})   # point every named upstream at the sentinel
+    params, paths = build_sealed_launcher(argv, workdir, token, extra_env=merged, redirect=redirect)
+    drive = asyncio.run(_drive(params, token, timeout))
+
+    report = _read_json(paths["report"])
+    server_events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
+    strace_text = _read_text(paths["strace_server"]) if report.get("server_started") else None
+    problem = observe.integrity_problem(bool(report.get("sealed")), bool(report.get("server_started")),
+                                        strace_text, server_events)
+    result = problem if problem is not None else observe.classify_redirect_follow(
+        server_events, sentinel_port=p1, canary_port=p2, nonce=nonce)
+    return {"server": list(argv), "token": token, "upstream_keys": list(upstream_keys),
+            "sentinel_port": p1, "canary_port": p2, **result,
+            "attempts": [_summary(ev, token) for ev in server_events],
+            "proof": report.get("checks", {}), "proof_error": report.get("error"),
+            "tools": [t["name"] for t in drive["tools"]], "calls": drive["calls"],
+            "driver_error": drive["error"], "workdir": workdir}

@@ -65,6 +65,9 @@ _METHOD_VERDICT = {
     "positive_control_unverified": INCONCLUSIVE,  # a probe's OWN precondition failed (path_traversal: the
                                                   # tool never reached its own in-root canary) — an
                                                   # out-of-root result cannot be trusted (not CLEAN/PROVEN)
+    "redirect_not_confirmed":      INCONCLUSIVE,  # #28 upstream-redirect SSRF: the server never called the
+                                                  # sentinel upstream, or used TLS we can't terminate to emit
+                                                  # the 302 — the redirect-follow is unobservable (not CLEAN)
     "not_applicable":  NOT_APPLICABLE,  # no candidate tool/param, or nothing to test
     # Unit 3, runtime observation in a sealed namespace. Only the token leaving is proof. Everything else is
     # a lead, a clean result that the seal and the inspection support, or INCONCLUSIVE (never a silent CLEAN).

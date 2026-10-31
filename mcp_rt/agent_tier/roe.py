@@ -57,6 +57,9 @@ class RoE:
     classes: list[str]
     surface_tools: list[str] = field(default_factory=list)
     env: dict = field(default_factory=dict)        # generic env overrides for the sealed target (e.g. HOME)
+    upstream_url_keys: list = field(default_factory=list)  # #28: env/config key(s) holding a base URL the
+                                                           # server calls — set to the sentinel for the
+                                                           # redirect-follow SSRF oracle (data, not code)
     mode: str = "offline"
     budget: Budget = field(default_factory=Budget)
     kill_switch: str = ""
@@ -107,6 +110,11 @@ def load_roe(path: str | Path) -> RoE:
     # only inside the seal (build_sealed_launcher extra_env) — it cannot widen scope or touch the host.
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise RoEError('env must be an object of string->string (e.g. {"HOME": "/path"})')
+    uk = d.get("upstream_url_keys") or []
+    # #28: the env/config key(s) that hold a base URL the server calls (e.g. ["ATLASSIAN_URL"]). Data, not
+    # code — the probe sets each to a loopback sentinel at runtime; NO server-specific key is hardcoded.
+    if not isinstance(uk, list) or not all(isinstance(x, str) for x in uk):
+        raise RoEError('upstream_url_keys must be a list of strings (env keys holding the server base URL)')
     surface = d.get("surface") or {}
     return RoE(
         target_id=str(target.get("id") or "unnamed"),
@@ -115,6 +123,7 @@ def load_roe(path: str | Path) -> RoE:
         classes=[str(c) for c in classes],
         surface_tools=[str(t) for t in (surface.get("tools") or [])],
         env=dict(env),
+        upstream_url_keys=[str(k) for k in uk],
         mode=str(d.get("mode") or "offline"),
         budget=budget,
         kill_switch=str(d.get("kill_switch") or ""),
