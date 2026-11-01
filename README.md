@@ -327,6 +327,20 @@ Clearly marked so nothing here is sold as present-tense:
 
 ---
 
+## Credited disclosures
+
+Real vulnerabilities in open-source MCP servers, reported privately, fixed by the maintainers, and
+published with reporter credit to [@MartOcd1709](https://github.com/MartOcd1709):
+
+| Advisory | Project | Severity | Published | Issue |
+|---|---|---|---|---|
+| [GHSA-7v25-vcp6-4hcr](https://github.com/tumf/mcp-shell-server/security/advisories/GHSA-7v25-vcp6-4hcr) | tumf/mcp-shell-server | High | 2026-09-19 | Git global options bypass persistent config policy and enable command execution (fixed in 1.1.12) |
+| [GHSA-qmx6-47vm-3vf7](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-qmx6-47vm-3vf7) | tufantunc/ssh-mcp | High | 2026-09-24 | Interpreter-carrier allowlist incomplete: `osascript`, `lua`, `deno`, `bun`, `Rscript` launder a command to `safe` (fixed in PR #232) |
+| [GHSA-mwmj-jr2h-q546](https://github.com/tufantunc/ssh-mcp/security/advisories/GHSA-mwmj-jr2h-q546) | tufantunc/ssh-mcp | High | 2026-09-27 | A readOnly profile can change system state through allowlisted "reader" binaries |
+
+All three are the classes mcp-rt's command-injection oracle targets: allowlist and argument-policy
+bypasses that turn a restricted tool into command execution.
+
 ## Responsible use
 
 Synthetic honeytokens only · loopback canary (nothing leaves the host) · untrusted servers run sealed ·
