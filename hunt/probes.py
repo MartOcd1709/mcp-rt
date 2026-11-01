@@ -62,6 +62,12 @@ _METHOD_VERDICT = {
     "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
     "error":           INCONCLUSIVE,    # the call / transport failed — the test could not be run
+    "positive_control_unverified": INCONCLUSIVE,  # a probe's OWN precondition failed (path_traversal: the
+                                                  # tool never reached its own in-root canary) — an
+                                                  # out-of-root result cannot be trusted (not CLEAN/PROVEN)
+    "redirect_not_confirmed":      INCONCLUSIVE,  # #28 upstream-redirect SSRF: the server never called the
+                                                  # sentinel upstream, or used TLS we can't terminate to emit
+                                                  # the 302 — the redirect-follow is unobservable (not CLEAN)
     "not_applicable":  NOT_APPLICABLE,  # no candidate tool/param, or nothing to test
     # Unit 3, runtime observation in a sealed namespace. Only the token leaving is proof. Everything else is
     # a lead, a clean result that the seal and the inspection support, or INCONCLUSIVE (never a silent CLEAN).
@@ -635,6 +641,131 @@ def _output_file_params(tool):
     return None
 
 
+# The two NAIVE out-of-root vectors (plain absolute + plain ../). If one of these ALREADY reaches our
+# out-of-root canary the server enforces no boundary — unrestricted file I/O is its declared contract
+# (by_design), not a traversal escape. PROVEN requires a boundary (naive blocked) that a CRAFTED vector
+# then escapes. This is #27's A/B/C discrimination (companion to the #22 SSRF by-design control).
+_PT_NAIVE_LABELS = ("plain-absolute-outside", "dotdot-outside")
+
+
+def _writable_root(roots):
+    """First advertised root the probe can plant a canary into (for the in-root positive control).
+    None if the server advertised no root, or none is writable by the probe process."""
+    for r in (roots or []):
+        rp = str(r).rstrip(os.sep)
+        if os.path.isdir(rp) and os.access(rp, os.W_OK):
+            return rp
+    return None
+
+
+def _ctrl_root(roots):
+    """(writable_root, "") or (None, reason) — the in-root location for the positive control."""
+    wr = _writable_root(roots)
+    if wr:
+        return wr, ""
+    return None, ("no advertised root to plant an in-root positive control" if not roots
+                  else "advertised root not writable — cannot plant the in-root positive control")
+
+
+def _pt_inconclusive(tool_name, marker, reason):
+    """couldn't-observe != clean, applied to the probe's OWN precondition: we could not confirm the server
+    performs verifiable in-bounds file I/O, so no out-of-root result can be trusted -> INCONCLUSIVE."""
+    return ProbeResult("path_traversal", tool_name, "positive_control_unverified", marker=marker,
+        rationale=f"positive control unverified ({reason}): could not confirm in-bounds file I/O, so an "
+                  "out-of-root result cannot be trusted (INCONCLUSIVE — not CLEAN, not PROVEN)")
+
+
+async def _relative_roundtrip(session, tools, cleanups):
+    """SUBCASE-2 in-bounds control when NO root is advertised: verify the server does in-bounds file I/O via
+    a RELATIVE round-trip — write a canary to a relative name with any writer, read it back with any reader.
+    A relative path resolves to the server's OWN cwd/workspace (the only in-bounds location we can both
+    reach and reference). (ok, reason); ok=False => cannot construct / did not round-trip => INCONCLUSIVE."""
+    wt = next(((t, _writer_params(t)) for t in tools if _writer_params(t)), None)
+    rt = next((t for t in tools
+               if _candidate_params(t, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
+               and not _writer_params(t) and not _output_file_params(t)), None)
+    if not wt or rt is None:
+        return False, "no reader+writer pair to construct a relative in-bounds control"
+    writer, (path_p, content_p) = wt
+    rel = "pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt"
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    try:
+        await session.call_tool(writer.name, _build_args(writer, {path_p: rel, content_p: cmk}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    for param in _candidate_params(rt, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"]):
+        try:
+            txt = _result_text(await session.call_tool(rt.name, _build_args(rt, {param: _inject(rt, param, rel)})))
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if cmk in txt:
+            return True, "server round-trips a relative in-bounds canary (write+read in its own workspace)"
+    return False, "server did not round-trip a relative in-bounds canary"
+
+
+async def _read_control(session, tool, params, roots, cleanups, tools):
+    """Positive control for a reader. Advertised root: plant a canary INSIDE the root and confirm THIS tool
+    returns it via a plain in-root path (so a no-leak is a trustworthy CLEAN and a crafted-only leak is a
+    real bypass). No advertised root: fall back to the relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        cf.write_text(cmk)
+    except Exception:  # noqa: BLE001
+        return False, "could not plant the in-root read canary"
+    for param in params:
+        try:
+            txt = _result_text(await session.call_tool(
+                tool.name, _build_args(tool, {param: _inject(tool, param, str(cf))})))
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if cmk in txt:
+            return True, "tool read its own in-root canary via a plain path"
+    return False, "tool did not read its own in-root canary via a plain path"
+
+
+async def _write_control(session, tool, path_p, content_p, roots, cleanups, tools):
+    """Positive control for a writer. Advertised root: write a marker to a plain in-root path and confirm it
+    landed. No advertised root: relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        await session.call_tool(tool.name, _build_args(tool, {path_p: str(cf), content_p: cmk}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    if cf.exists() and cmk in cf.read_text(errors="replace"):
+        return True, "tool wrote its own in-root canary via a plain path"
+    return False, "tool did not write its own in-root canary via a plain path"
+
+
+async def _output_control(session, tool, op, roots, cleanups, tools):
+    """Positive control for an output-file tool. Advertised root: save to a plain in-root path and confirm
+    the file appears. No advertised root: relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".out")
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, str(cf))}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    if cf.exists():
+        return True, "tool wrote its own in-root output canary via a plain path"
+    return False, "tool did not write its own in-root output canary via a plain path"
+
+
 async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     out = []
     roots = await _allowed_roots(session, tools)   # the server's managed root(s); escapes target OUTSIDE them
@@ -676,72 +807,191 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                 path_p, content_p = writer
                 wmark = "PW-" + uuid.uuid4().hex[:12]
                 target = d / f"escaped_{wmark}.txt"       # outside any server root
-                returned, raised = [], []
-                try:
-                    r = await session.call_tool(tool.name, _build_args(
-                        tool, {path_p: str(target), content_p: wmark}))
-                    returned.append(_result_text(r))
-                except Exception as exc:  # noqa: BLE001
-                    raised.append(str(exc))
-                await asyncio.sleep(0.1)
-                wrote = target.exists() and wmark in target.read_text(errors="replace")
-                out.append(ProbeResult("path_traversal", tool.name,
-                                       "oracle" if wrote else _negative_method(returned, raised),
-                                       marker=wmark, evidence=f"{tool.name}(write outside root)",
-                                       rationale=("wrote a file outside its root (arbitrary write)"
-                                                  if wrote else "write confined to root")))
+                abs_p = str(target)
+                returned, raised, landed = [], [], {}
+                # NAIVE absolute write first: if it lands, the tool writes anywhere it is told —
+                # unrestricted write is its declared contract (by_design). Only if the plain write is
+                # blocked do we test whether a ../ vector ESCAPES the boundary (PROVEN).
+                for lbl, path_val in (("plain-absolute-outside", abs_p),
+                                      ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
+                    target.unlink(missing_ok=True)
+                    try:
+                        returned.append(_result_text(await session.call_tool(
+                            tool.name, _build_args(tool, {path_p: path_val, content_p: wmark}))))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
+                    await asyncio.sleep(0.1)
+                    landed[lbl] = target.exists() and wmark in target.read_text(errors="replace")
+                    if lbl == "plain-absolute-outside" and landed[lbl]:
+                        break                              # no boundary -> by_design, don't bother crafting
+                target.unlink(missing_ok=True)
+                refused = any(_is_refusal(t) for t in returned + raised)
+                naive_land = landed.get("plain-absolute-outside")
+                crafted_land = landed.get("dotdot-outside")
+                if naive_land or crafted_land:
+                    if roots:                                  # a boundary is DECLARED -> any escape is a finding
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                            evidence=f"{tool.name}(out-of-root write)",
+                            rationale=("the server advertises a root, yet a plain absolute out-of-root write "
+                                       "landed — the declared boundary is NOT enforced (arbitrary write)"
+                                       if naive_land else
+                                       "the server advertises a root, a plain absolute out-of-root write was "
+                                       "blocked, yet a ../ vector wrote our file outside it — boundary ESCAPED")))
+                    elif naive_land:                           # no declared boundary -> unrestricted write is the contract
+                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=wmark,
+                            evidence=f"{tool.name}(absolute out-of-root write)",
+                            rationale="no boundary advertised and a plain absolute out-of-root write already "
+                                      "succeeds: unrestricted file write is the tool's declared contract — "
+                                      "by-design, not a traversal finding"))
+                    else:                                      # SUBCASE-1: no root, plain blocked, ../ escaped
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                            evidence=f"{tool.name}(dotdot write escape)",
+                            rationale="no advertised root, but a plain absolute out-of-root write was blocked "
+                                      "while a ../ vector wrote our file outside — an intended-but-bypassable "
+                                      "filter (real traversal write)"))
+                    continue
+                # No out-of-root write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
+                ctrl_ok, ctrl_why = await _write_control(session, tool, path_p, content_p, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, wmark, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=wmark,
+                        rationale="boundary held: in-bounds write verified, out-of-root write refused (plain and ../)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=wmark,
+                        evidence=f"{tool.name}(write outside root)",
+                        rationale="write confined (in-bounds positive control passed; no out-of-root write landed)"))
                 continue
             op = _output_file_params(tool)
             if op:                                        # output-file tool (content generated internally)
                 omark = "PTC-" + uuid.uuid4().hex[:10]
                 out_file = d / f"escaped_{omark}.out"     # in OUR out-of-root temp — we can stat it
-                returned, raised, how = [], [], ""
-                for t, lbl in ((str(out_file), "absolute-out-of-root"),
-                               ("../" * 20 + str(out_file).lstrip(os.sep), "dotdot-out-of-root")):
+                abs_p = str(out_file)
+                returned, raised, landed = [], [], {}
+                # NAIVE absolute output path first: a save-file tool that writes to any absolute path saves
+                # wherever told (by_design). Only a confined output dir, escaped by a ../ vector, is PROVEN.
+                for lbl, t in (("plain-absolute-outside", abs_p),
+                               ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
+                    out_file.unlink(missing_ok=True)
                     try:
                         r = await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, t)}))
                         returned.append(_result_text(r))
                     except Exception as exc:  # noqa: BLE001
                         raised.append(str(exc))
                     await asyncio.sleep(0.1)
-                    if out_file.exists():                 # OUR uniquely-named file landed outside -> escape
-                        how = lbl
-                        break
-                out.append(ProbeResult("path_traversal", tool.name,
-                    "oracle" if how else _negative_method(returned, raised), marker=omark,
-                    evidence=(how or f"{tool.name}(output-dir escape)"),
-                    rationale=(f"output-file tool wrote OUR file outside its output directory via {how} "
-                               "(write-escape)" if how else "output path confined to the output directory")))
-                try:
-                    out_file.unlink()
-                except Exception:  # noqa: BLE001
-                    pass
+                    landed[lbl] = out_file.exists()       # OUR uniquely-named file landed outside -> escape
+                    if lbl == "plain-absolute-outside" and landed[lbl]:
+                        break                              # saves to any absolute path -> by_design
+                out_file.unlink(missing_ok=True)
+                refused = any(_is_refusal(t) for t in returned + raised)
+                naive_land = landed.get("plain-absolute-outside")
+                crafted_land = landed.get("dotdot-outside")
+                if naive_land or crafted_land:
+                    if roots:                                  # a boundary is DECLARED -> any escape is a finding
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                            evidence=("absolute-out-of-root" if naive_land else "dotdot-out-of-root"),
+                            rationale=("the server advertises a root, yet the tool saved OUR file to a plain "
+                                       "absolute out-of-directory path — output confinement NOT enforced"
+                                       if naive_land else
+                                       "the server advertises a root, the plain output path was confined, yet "
+                                       "a ../ vector wrote OUR file outside it — boundary ESCAPED (write-escape)")))
+                    elif naive_land:                           # no declared boundary -> saves wherever told
+                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=omark,
+                            evidence=f"{tool.name}(absolute output path)",
+                            rationale="no boundary advertised and a plain absolute output path already "
+                                      "succeeds: the tool saves wherever told — by-design"))
+                    else:                                      # SUBCASE-1: no root, plain confined, ../ escaped
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                            evidence="dotdot-out-of-root",
+                            rationale="no advertised root, but the plain output path was confined while a ../ "
+                                      "vector wrote OUR file outside — an intended-but-bypassable filter "
+                                      "(real write-escape)"))
+                    continue
+                # No out-of-dir write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
+                ctrl_ok, ctrl_why = await _output_control(session, tool, op, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, omark, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=omark,
+                        rationale="output path confined to the output directory (refused out-of-dir writes)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=omark,
+                        evidence=f"{tool.name}(output-dir escape)",
+                        rationale="output path confined to the output directory (in-bounds positive control passed)"))
                 continue
             params = _candidate_params(tool, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
             if not params:
                 continue
             had_reader = True
-            fired, used, how = False, "", ""
+            naive = [v for v in read_payloads if v[2] in _PT_NAIVE_LABELS]
+            crafted = [v for v in read_payloads if v[2] not in _PT_NAIVE_LABELS]
             returned, raised = [], []
+            naive_leak = crafted_leak = refused = False
+            used = how = ""
+            # NAIVE first (plain absolute / ../), then the crafted CWE-22/23 bypass vectors. Whether a leak
+            # is a FINDING depends on whether a boundary is DECLARED (advertised root), decided below.
             for param in params:
-                for p, expect, label in read_payloads:
+                for p, expect, label in naive:
                     try:
-                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                        txt = _result_text(r)
+                        txt = _result_text(await session.call_tool(
+                            tool.name, _build_args(tool, {param: _inject(tool, param, p)})))
                         returned.append(txt)
                     except Exception as exc:  # noqa: BLE001
                         txt = ""
                         raised.append(str(exc))
-                    if expect and expect in txt:          # only OUR planted marker counts
-                        fired, used, how = True, p, label
+                    if expect and expect in txt:
+                        naive_leak, used, how = True, p, label
                         break
-                if fired:
+                    if _is_refusal(txt):
+                        refused = True
+                if naive_leak:
                     break
-            out.append(ProbeResult("path_traversal", tool.name,
-                                   "oracle" if fired else _negative_method(returned, raised), marker=marker,
-                                   evidence=used,
-                                   rationale=(f"returned an out-of-root canary via {how} (planted canary "
-                                              "leaked)" if fired else "did not return the out-of-root canary")))
+            if not naive_leak:
+                for param in params:
+                    for p, expect, label in crafted:
+                        try:
+                            txt = _result_text(await session.call_tool(
+                                tool.name, _build_args(tool, {param: _inject(tool, param, p)})))
+                            returned.append(txt)
+                        except Exception as exc:  # noqa: BLE001
+                            txt = ""
+                            raised.append(str(exc))
+                        if expect and expect in txt:
+                            crafted_leak, used, how = True, p, label
+                            break
+                        if _is_refusal(txt):
+                            refused = True
+                    if crafted_leak:
+                        break
+            if naive_leak or crafted_leak:
+                if roots:                                    # a boundary is DECLARED -> any out-of-root reach is a finding
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                        rationale=("the server advertises a root, yet a plain out-of-root path returned the "
+                                   "canary — the declared boundary is NOT enforced" if naive_leak else
+                                   f"the server advertises a root, a plain out-of-root path did not leak, yet a "
+                                   f"crafted vector ({how}) returned the out-of-root canary — boundary ESCAPED")))
+                elif naive_leak:                             # no declared boundary -> unrestricted read is the contract
+                    out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=marker,
+                        evidence=f"{tool.name} <- {how}",
+                        rationale="no boundary advertised and a plain out-of-root path already returns the "
+                                  "canary: unrestricted read is the tool's declared contract — by-design, "
+                                  "not traversal"))
+                else:                                        # SUBCASE-1: no root, plain denied, crafted leaked
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                        rationale=f"no advertised root, but a plain out-of-root path was denied while a crafted "
+                                  f"vector ({how}) returned the out-of-root canary — an intended-but-bypassable "
+                                  "filter (real traversal)"))
+            else:                                            # no leak -> positive-control split (CLEAN vs INCONCLUSIVE)
+                ctrl_ok, ctrl_why = await _read_control(session, tool, params, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, marker, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=marker,
+                        rationale="boundary held: in-bounds read verified, every out-of-root vector refused "
+                                  "(plain and crafted)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=marker,
+                        rationale="did not return the out-of-root canary (in-bounds positive control passed)"))
         # Honest NOT_APPLICABLE (never a silent CLEAN) for adjacent vectors we could not actually test.
         if had_reader and not sibling_planted:
             why = ("server's allowed root could not be determined at runtime" if not roots

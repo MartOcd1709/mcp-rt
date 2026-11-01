@@ -12,7 +12,7 @@ import base64
 import re
 
 from hunt.probes import verdict_for
-from mcp_rt.runtime.sandbox import has_ipv6_attempt, strace_destinations
+from mcp_rt.runtime.sandbox import _looks_http, has_ipv6_attempt, strace_destinations
 
 # A negative self-claim ("makes no external calls"). Checked against the egress that was observed.
 NEGATIVE_CLAIM = re.compile(
@@ -144,3 +144,31 @@ def verdict(*, sealed, server_started, events, strace_text, token, claim_text, r
     """events: the server-phase recorder records. strace_text: witness output, or None if it is missing."""
     problem = integrity_problem(sealed, server_started, strace_text, events)
     return problem if problem is not None else classify_egress(events, token, claim_text, refused_calls)
+
+
+def classify_redirect_follow(events, *, sentinel_port, canary_port, nonce):
+    """#28 upstream-redirect SSRF oracle. The sealed recorder answered the server's request to its CONFIGURED
+    upstream (sentinel_port) with a 302 to an INTERNAL canary (canary_port, path=<nonce>). Did the server
+    FOLLOW the redirect to the internal destination?
+      follows (requests the canary carrying our nonce)            -> VULNERABLE (oracle)
+      called the upstream, got the 302, did NOT request the canary -> CLEAN (oracle_negative; revalidated)
+      never called the upstream, OR used TLS we cannot 302         -> INCONCLUSIVE (redirect_not_confirmed)
+    Integrity (seal proven, recorder vs strace) is established by the caller, exactly like classify_egress."""
+    nonce_b = nonce.encode()
+    for e in events:
+        if e["proto"] == "tcp" and e["port"] == canary_port and nonce_b in base64.b64decode(e["payload"]):
+            return _out("oracle",
+                        f"server followed the upstream's 302 to the internal canary 127.0.0.1:{canary_port} "
+                        f"(nonce {nonce}) — redirect-follow SSRF", attempts=len(events))
+    sentinel = [e for e in events if e["proto"] == "tcp" and e["port"] == sentinel_port]
+    if not sentinel:
+        return _out("redirect_not_confirmed",
+                    f"the server never requested the configured upstream (sentinel 127.0.0.1:{sentinel_port}); "
+                    "the oracle was not exercised")
+    if any(_looks_http(base64.b64decode(e["payload"])) for e in sentinel):
+        return _out("oracle_negative",
+                    "server requested the upstream and received a 302 to the internal canary but did NOT "
+                    "follow it — revalidated/blocked the internal destination")
+    return _out("redirect_not_confirmed",
+                "the server's upstream request was not plaintext HTTP (TLS we cannot terminate to emit the "
+                "302); the redirect-follow is unobservable under the seal — INCONCLUSIVE, not CLEAN")

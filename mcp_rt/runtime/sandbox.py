@@ -65,17 +65,34 @@ def has_ipv6_attempt(text):
     return any(_ATTEMPT.match(line) and "AF_INET6" in line for line in (text or "").splitlines())
 
 
+_HTTP_METHODS = (b"GET ", b"POST ", b"PUT ", b"HEAD ", b"DELETE ", b"PATCH ", b"OPTIONS ")
+
+
+def _looks_http(buf):
+    """True if the bytes begin an HTTP/1.x request line (so a plaintext 302 can be emitted). A TLS
+    ClientHello (0x16 0x03 ...) is NOT http -> we cannot terminate it to emit a redirect, so the
+    redirect-follow is unobservable (INCONCLUSIVE), never CLEAN."""
+    return bytes(buf[:8]).startswith(_HTTP_METHODS)
+
+
 class Recorder:
     """Accepts every redirected or TPROXYed attempt, records it, and forwards nothing."""
 
-    def __init__(self, port, events_path):
+    def __init__(self, port, events_path, redirect=None):
         self.port = port
         self.events_path = events_path
+        self.redirect = redirect        # #28: {sentinel_port, canary_host, canary_port, nonce} or None
         self.phase = "proof"
         self._events = []
         self._lock = threading.Lock()
         self.tcp_ready = threading.Event()
         self.udp_ready = threading.Event()
+
+    def _r302(self):
+        r = self.redirect
+        loc = "http://%s:%d/%s" % (r["canary_host"], r["canary_port"], r["nonce"])
+        return ("HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                % loc).encode()
 
     def start(self):
         threading.Thread(target=self._tcp_accept, daemon=True).start()
@@ -111,7 +128,7 @@ class Recorder:
             dip = socket.inet_ntoa(raw[4:8])
         except OSError:
             dip, dport = None, None
-        buf, truncated = bytearray(), False
+        buf, truncated, emitted = bytearray(), False, False
         conn.settimeout(IDLE)
         try:
             while True:
@@ -121,6 +138,18 @@ class Recorder:
                 buf.extend(chunk)
                 if len(buf) > CAP:
                     truncated = True
+                    break
+                # SERVER-phase redirect oracle (#28): answer EXACTLY the sentinel dst with a 302 to the
+                # internal canary, once a full plaintext-HTTP request head is in. Scoped by SO_ORIGINAL_DST;
+                # every other dst (and a TLS ClientHello we cannot terminate) stays record-and-close.
+                if (not emitted and self.phase == "server" and self.redirect
+                        and dport == self.redirect["sentinel_port"]
+                        and _looks_http(buf) and b"\r\n\r\n" in buf):
+                    try:
+                        conn.sendall(self._r302())
+                    except OSError:
+                        pass
+                    emitted = True
                     break
         except OSError:
             pass
@@ -217,6 +246,7 @@ def main(argv=None):
     ap.add_argument("--server-json", required=True)
     ap.add_argument("--strace-server", required=True)
     ap.add_argument("--strace-probe", required=True)
+    ap.add_argument("--redirect")                      # #28: JSON {sentinel_port,canary_host,canary_port,nonce}
     ap.add_argument("--proof-only", action="store_true")
     args = ap.parse_args(argv)
     report = {"sealed": False, "checks": {}, "server_started": False, "server_rc": None, "error": None}
@@ -236,7 +266,7 @@ def main(argv=None):
         subprocess.run(["ip", "rule", "add", "fwmark", MARK, "lookup", POLICY_TABLE], check=True, capture_output=True)
         subprocess.run(["ip", "route", "add", "default", "dev", "lo", "table", POLICY_TABLE], check=True,
                        capture_output=True)
-        rec = Recorder(args.port, args.events)
+        rec = Recorder(args.port, args.events, redirect=json.loads(args.redirect) if args.redirect else None)
         rec.start()
         report["checks"] = prove(rec, args.host_netns_ino, args.port, args.workdir)
         report["sealed"] = bool(report["checks"]) and all(report["checks"].values())
