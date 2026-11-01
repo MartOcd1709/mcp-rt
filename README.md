@@ -6,10 +6,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Black Hat Arsenal](https://img.shields.io/badge/Black%20Hat-Arsenal%202026-red.svg)](https://www.blackhat.com/html/arsenal.html)
 
-> 🏆 **Selected for Black Hat Europe 2026 Arsenal.** This release is a ground-up evolution of that tool:
-> what began as an agent red-team framework is now a complete MCP security lifecycle engine — every
-> capability backed by a proof you can run. See [Recognition](#recognition).
-
 AI coding agents (Claude Code, Codex, Cursor, Cline, Gemini) connect to MCP servers that read your
 files, credentials, and network. Thousands are published; each is privileged by design. **mcp-rt tells
 you — with ground truth, not heuristics — whether a given MCP server is actually exploitable.**
@@ -333,12 +329,12 @@ Clearly marked so nothing here is sold as present-tense:
 
 ## Recognition
 
-**Black Hat Europe 2026 — Arsenal (selected).** mcp-rt was selected for the Black Hat Europe 2026 Arsenal
-as an agent red-team framework that proved credential exfiltration from Claude Code, Codex and Gemini
-through malicious MCP servers.
+**Black Hat Europe 2026 — Arsenal (selected).** The version of mcp-rt selected for the Black Hat Europe
+2026 Arsenal was an agent red-team framework that proved credential exfiltration from Claude Code, Codex
+and Gemini through malicious MCP servers.
 
-The current mcp-rt is a substantially different and far more advanced tool built on that research.
-Every row below comes with a proof a reviewer can run or open:
+Today's mcp-rt is a different, cutting-edge tool built on that research: a complete MCP security
+lifecycle engine. Every difference below comes with a proof you can run or open:
 
 | Black Hat Europe 2026 selection | mcp-rt today | Proof |
 |---|---|---|
