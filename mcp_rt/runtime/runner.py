@@ -1,0 +1,227 @@
+"""Host driver for the sealed runtime unit. Starts a server inside the launcher, drives it over MCP stdio, and
+assembles the verdict from what the recorder and the strace witness saw. The server runs only after the seal is proven.
+"""
+import asyncio
+import base64
+import json
+import os
+import random
+import secrets
+import sys
+import tempfile
+from pathlib import Path
+
+import mcp.types as types
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+from mcp_rt.runtime import observe
+
+LAUNCHER = Path(__file__).with_name("sandbox.py")
+CANARY = "http://127.0.0.1:9999/collect"
+CALL_TIMEOUT = 10.0
+GRACE = 2.0
+LIMITS = [
+    "seals IP egress only: unix-domain sockets to host daemons are not sealed in this unit",
+    "payloads are inspected in plaintext; TLS payloads are opaque and can clear nothing",
+    "IPv6 attempts are not captured by the IPv4 recorder and yield INCONCLUSIVE",
+]
+
+
+def _sample(spec, token, depth=0):
+    """A benign value for one schema node. Every string carries the test token."""
+    if not isinstance(spec, dict):
+        return token
+    if spec.get("enum"):
+        return spec["enum"][0]
+    kind = spec.get("type")
+    if isinstance(kind, list):
+        kind = next((k for k in kind if k != "null"), None)
+    if kind is None and spec.get("anyOf"):
+        return _sample(spec["anyOf"][0], token, depth)
+    if kind in (None, "string"):
+        return f"{token} sample"
+    if kind in ("integer", "number"):
+        return 1
+    if kind == "boolean":
+        return True
+    if kind == "array":
+        return [_sample(spec.get("items", {}), token, depth + 1)] if depth < 3 else []
+    if kind == "object":
+        props = spec.get("properties") or {}
+        return {k: _sample(v, token, depth + 1) for k, v in props.items()} if depth < 3 else {}
+    return token
+
+
+HINTS_PATH = Path(__file__).with_name("hints.json")
+
+
+def apply_hints(spec, token):
+    """Operator-supplied argument values for one tool. A string may carry {token}, replaced by this run's test value."""
+    return {k: v.replace("{token}", token) if isinstance(v, str) else v for k, v in (spec or {}).items()}
+
+
+def load_hints():
+    """Per-target operator inputs, as data (hints.json). The runtime code never names a target."""
+    return json.loads(HINTS_PATH.read_text())["targets"]
+
+
+async def _drive(params, token, timeout, hints=None):
+    out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "hinted_tools": [], "error": None}
+
+    async def elicit(context, request):
+        # Every elicitation is answered with the token, so a server that asks for a secret gets ours.
+        schema = getattr(request, "requestedSchema", None) or {}
+        out["elicitations"].append(sorted((schema.get("properties") or {}).keys()))
+        content = {k: _sample(v, token) for k, v in (schema.get("properties") or {}).items()}
+        return types.ElicitResult(action="accept", content=content)
+    try:
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write, elicitation_callback=elicit) as session:
+                init = await asyncio.wait_for(session.initialize(), timeout)
+                out["instructions"] = init.instructions
+                out["server_name"] = init.serverInfo.name if init.serverInfo else None
+                for tool in (await asyncio.wait_for(session.list_tools(), timeout)).tools:
+                    schema = tool.inputSchema or {}
+                    out["tools"].append({"name": tool.name, "description": tool.description or "",
+                                         "inputSchema": schema})
+                    args = {k: _sample(v, token) for k, v in (schema.get("properties") or {}).items()}
+                    if hints and tool.name in hints:
+                        args.update(apply_hints(hints[tool.name], token))
+                        out["hinted_tools"].append(tool.name)
+                    try:
+                        res = await asyncio.wait_for(session.call_tool(tool.name, args), CALL_TIMEOUT)
+                        text = " ".join(getattr(c, "text", "") or "" for c in res.content)[:200]
+                        out["calls"].append({"tool": tool.name, "isError": bool(res.isError), "text": text})
+                    except Exception as exc:  # a failing tool is a result, not a harness crash
+                        out["calls"].append({"tool": tool.name, "error": repr(exc)[:200]})
+                await asyncio.sleep(GRACE)
+    except Exception as exc:
+        out["error"] = repr(exc)[:300]
+    return out
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _read_events(path):
+    try:
+        return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def _read_text(path):
+    try:
+        return Path(path).read_text()
+    except OSError:
+        return None
+
+
+def _summary(ev, token):
+    payload = base64.b64decode(ev["payload"])
+    return {"proto": ev["proto"], "dst": ev["dst"], "port": ev["port"], "bytes": len(payload),
+            "truncated": ev["truncated"], "inspectable": observe.inspectable(payload, ev["truncated"], ev["port"]),
+            "token_hits": observe.token_hits(payload, token)}
+
+
+def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=None):
+    """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
+    Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
+    <target argv>`, which proves the seal and only then execs the target with stdio inherited. The host opens
+    an ordinary ClientSession against it. `paths` names the launcher's report/events/strace files.
+
+    `redirect` (#28, optional): {sentinel_port, canary_host, canary_port, nonce}. When set, the sealed
+    recorder answers EXACTLY the sentinel dst with a 302 to the internal canary in the SERVER phase — the
+    upstream-redirect SSRF oracle. Everything still routes to the one recorder; nothing leaves the seal."""
+    names = {"report": "report.json", "events": "events.jsonl", "strace_server": "server.strace",
+             "strace_probe": "probe.strace", "server_json": "server.json"}
+    paths = {k: os.path.join(workdir, v) for k, v in names.items()}
+    Path(paths["server_json"]).write_text(json.dumps(list(target_argv)))
+    port = random.SystemRandom().randint(20000, 60000)
+    host_ino = os.stat("/proc/self/ns/net").st_ino
+    launcher = ["unshare", "-rn", "--", sys.executable, "-I", str(LAUNCHER),
+                "--report", paths["report"], "--events", paths["events"], "--workdir", workdir,
+                "--host-netns-ino", str(host_ino), "--port", str(port), "--server-json", paths["server_json"],
+                "--strace-server", paths["strace_server"], "--strace-probe", paths["strace_probe"]]
+    if redirect:
+        launcher += ["--redirect", json.dumps(redirect)]
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": workdir, "LANG": "C.UTF-8",
+           "MCPRT_TEST_VALUE": token, "MCPRT_CANARY": CANARY}
+    if extra_env:                     # e.g. dummy vars for config recovery; sandbox.py execs the target with
+        env.update(extra_env)         # no env= so the target inherits this env (see sandbox.py Popen)
+    return StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir), paths
+
+
+def run_server(argv, *, token=None, timeout=120.0, hints=None):
+    """Run one server under the sealed launcher and return its verdict record."""
+    token = token or "HT-" + secrets.token_hex(8)
+    workdir = tempfile.mkdtemp(prefix="mcprt-rt-")
+    params, paths = build_sealed_launcher(argv, workdir, token)
+    drive = asyncio.run(_drive(params, token, timeout, hints))
+
+    report = _read_json(paths["report"])
+    server_events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
+    strace_text = _read_text(paths["strace_server"]) if report.get("server_started") else None
+
+    parts = [drive.get("server_name") or "", drive.get("instructions") or ""]
+    for tool in drive["tools"]:
+        parts += [tool["name"], tool["description"]]
+        for spec in (tool["inputSchema"].get("properties") or {}).values():
+            if isinstance(spec, dict):
+                parts.append(spec.get("description") or "")
+    refused = [c["tool"] for c in drive["calls"]
+               if c.get("isError") or "error" in c or observe.REFUSAL.match(c.get("text") or "")]
+    result = observe.verdict(sealed=bool(report.get("sealed")), server_started=bool(report.get("server_started")),
+                             events=server_events, strace_text=strace_text, token=token,
+                             claim_text=" \n ".join(parts), refused_calls=refused)
+    return {"server": list(argv), "token": token, **result,
+            "attempts": [_summary(ev, token) for ev in server_events],
+            "proof": report.get("checks", {}), "proof_error": report.get("error"),
+            "tools": [t["name"] for t in drive["tools"]], "calls": drive["calls"],
+            "driver_error": drive["error"], "elicitations": drive["elicitations"], "refused": refused,
+            "hinted": bool(hints), "hinted_tools": drive["hinted_tools"],
+            "limits": LIMITS, "workdir": workdir}
+
+
+def assess_redirect_follow(argv, *, upstream_keys, env=None, token=None, timeout=120.0):
+    """#28 upstream-redirect SSRF oracle (sealed, black-box). Point the server's CONFIGURED upstream — the
+    RoE-supplied env key(s) that hold its base URL (server is DATA; NO hardcoded key) — at a loopback
+    sentinel. The sealed recorder answers that sentinel with a 302 to an internal canary and records whether
+    the server FOLLOWS it. Integrity first (seal proven, recorder vs strace), then classify_redirect_follow.
+    Returns a verdict record (run_server shape)."""
+    if not upstream_keys:
+        return {"server": list(argv), "verdict": "INCONCLUSIVE", "method": "redirect_not_confirmed",
+                "evidence": "no upstream URL key supplied (the RoE must name the env/config key that holds the "
+                            "server's base URL); cannot configure the sentinel", "attempts": []}
+    token = token or "HT-" + secrets.token_hex(8)
+    workdir = tempfile.mkdtemp(prefix="mcprt-rr-")
+    rnd = random.SystemRandom()
+    p1 = rnd.randint(20000, 60000)
+    p2 = rnd.randint(20000, 60000)
+    while p2 == p1:
+        p2 = rnd.randint(20000, 60000)
+    nonce = "rr" + secrets.token_hex(8)
+    redirect = {"sentinel_port": p1, "canary_host": "127.0.0.1", "canary_port": p2, "nonce": nonce}
+    merged = dict(env or {})                                          # RoE-supplied auth/config (reach the vuln branch)
+    merged.update({k: "http://127.0.0.1:%d/" % p1 for k in upstream_keys})   # point every named upstream at the sentinel
+    params, paths = build_sealed_launcher(argv, workdir, token, extra_env=merged, redirect=redirect)
+    drive = asyncio.run(_drive(params, token, timeout))
+
+    report = _read_json(paths["report"])
+    server_events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
+    strace_text = _read_text(paths["strace_server"]) if report.get("server_started") else None
+    problem = observe.integrity_problem(bool(report.get("sealed")), bool(report.get("server_started")),
+                                        strace_text, server_events)
+    result = problem if problem is not None else observe.classify_redirect_follow(
+        server_events, sentinel_port=p1, canary_port=p2, nonce=nonce)
+    return {"server": list(argv), "token": token, "upstream_keys": list(upstream_keys),
+            "sentinel_port": p1, "canary_port": p2, **result,
+            "attempts": [_summary(ev, token) for ev in server_events],
+            "proof": report.get("checks", {}), "proof_error": report.get("error"),
+            "tools": [t["name"] for t in drive["tools"]], "calls": drive["calls"],
+            "driver_error": drive["error"], "workdir": workdir}

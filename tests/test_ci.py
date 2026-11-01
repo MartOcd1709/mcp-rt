@@ -1,5 +1,8 @@
-"""M5: CI gate — config parsing, SARIF mapping, and fail-on logic (no network)."""
-from hunt.ci import parse_mcp_config, should_fail, to_sarif
+"""M5: CI gate — config parsing, SARIF mapping, fail-on logic, and per-PR attestations (no network)."""
+import json
+
+from hunt.ci import _write_attestations, parse_mcp_config, should_fail, to_sarif
+from mcp_rt import attest
 
 _FINDINGS = [
     {"cls": "command_injection", "tool": "run", "sev": "Critical", "cwe": "CWE-78",
@@ -43,3 +46,17 @@ def test_should_fail_gate():
     highs = [{"sev": "High"}]
     assert should_fail(highs, "critical") is False             # no Critical -> critical gate passes
     assert should_fail(highs, "high") is True
+
+
+def test_ci_writes_verifiable_attestations(tmp_path):
+    # Per-PR attestation output: a signed, verifiable attestation + badge per server, + registry.
+    scans = [{"name": "fs-srv", "report": {"target": "npx -y @mcp/fs", "verdict": "CLEAN",
+                                           "scanned_at": "2026-10-09T00:00:00", "findings": [],
+                                           "coverage": [{"cls": "path_traversal", "verdict": "CLEAN"}]}}]
+    n = _write_attestations(scans, str(tmp_path), key_path=None)
+    assert n == 1
+    att = tmp_path / "fs-srv.attestation.json"
+    assert att.exists() and (tmp_path / "fs-srv.badge.svg").exists()
+    assert (tmp_path / "index.html").exists()                  # registry built
+    ok, _ = attest.verify(json.loads(att.read_text()))
+    assert ok                                                   # the CI-signed attestation verifies

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-07T20:54:56",
+  "generated_at": "2026-10-13T11:01:16",
   "class_count": 13,
   "detection_classes": [
     {
@@ -178,11 +178,13 @@
     }
   ],
   "ledger": {
-    "servers_tested": 152,
-    "confirmed": 2,
-    "clean": 69,
-    "inconclusive": 81,
-    "under_coordinated_disclosure": 2,
+    "servers_tested": 156,
+    "servers_ran": 112,
+    "confirmed": 4,
+    "clean": 71,
+    "inconclusive": 37,
+    "setup_failed": 44,
+    "under_coordinated_disclosure": 4,
     "candidates_triaged_out": 92,
     "clean_named": [
       "@achmadya-dev/mcp-mysql-query@0.3.2",
@@ -227,9 +229,11 @@
       "agentic_terminal_mcp_sk@0.1.0",
       "alibabacloud-dms-mcp-server-inner@0.1.9",
       "alibabacloud-dms-mcp-server@0.1.23",
+      "atlassian-jira-mcp (indirect-injection via ticket)",
       "codepage-bridge-mcp",
       "douban-mcp-cli@1.0.0-alpha.0",
       "hostinger-api-mcp",
+      "mcp-atlassian",
       "mcp-code-context",
       "mcp-fetch-server",
       "mcp-pdf-server",

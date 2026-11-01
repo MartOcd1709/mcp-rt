@@ -1,0 +1,11 @@
+{
+  "_comment": "Operator-supplied valid inputs, per target, as DATA. The runtime code never names a target. A string may carry {token}, which each run replaces with its own test value. The downstream tool name is taken from the server's own tool description ('Available downstream tools: ...'). The argument key is arbitrary: the lab handlers ignore it. A control gets the identical input as its attack twin, so only behavior differs.",
+  "targets": {
+    "proxy_aggregator": {
+      "gateway_call": {"tool": "tickets.list", "arguments": "{\"ticket\": \"{token}\"}"}
+    },
+    "benign_routing": {
+      "gateway_call": {"tool": "tickets.list", "arguments": "{\"ticket\": \"{token}\"}"}
+    }
+  }
+}

@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS scans (
     channel     TEXT,                       -- http_post / dns / ...
     destination TEXT,                       -- undeclared host the secret reached
     evidence    TEXT,                       -- path to a report/evidence json
-    notes       TEXT
+    notes       TEXT,
+    engine_version TEXT                     -- detection-logic digest at scan time (resume key, #19 B2)
 );
 CREATE TABLE IF NOT EXISTS disclosures (
     id           INTEGER PRIMARY KEY,
@@ -188,15 +189,36 @@ class DB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(_SCHEMA)
+        self._migrate()
         self.conn.commit()
 
+    def _migrate(self) -> None:
+        """Add columns to existing DBs in place (SQLite has no ADD COLUMN IF NOT EXISTS)."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(targets)")}
+        for col in ("meta TEXT", "last_seen REAL"):          # discovery asset metadata + freshness
+            if col.split()[0] not in cols:
+                self.conn.execute(f"ALTER TABLE targets ADD COLUMN {col}")
+        scols = {r["name"] for r in self.conn.execute("PRAGMA table_info(scans)")}
+        if "engine_version" not in scols:                    # #19 B2 resume key
+            self.conn.execute("ALTER TABLE scans ADD COLUMN engine_version TEXT")
+
     def add_target(self, name: str, repo_url: str = "", install_cmd: str = "",
-                   source: str = "", language: str = "", stars: int | None = None) -> int:
-        """Insert a target (idempotent on name+repo_url). Returns its id."""
+                   source: str = "", language: str = "", stars: int | None = None,
+                   meta: str = "") -> int:
+        """Insert a target (idempotent on name+repo_url). `meta` is a JSON blob of discovery detail
+        (transport, state, env-key names, discovery source). Returns its id; refreshes last_seen and
+        fills meta/install_cmd on a re-discovery so the asset record stays current."""
+        now = time.time()
         self.conn.execute(
-            "INSERT OR IGNORE INTO targets(name,repo_url,install_cmd,source,language,stars,added_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (name, repo_url, install_cmd, source, language, stars, time.time()))
+            "INSERT OR IGNORE INTO targets(name,repo_url,install_cmd,source,language,stars,added_at,"
+            "meta,last_seen) VALUES(?,?,?,?,?,?,?,?,?)",
+            (name, repo_url, install_cmd, source, language, stars, now, meta, now))
+        # On re-discovery keep the record fresh (last_seen) and backfill detail we now know.
+        self.conn.execute(
+            "UPDATE targets SET last_seen=?, meta=COALESCE(NULLIF(?,''),meta), "
+            "install_cmd=COALESCE(NULLIF(?,''),install_cmd), source=COALESCE(NULLIF(?,''),source) "
+            "WHERE name=? AND repo_url=?",
+            (now, meta, install_cmd, source, name, repo_url))
         self.conn.commit()
         # Always resolve the real id by lookup — lastrowid is unreliable after INSERT OR IGNORE
         # when the row already existed (it returns a stale rowid, which breaks the FK on add_scan).
@@ -206,16 +228,24 @@ class DB:
 
     def add_scan(self, target_id: int, *, mode: str, verdict: str, agent: str = "",
                  marker: str = "", channel: str = "", destination: str = "",
-                 evidence: str = "", notes: str = "") -> int:
+                 evidence: str = "", notes: str = "", engine_version: str = "") -> int:
         if verdict not in VERDICTS:
             raise ValueError(f"verdict {verdict!r} not in {sorted(VERDICTS)}")
         cur = self.conn.execute(
             "INSERT INTO scans(target_id,scanned_at,mode,verdict,agent,marker,channel,"
-            "destination,evidence,notes) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "destination,evidence,notes,engine_version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (target_id, time.time(), mode, verdict, agent, marker, channel,
-             destination, evidence, notes))
+             destination, evidence, notes, engine_version))
         self.conn.commit()
         return cur.lastrowid
+
+    def scanned_at_engine(self, name: str, engine_version: str) -> bool:
+        """True if this target name already has a scan recorded at this engine_version — the resume-skip key
+        (#19 B2). A changed probe source changes engine_version, so stale-engine scans do NOT match → re-scan."""
+        row = self.conn.execute(
+            "SELECT 1 FROM scans s JOIN targets t ON t.id = s.target_id "
+            "WHERE t.name = ? AND s.engine_version = ? LIMIT 1", (name, engine_version)).fetchone()
+        return row is not None
 
     def add_disclosure(self, target_id: int, scan_id: int | None = None, *,
                        status: str = "draft", advisory_id: str = "", cwe: str = "",
@@ -305,6 +335,14 @@ class DB:
             "rationale,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (scan_id, target_id, class_id or None, tool, verdict, severity, marker, evidence,
              rationale, time.time()))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def add_chain(self, target_id: int, *, title: str, severity: str = "") -> int:
+        """Record a correlated multi-step attack chain for a target (the demonstrated-impact unit)."""
+        cur = self.conn.execute(
+            "INSERT INTO chains(target_id,title,severity,created_at) VALUES(?,?,?,?)",
+            (target_id, title, severity, time.time()))
         self.conn.commit()
         return cur.lastrowid
 

@@ -80,3 +80,10 @@ hunt/benchmark_results/
 .scout-cache/
 .project_map.json
 backups/
+
+# local platform DB from 'mcp-rt serve'
+mcprt_platform.db
+mcprt_data/
+
+# Phase B scorer output: synthetic bench results. Never the real-target ledger (hunt/findings.db).
+bench_results/

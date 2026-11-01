@@ -46,6 +46,12 @@ import mcp_rt.payloads.structured_output_resource_link  # noqa: F401  MCP-28
 import mcp_rt.payloads.roots_path_manipulation           # noqa: F401  MCP-29
 
 from mcp_rt.adapters.cli_client import ClaudeCodeClient, ClineClient, CodexClient, GeminiCLIClient
+from mcp_rt.adapters.elicitation_host import (
+    NoElicitationHost,
+    SafeElicitationHost,
+    VulnerableElicitationHost,
+)
+from mcp_rt.adapters.sampling_host import NoSamplingHost, SafeSamplingHost, VulnerableSamplingHost
 from mcp_rt.harness import run_matrix
 from mcp_rt.payloads.registry import all_payloads
 from mcp_rt.report import print_matrix, write_html, write_json
@@ -108,9 +114,13 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--client",
-        choices=["claude-code", "cline", "codex", "gemini", "both"],
+        choices=["claude-code", "cline", "codex", "gemini", "both",
+                 "sampling-host", "elicitation-host"],
         default="both",
-        help="Which CLI client(s) to test (default: both = codex + gemini)",
+        help="Which client(s) to test (default: both = codex + gemini). "
+             "'sampling-host' = the offline MCP-00b archetype hosts (no keys/binaries): "
+             "proves the sampling gap fires un-gated and holds with human-in-the-loop. "
+             "'elicitation-host' = the same, for the MCP-00c elicitation gap.",
     )
     p.add_argument(
         "--timeout",
@@ -141,6 +151,12 @@ def main() -> None:
 
     if args.client == "both":
         clients = [CodexClient(timeout=args.timeout), GeminiCLIClient(timeout=args.timeout)]
+    elif args.client == "sampling-host":
+        # In-process MCP-00b archetypes: no binary, no key, no timeout.
+        clients = [VulnerableSamplingHost(), SafeSamplingHost(), NoSamplingHost()]
+    elif args.client == "elicitation-host":
+        # In-process MCP-00c archetypes: no binary, no key, no timeout.
+        clients = [VulnerableElicitationHost(), SafeElicitationHost(), NoElicitationHost()]
     else:
         clients = [_CLIENT_MAP[args.client](timeout=args.timeout)]
 
@@ -155,7 +171,15 @@ def main() -> None:
 
     all_p = all_payloads()
     by_name = {p.name: p for p in all_p}
-    payloads = [by_name[name] for name in FLAGSHIP_ATTACKS if name in by_name]
+    # The archetype hosts only exercise their own protocol-00 flow; the other flagship
+    # payloads issue no such request, so scope the run to that one class for a clean matrix.
+    if args.client == "sampling-host":
+        attack_names = ["sampling_instruction_laundering"]
+    elif args.client == "elicitation-host":
+        attack_names = ["elicitation_credential_harvest"]
+    else:
+        attack_names = FLAGSHIP_ATTACKS
+    payloads = [by_name[name] for name in attack_names if name in by_name]
 
     if not payloads:
         print("[FATAL] No flagship payloads found in registry -- check imports.", file=sys.stderr)

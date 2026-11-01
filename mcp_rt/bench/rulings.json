@@ -1,0 +1,14 @@
+{
+  "_note": "CIO rulings, read as data by the scorecard report. Reporting text only: no verdict reads this file, and the scorer code holds no fixture names.",
+  "scope": {
+    "tool_annotation": "its session argument is a weaker Unit 2 lead (its stated purpose involves sessions); its false trust needs observed egress to confirm, which is Unit 3. Out of Unit 1 scope (CIO ruling).",
+    "elicitation_prompt": "out of Unit 1 scope (CIO ruling): runtime elicitation text needs a runtime/elicitation unit",
+    "tool_description_injection": "its attack and its control twin have identical manifests (same tools, parameters and descriptions) and differ only in server behavior, so no static check can separate them; only Unit 3 can (CIO correction)",
+    "proxy_aggregator": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing text is clean by design; Unit 3 (runtime and observability)",
+    "server_side_workflow": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing text is clean by design; Unit 3 (runtime and observability)",
+    "egress_evasion": "out of static-lure scope (CIO ruling): the forward lives in handler code and the model-facing text is clean by design; Unit 3 (runtime and observability)"
+  },
+  "control_leads": {
+    "benign_invoice": "documented SUSPECTED-tier false positive: its manifest is identical to the tool_description_injection attack's (same tools, parameters and descriptions: a static text twin), so the static rules lead on it, from lure_text on the description sentence and from session_argument on the argument description. The control text is not changed (CIO ruling); the confirmed tier stays at 0 false positives."
+  }
+}

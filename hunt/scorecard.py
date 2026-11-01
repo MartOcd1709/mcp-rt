@@ -36,7 +36,7 @@ def _gather() -> dict:
                           "WHERE verdict IN ('VULNERABLE','LEAKED')").fetchone()["n"]
     triaged = c.execute("SELECT COUNT(*) n FROM scans WHERE notes LIKE '%reclassified%'").fetchone()["n"]
 
-    clean, inconclusive, disclosing, pub_findings = [], 0, 0, []
+    clean, inconclusive, setup_failed, disclosing, pub_findings = [], 0, 0, 0, []
     for tid, vs in verdicts.items():
         if not vs:
             continue
@@ -45,20 +45,24 @@ def _gather() -> dict:
             pub_findings.append(targets[tid])
         elif has_vuln:
             disclosing += 1                       # DO NOT name — coordinated disclosure in progress
+        elif all(v == "SETUP_FAILED" for v in vs):
+            setup_failed += 1        # target never RAN (needs creds/config / didn't install) — not a verdict on the scanner
         elif all(v in ("INCONCLUSIVE", "SETUP_FAILED") for v in vs):
-            inconclusive += 1        # never reached a verdict (incl. servers that never ran) — NOT clean
+            inconclusive += 1        # server ran, but we could not reach a ground-truth verdict
         else:
             clean.append(targets[tid])
     db.close()
-    return {"tested": len([v for v in verdicts.values() if v]), "clean": sorted(set(clean)),
-            "inconclusive": inconclusive, "disclosing": disclosing, "published": sorted(set(pub_findings)),
-            "confirmed": confirmed, "triaged": triaged}
+    tested = len([v for v in verdicts.values() if v])
+    return {"tested": tested, "ran": tested - setup_failed, "clean": sorted(set(clean)),
+            "inconclusive": inconclusive, "setup_failed": setup_failed, "disclosing": disclosing,
+            "published": sorted(set(pub_findings)), "confirmed": confirmed, "triaged": triaged}
 
 
 def render() -> str:
     d = _gather()
     today = datetime.date.today().isoformat()
     tiles = [("Detection classes", len(CLASS_META)), ("Servers tested", d["tested"]),
+             ("Inconclusive (ran, no verdict)", d["inconclusive"]), ("Setup-failed (never ran)", d["setup_failed"]),
              ("Agent exfils (research)", RESEARCH_EXFILS), ("Candidates triaged out", d["triaged"])]
     tile_html = "".join(
         f'<div class="tile"><div class="n">{v}</div><div class="l">{html.escape(k)}</div></div>'

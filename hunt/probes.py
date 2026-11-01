@@ -36,23 +36,98 @@ import sys
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-VULNERABLE, CLEAN, NOT_APPLICABLE = "VULNERABLE", "CLEAN", "NOT_APPLICABLE"
+from hunt.lure_text import RULE_WHY, non_string_type, scan_argument_name, scan_argument_text, scan_text
+
+VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
+    "VULNERABLE", "SUSPECTED", "CLEAN", "INCONCLUSIVE", "NOT_APPLICABLE")
+
+# The honesty spine: a verdict is DERIVED from HOW we reached it (confirmation_method), never set by a
+# probe directly — so "how sure are we" and "what do we claim" can never drift apart. verdict_for() is
+# the SOLE verdict source. PROOF (a planted oracle fired, or a causal effect shown against a baseline)
+# is the ONLY path to VULNERABLE; response-pattern / static / observed-change inference is SUSPECTED
+# (a lead, not a finding); a blocked test is INCONCLUSIVE (never silently CLEAN).
+_METHOD_VERDICT = {
+    "oracle":          VULNERABLE,      # a per-run planted marker/canary/sink/eval-product fired
+    "differential":    VULNERABLE,      # effect demonstrated against a without-payload baseline
+    "signature":       SUSPECTED,       # response-pattern inference only (e.g. a SQL parser error)
+    "static":          SUSPECTED,       # structural scan (e.g. concealed metadata) — intent inferred
+    "observed_change": SUSPECTED,       # in-session tool-def mutation — can't prove it's malicious
+    "oracle_negative": CLEAN,           # the oracle ran and nothing fired
+    "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
+    "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
+    "error":           INCONCLUSIVE,    # the call / transport failed — the test could not be run
+    "positive_control_unverified": INCONCLUSIVE,  # a probe's OWN precondition failed (path_traversal: the
+                                                  # tool never reached its own in-root canary) — an
+                                                  # out-of-root result cannot be trusted (not CLEAN/PROVEN)
+    "redirect_not_confirmed":      INCONCLUSIVE,  # #28 upstream-redirect SSRF: the server never called the
+                                                  # sentinel upstream, or used TLS we can't terminate to emit
+                                                  # the 302 — the redirect-follow is unobservable (not CLEAN)
+    "not_applicable":  NOT_APPLICABLE,  # no candidate tool/param, or nothing to test
+    # Unit 3, runtime observation in a sealed namespace. Only the token leaving is proof. Everything else is
+    # a lead, a clean result that the seal and the inspection support, or INCONCLUSIVE (never a silent CLEAN).
+    # A leak of this run's planted test value is "oracle" (a per-run planted marker fired), not a new method.
+    "sandbox_claim_mismatch":     SUSPECTED,     # says it makes no external calls, and it sent something
+    "sandbox_unexplained_egress": SUSPECTED,     # outbound, and its declared text has no network purpose
+    "sandbox_explained_egress":   CLEAN,         # outbound, every payload inspected, no token, fits its purpose
+    "sandbox_no_egress":          CLEAN,         # nothing left the server
+    "sandbox_opaque_payload":     INCONCLUSIVE,  # outbound we could not inspect: never CLEAN
+    "sandbox_unproven":           INCONCLUSIVE,  # the seal did not prove, so the server was not run
+    "sandbox_unobservable":       INCONCLUSIVE,  # the recorder and the strace witness cannot see the activity
+    "sandbox_not_exercised":      INCONCLUSIVE,  # silence, but a tool refused the benign input: the sink may not have run
+    "probe_seal_incompatible":    INCONCLUSIVE,  # a floor oracle needs reach/setup the seal removes (e.g. a host-side
+                                                 # sink, a planted env canary); never reported CLEAN under the seal
+    "not_reproduced":             INCONCLUSIVE,  # a VULNERABLE oracle fired once but did not re-demonstrate (G8);
+                                                 # downgraded, never kept as proven
+}
+
+
+def verdict_for(method: str) -> str:
+    """The SOLE verdict source. A probe reports confirmation_method; the verdict follows from this map.
+    An unknown method raises (caught by the selfcheck) — a probe may never invent a verdict."""
+    return _METHOD_VERDICT[method]
 
 
 @dataclass
 class ProbeResult:
     probe: str
     tool: str
-    verdict: str
+    confirmation_method: str            # HOW the conclusion was reached — the single input to verdict
     marker: str = ""
     evidence: str = ""
     rationale: str = ""
+    verdict: str = field(init=False)    # DERIVED only; a probe cannot pass it (structural single-source)
+
+    def __post_init__(self):
+        self.verdict = verdict_for(self.confirmation_method)
+
+
+_REFUSAL = re.compile(
+    r"security violation|not in allowed list|not allowed|outside allowed roots|permission denied|"
+    r"forbidden|unauthori[sz]ed|access denied|not permitted|disallowed|policy (violation|denied)|"
+    r"\b40[13]\b|validation (failed|error)|\brefus(e|ed|al)", re.I)
+
+
+def _is_refusal(text: str) -> bool:
+    """STRICT: only a recognized, deliberate server deny counts as a refusal (evidence the control
+    works -> CLEAN). A generic/opaque exception is NEVER a refusal (-> INCONCLUSIVE)."""
+    return bool(_REFUSAL.search(text or ""))
+
+
+def _negative_method(returned_texts: list[str], raised_msgs: list[str]) -> str:
+    """confirmation_method for a result where NO oracle fired. CLEAN requires positive evidence the
+    oracle actually ran (a genuine non-refusal response) or that the server refused; if every attempt
+    was blocked by an unrecognized failure, the class is INCONCLUSIVE, never a silent CLEAN."""
+    if any(not _is_refusal(t) for t in returned_texts):
+        return "oracle_negative"                    # a real response came back and nothing fired
+    if returned_texts or any(_is_refusal(m) for m in raised_msgs):
+        return "refusal"                            # the only responses/exceptions were recognized denies
+    return "error"                                  # only unrecognized failures — the test could not run
 
 
 # ---- candidate heuristics --------------------------------------------------------------
@@ -65,8 +140,51 @@ _FETCH_DESC = re.compile(r"fetch|http|request|download|url|web|crawl|scrape|curl
 # by-design, NOT a vuln. SSRF is a finding only when a tool that is NOT a general fetcher can
 # be steered to internal hosts. This gate prevents false positives on curl/fetch tools.
 _DEDICATED_FETCH = re.compile(
-    r"\bcurl\b|http request|https request|fetch (a |the )?url|fetch (the )?contents|"
-    r"web request|make .{0,12}request|download (a |the )?file|\bscrape\b|web ?search", re.I)
+    r"\bcurl\b|http request|https request|fetch\w* (a |an |the )?url|fetch\w* (the )?contents|"
+    r"web request|make .{0,12}request|download\w* (a |the )?file|\bscrape\b|web ?search", re.I)
+# A tool whose NAME is itself a general fetcher (fetch, curl, http_get, download, scrape, …):
+# reaching any URL is its purpose, so it is by-design, not SSRF. (Catches e.g. mcp-server-fetch,
+# whose tool is literally named `fetch` — a bare name _DEDICATED_FETCH's phrase patterns miss.)
+_FETCH_NAME = re.compile(
+    r"\b(fetch|curl|wget|download|scrape|crawl|http_?get|get_?url|open_?url|"
+    r"web_?(fetch|get|search|request)|url_?(fetch|get))\b", re.I)
+# ORACLE vs BY-DESIGN (the general lesson, not just SSRF): an oracle firing proves the EFFECT happened
+# (the loopback sink was reached). It does NOT by itself prove a VULNERABILITY. Before VULNERABLE we must
+# rule out that the effect is the tool's OWN DECLARED PURPOSE. For SSRF that purpose is accessing a web
+# resource. Beyond fetch/curl (above), a tool whose job is to NAVIGATE/open/load/visit a URL, or to
+# RENDER/screenshot/pdf a page, or to PROXY/mirror a site, reaches arbitrary URLs by design — reaching
+# loopback is informational (no egress filtering), not a finding. This is derived from the tool's declared
+# surface (name + description), matched as phrases/name-tokens (same discipline as the fetch patterns) so a
+# bare data verb like "fetch analytics" is NOT caught. A DATA-operation tool (summarize/notify/convert/
+# store/analyze) that merely fetches a URL is the real SSRF and stays VULNERABLE. Generalization (not a
+# fixed tool-name allowlist) is proven on synthetic fixtures whose names are not in this file
+# (tests/test_ssrf_precision.py).
+# The web-resource nouns a navigation/render verb may govern (kept in step with _URL_PARAM):
+_RES = r"(url|uri|page|web ?page|website|web|site|link|address|endpoint|resource|browser)"
+_NAV_DESC = re.compile(
+    rf"navigat\w+ (to |a |an |the )?|go(es)? to (a |an |the )?{_RES}|"
+    rf"(open|visit|load|render|preview|reload)\w* (to |a |an |the )?{_RES}|"
+    rf"brows\w+ (to |a |an |the )|(take|capture|grab|save|generate|produce)\w* .{{0,20}}(screenshot|snapshot)|"
+    rf"screenshot\w* (of |a |an |the )|(render|convert|print|export|save)\w* .{{0,24}}(to |as |into )?pdf|"
+    rf"pdf\w* (of|from) (a |an |the )?{_RES}|proxy\w* (requests?|traffic|a |an |the )|"
+    rf"mirror\w* (a |an |the )?{_RES}", re.I)
+# NAME tokens that declare URL access as the tool's job (navigation / rendering / proxy):
+_NAV_NAME = re.compile(
+    r"\b(navigate|goto|go_?to|browse|browser|open_?(url|page|site)|visit|load_?(url|page|site)|"
+    r"render(_?(page|url|site))?|screenshot|snapshot|capture_?(page|url|site)|(page|url|web)_?to_?pdf|"
+    r"pdf_?of|print_?page|web_?view|webview|proxy|mirror|preview)\b", re.I)
+
+
+def _url_access_by_design(name: str, desc: str) -> bool:
+    """True when the tool's declared surface says accessing a caller-supplied URL IS its primary job:
+    fetch/download, navigate/open/load/visit, render/screenshot/pdf, or proxy/mirror. See the note above —
+    this is the precision control that separates an oracle EFFECT from an SSRF FINDING. Data-op tools that
+    merely fetch (summarize/notify/convert/store/analyze) are NOT captured here and remain VULNERABLE."""
+    text = f"{desc} {name}"
+    return bool(_DEDICATED_FETCH.search(text) or _FETCH_NAME.search(name)
+                or _NAV_DESC.search(text) or _NAV_NAME.search(name))
+
+
 _CMD_DESC = re.compile(r"\brun\b|execute|shell|command|exec|spawn|subprocess|process", re.I)
 _READ_DESC = re.compile(r"read|open|file|path|document|load|\bcat\b|contents", re.I)
 _WRITE_DESC = re.compile(r"write|create|save|edit|append|\bput\b|modify", re.I)
@@ -82,8 +200,12 @@ _EXEC_GENERAL = re.compile(
     r"run (a |an )?[\w ]{0,24}command|execute [\w ]{0,24}command|execute .{0,20}code|"
     r"run .{0,20}script|shell command|run (a )?shell|arbitrary (command|code)", re.I)
 _CLAIMS_RESTRICTION = re.compile(
-    r"allow ?list|allow-list|white ?list|allowed (command|path|dir)|restrict|\bsecure\b|"
-    r"validation|sandbox|\bsafe\b", re.I)
+    r"allow ?list|allow-list|white ?list|allowed (command|path|dir|executable)|restrict|sandbox|"
+    r"secure mode|security constraint|configurable security|safe mode|validated command", re.I)
+# NOTE: bare "safe"/"validated"/"secure" are deliberately excluded — they appear in benign executor
+# descriptions ("safely run commands", "validated input") and would mis-class a by-design executor as a
+# bypassed restriction. Only a SPECIFIC restriction claim (allowlist / secure mode / security constraint
+# / sandbox) means "this tool advertises a boundary", so executing arbitrary code is a BYPASS, not by-design.
 _SQL_EXEC = re.compile(
     r"execute .{0,20}sql|run .{0,20}sql|data modification sql|\bddl\b|arbitrary sql|"
     r"execute (a |an )?query|write query|run (a |an )?query", re.I)
@@ -97,7 +219,12 @@ _SQL_FALSE = re.compile(r"fts5|full[- ]?text|\bMATCH\b|fts: ", re.I)
 
 
 def _schema(tool) -> dict:
-    return tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
+    # SDK-agnostic: the MCP Python SDK renamed Tool.inputSchema -> input_schema in 2.x.
+    # Read whichever the installed SDK exposes so a version bump never crashes the scan.
+    s = getattr(tool, "input_schema", None)
+    if not isinstance(s, dict):
+        s = getattr(tool, "inputSchema", None)
+    return s if isinstance(s, dict) else {}
 
 
 def _str_params(tool) -> list[str]:
@@ -223,34 +350,64 @@ async def probe_ssrf(session, tools) -> list[ProbeResult]:
             marker = "ssrf-" + uuid.uuid4().hex[:10]
             direct = f"http://127.0.0.1:{sink.port}/{marker}"
             redir = f"http://127.0.0.1:{sink.port}/redir-{marker}"
+            returned, raised = [], []
             for param in params:
                 for url in (direct, redir):
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, url)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, url)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
             await asyncio.sleep(0.3)
             reached = sink.hit(marker)
             if not reached:
-                out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,
+                out.append(ProbeResult("ssrf", tool.name, _negative_method(returned, raised), marker=marker,
                                        rationale="did not fetch the loopback URL"))
                 continue
-            dedicated = bool(_DEDICATED_FETCH.search((tool.description or "") + " " + tool.name))
             follows = sink.hit(f"followed-{marker}")
-            if dedicated:   # a general fetch/curl tool reaching a URL is its stated job — not a vuln
-                out.append(ProbeResult("ssrf", tool.name, CLEAN, marker=marker,
+            if _url_access_by_design(tool.name, tool.description or ""):
+                # The tool's declared purpose IS accessing the URL (fetch/navigate/render/proxy): reaching
+                # loopback is its advertised capability, not SSRF. The oracle proved the effect, not a vuln.
+                out.append(ProbeResult("ssrf", tool.name, "by_design", marker=marker,
                                        evidence=f"{tool.name} -> loopback sink",
-                                       rationale="dedicated fetch/curl tool reached internal/loopback — "
-                                                 "by-design capability (informational: no SSRF egress "
+                                       rationale="tool whose declared purpose is accessing a caller-supplied "
+                                                 "URL (fetch/navigate/render/proxy) reached internal/loopback "
+                                                 "— by-design capability (informational: no SSRF egress "
                                                  "filtering), not a finding"))
             else:           # a tool NOT meant as a general fetcher made an outbound request -> SSRF
-                out.append(ProbeResult("ssrf", tool.name, VULNERABLE, marker=marker,
+                out.append(ProbeResult("ssrf", tool.name, "oracle", marker=marker,
                                        evidence=f"{tool.name} -> loopback sink",
                                        rationale="a non-fetch tool was steered to request an "
                                                  "attacker-controlled host, reaching loopback/internal"
                                                  + (" ; follows 3xx redirects" if follows else "")))
     finally:
         sink.stop()
+    return out
+
+
+def _interp_carriers(nonce: str) -> list:
+    """`<allowed-interpreter> -c <NONCE>` carriers — the CVE-2026-55581/55582 allowlist-bypass shape the
+    old payload set missed. NONCE is a single alphanumeric token (no metacharacters, so it survives a
+    `$ ( ) { } ; |`-style blocklist AND a naive argv split); the interpreter tries to RUN it as a command
+    and echoes it back INSIDE ITS OWN error — proof of execution via the tool's RETURNED output.
+
+    Each entry is (payload, oracle_regex). The oracle matches the INTERPRETER's error/output signature
+    wrapping the nonce, NOT a bare reflection: a server that rejects and echoes the payload ("denied:
+    bash -c <nonce>") never produces `<nonce>: command not found`, so it cannot false-positive."""
+    n = re.escape(nonce)
+    sh_sig = re.compile(rf"{n}: (command )?not found", re.I)                  # bash/sh: '<nonce>: command not found'
+    py_sig = re.compile(rf"name ['\"]?{n}['\"]? is not defined", re.I)        # python NameError
+    node_sig = re.compile(rf"\b{n} is not defined", re.I)                     # node ReferenceError
+    ruby_sig = re.compile(rf"undefined .{{0,40}}{n}", re.I)                    # ruby NameError
+    nonce_alone = re.compile(rf"(?m)^\s*{n}\s*$")                             # echo output: the nonce ALONE on a line
+    tag = nonce[:5]
+    out = [(f"{b} -c {nonce}", sh_sig) for b in ("/bin/bash", "bash", "/bin/sh", "sh")]
+    out += [(f"{p} -c {nonce}", py_sig) for p in ("/usr/bin/python3", "python3")]
+    out += [(f"{nd} -e {nonce}", node_sig) for nd in ("node", "/usr/bin/node")]
+    out += [(f"ruby -e {nonce}", ruby_sig)]
+    out += [(f"{g} -c alias.{tag}=!{nonce} {tag}", sh_sig) for g in ("git", "/usr/bin/git")]  # git `!`-alias shell
+    # metachar-bypass + stdout nonce (servers that allow $ but filter spaces): echo the nonce alone
+    out += [(f"{b} -c echo${{IFS}}{nonce}", nonce_alone) for b in ("/bin/bash", "bash", "sh")]
     return out
 
 
@@ -264,11 +421,16 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
             if not params:
                 continue
             fired, used = False, ""
+            returned, raised = [], []
             for param in params:
                 sentinel = d / ("s_" + uuid.uuid4().hex[:10])
                 cmarker = "cmd-" + uuid.uuid4().hex[:10]
+                icnonce = "IC" + uuid.uuid4().hex[:12]     # single alphanumeric token -> survives metachar filters
                 sink_url = f"http://127.0.0.1:{sink.port}/{cmarker}"
-                payloads = [
+                # (payload, oracle_regex): None -> confirmed by the planted sentinel file / loopback sink;
+                # a regex -> confirmed by the INTERPRETER's own error/output wrapping our nonce in the tool's
+                # RETURNED text (the server-2 FN root cause: the old oracle ignored returned output).
+                payloads = [(p, None) for p in (
                     f"x; touch {sentinel}", f"x && touch {sentinel}", f"x | touch {sentinel}",
                     f"$(touch {sentinel})", f"`touch {sentinel}`", f"x\ntouch {sentinel}",
                     f"'; touch {sentinel} #", f'"; touch {sentinel} #',
@@ -282,33 +444,39 @@ async def probe_command_injection(session, tools) -> list[ProbeResult]:
                     f"__import__('os').system('touch {sentinel}')",
                     f"eval(\"__import__('os').system('touch {sentinel}')\")",
                     f"require('child_process').execSync('touch {sentinel}')",
-                ]
-                for p in payloads:
+                )] + _interp_carriers(icnonce)          # <allowed-interpreter> -c <nonce>, returned-text oracle
+                for p, oracle_re in payloads:
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
+                        text = _result_text(r)
+                        returned.append(text)
+                    except Exception as exc:  # noqa: BLE001
+                        text = str(exc)
+                        raised.append(text)
                     await asyncio.sleep(0.05)
-                    if sentinel.exists() or sink.hit(cmarker):
+                    # interpreter-carrier: require the interpreter's OWN error/output signature around the
+                    # nonce (anti-reflection) AND that the response isn't a deliberate refusal.
+                    oracle_hit = bool(oracle_re) and not _is_refusal(text) and bool(oracle_re.search(text))
+                    if sentinel.exists() or sink.hit(cmarker) or oracle_hit:
                         fired, used = True, p
                         break
                 if fired:
                     break
             if not fired:
-                out.append(ProbeResult("command_injection", tool.name, CLEAN, evidence=used,
-                                       rationale="no payload achieved command execution"))
+                out.append(ProbeResult("command_injection", tool.name, _negative_method(returned, raised),
+                                       evidence=used, rationale="no payload achieved command execution"))
                 continue
             desc = (tool.description or "") + " " + tool.name
             if _CLAIMS_RESTRICTION.search(desc):
-                verdict, why = VULNERABLE, ("a tool that claims to restrict/validate executed an "
-                                            "injected command — restriction bypass")
+                method, why = "oracle", ("a tool that advertises a command restriction (allowlist / secure "
+                                         "mode / sandbox) executed injected code — the restriction is bypassable")
             elif _EXEC_GENERAL.search(desc):
-                verdict, why = CLEAN, ("general command/code-execution tool ran the command — "
-                                       "by-design (informational: unrestricted execution), not a finding")
+                method, why = "by_design", ("general command/code-execution tool ran the command — "
+                                            "by-design (informational: unrestricted execution), not a finding")
             else:
-                verdict, why = VULNERABLE, ("a tool not advertised as a command executor ran an "
-                                            "injected command")
-            out.append(ProbeResult("command_injection", tool.name, verdict, evidence=used, rationale=why))
+                method, why = "oracle", ("a tool not advertised as a command executor ran an "
+                                         "injected command")
+            out.append(ProbeResult("command_injection", tool.name, method, evidence=used, rationale=why))
     finally:
         sink.stop()
         shutil.rmtree(d, ignore_errors=True)
@@ -324,6 +492,32 @@ def _under(path: str, root: str) -> bool:
     return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
 
 
+def _resolve_real_dir(p: str):
+    """Reconcile a server-reported dir with the real filesystem: some servers advertise a NORMALISED
+    root (e.g. case-folded — which is itself the CVE-2025-53110 case-bypass tell) that fails a literal
+    isdir() on a case-sensitive FS. Walk the path components case-insensitively to recover the real
+    on-disk dir. Returns the real path or None. Dynamic — no server/path hardcoding."""
+    if os.path.isdir(p):
+        return p
+    parts = Path(p).parts
+    if not parts or parts[0] != os.sep:
+        return None
+    cur = os.sep
+    for comp in parts[1:]:
+        direct = os.path.join(cur, comp)
+        if os.path.isdir(direct):
+            cur = direct
+            continue
+        try:                                   # case-insensitive match among the real siblings
+            match = next((e for e in os.listdir(cur) if e.lower() == comp.lower()), None)
+        except OSError:
+            return None
+        if not match:
+            return None
+        cur = os.path.join(cur, match)
+    return cur if os.path.isdir(cur) else None
+
+
 async def _allowed_roots(session, tools) -> list[str]:
     """The server's advertised allowed directories (e.g. filesystem servers' list_allowed_directories),
     so the traversal canary can be planted OUTSIDE them. [] if the server doesn't advertise any."""
@@ -336,7 +530,12 @@ async def _allowed_roots(session, tools) -> list[str]:
         text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
     except Exception:  # noqa: BLE001
         return []
-    return [p for p in re.findall(r"(/[^\s,:'\"]+)", text) if os.path.isdir(p)]
+    roots: list[str] = []
+    for p in re.findall(r"(/[^\s,:'\"]+)", text):
+        rp = _resolve_real_dir(p)
+        if rp and rp not in roots:
+            roots.append(rp)
+    return roots
 
 
 def _outside_root_dir(roots: list[str]):
@@ -350,16 +549,234 @@ def _outside_root_dir(roots: list[str]):
     return None
 
 
+# ---- path-traversal variant coverage (CWE-22/23) + adjacent / in-root plants -----------------------
+# A new server is DATA, not code: payloads + oracle are derived from the server's advertised root(s)
+# and tool/param surface at runtime — no hardcoded tool/server/param names. A (sibling-prefix) writes
+# a cleaned-up canary in the root's PARENT (outside the managed area) → default-on, gated only by a
+# writable parent. B (in-root symlink) mutates the server's own managed root → OPT-IN, default off.
+_ALLOW_WRITE_INTO_ROOT = os.environ.get("MCPRT_ALLOW_WRITE_INTO_ROOT", "") == "1"
+_OUTPUT_DESC = re.compile(r"screenshot|screen[-_ ]?shot|\bpdf\b|snapshot|\bsave\b|export|download|"
+                          r"capture|dump|\brender\b", re.I)
+_OUTPUT_PARAM = re.compile(r"filename|file|path|out(put)?|dest(ination)?|save|target|to", re.I)
+
+
+def _traversal_variants(canary, marker: str) -> list:
+    """The CWE-22/23 read-escape variant space — every entry targets OUR out-of-root canary (planted in
+    our own temp, non-invasive). (payload, expected_marker, label). Covers the CLASS, not an instance:
+    a server that normalises/decodes any of these is caught with zero per-server code."""
+    a = str(canary)
+    rel = "../" * 20 + a.lstrip(os.sep)
+    return [
+        (a, marker, "plain-absolute-outside"),
+        (rel, marker, "dotdot-outside"),
+        (a.replace("/", "\\"), marker, "backslash-separator"),
+        (rel.replace("../", "%2e%2e%2f"), marker, "url-encoded"),
+        (rel.replace("../", "%252e%252e%252f"), marker, "double-url-encoded"),
+        (rel.replace("../", "....//"), marker, "nested-dotdot (single-strip bypass)"),
+        (rel.replace("/", "%2f"), marker, "encoded-separator"),
+        (a + "%00.txt", marker, "null-byte-truncation"),
+        ("\\\\?\\" + a.replace("/", "\\"), marker, "windows-unc"),
+    ]
+
+
+def _plant_sibling(root: str, cleanups: list):
+    """Plant a canary at `<root>_pt_<rand>/canary.txt` — a SIBLING that shares the root's string prefix
+    but lies OUTSIDE it (the CVE-2025-53110 bypass shape). Writes in the root's PARENT (not the managed
+    root) → default-on, gated only by a writable parent + guaranteed cleanup. Returns (payload, marker)
+    or None (→ caller marks the vector NOT_APPLICABLE, never CLEAN)."""
+    base = str(root).rstrip(os.sep)
+    parent = os.path.dirname(base)
+    if not base or not parent or not (os.path.isdir(parent) and os.access(parent, os.W_OK)):
+        return None
+    sib = Path(base + "_pt_" + uuid.uuid4().hex[:8])
+    cleanups.append(lambda: shutil.rmtree(sib, ignore_errors=True))     # register BEFORE create (always cleaned)
+    try:
+        sib.mkdir()
+        mk = "PTA-" + uuid.uuid4().hex[:12]
+        (sib / "canary.txt").write_text(mk)
+        return str(sib / "canary.txt"), mk
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _plant_symlink(root: str, cleanups: list):
+    """Create `<root>/pt_link_<rand>` → a SIBLING-PREFIX canary just outside the root (CVE-2025-53109).
+    Pointing at a sibling-prefix target (not a plain-outside one) makes BOTH symlink-follow flavours
+    fire: a server that follows the link with no realpath re-check, AND one that re-checks realpath with
+    a prefix (no-separator) test — while a separator-aware server still denies it. Mutates the target's
+    own managed root → OPT-IN (allow_write_into_root), default off; safe-by-construction + guaranteed
+    cleanup. Returns (link_path, marker) or None (→ vector NOT_APPLICABLE)."""
+    if not _ALLOW_WRITE_INTO_ROOT:
+        return None
+    rp = str(root).rstrip(os.sep)
+    parent = os.path.dirname(rp)
+    if not (os.path.isdir(rp) and os.access(rp, os.W_OK) and parent and os.access(parent, os.W_OK)):
+        return None
+    tgt_dir = Path(rp + "_ptl_" + uuid.uuid4().hex[:8])        # sibling of root (shares prefix, outside it)
+    link = Path(rp) / ("pt_link_" + uuid.uuid4().hex[:8])
+    cleanups.append(lambda: shutil.rmtree(tgt_dir, ignore_errors=True))   # register BEFORE create
+    cleanups.append(lambda: link.unlink(missing_ok=True))
+    try:
+        tgt_dir.mkdir()
+        mk = "PTB-" + uuid.uuid4().hex[:12]
+        (tgt_dir / "canary.txt").write_text(mk)
+        os.symlink(str(tgt_dir / "canary.txt"), str(link))
+        return (str(link), mk) if link.is_symlink() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _output_file_params(tool):
+    """A tool that writes a file whose CONTENT it generates internally (screenshot/pdf/snapshot): a
+    filename/path param but NO caller-supplied content param. Returns that param or None — derived from
+    the advertised schema/description, no hardcoded names."""
+    if _writer_params(tool):                 # path+content writer -> handled by the write branch
+        return None
+    desc = (tool.description or "") + " " + tool.name
+    if not _OUTPUT_DESC.search(desc):
+        return None
+    for p in _schema(tool).get("properties", {}):
+        if _OUTPUT_PARAM.search(p):
+            return p
+    return None
+
+
+# The two NAIVE out-of-root vectors (plain absolute + plain ../). If one of these ALREADY reaches our
+# out-of-root canary the server enforces no boundary — unrestricted file I/O is its declared contract
+# (by_design), not a traversal escape. PROVEN requires a boundary (naive blocked) that a CRAFTED vector
+# then escapes. This is #27's A/B/C discrimination (companion to the #22 SSRF by-design control).
+_PT_NAIVE_LABELS = ("plain-absolute-outside", "dotdot-outside")
+
+
+def _writable_root(roots):
+    """First advertised root the probe can plant a canary into (for the in-root positive control).
+    None if the server advertised no root, or none is writable by the probe process."""
+    for r in (roots or []):
+        rp = str(r).rstrip(os.sep)
+        if os.path.isdir(rp) and os.access(rp, os.W_OK):
+            return rp
+    return None
+
+
+def _ctrl_root(roots):
+    """(writable_root, "") or (None, reason) — the in-root location for the positive control."""
+    wr = _writable_root(roots)
+    if wr:
+        return wr, ""
+    return None, ("no advertised root to plant an in-root positive control" if not roots
+                  else "advertised root not writable — cannot plant the in-root positive control")
+
+
+def _pt_inconclusive(tool_name, marker, reason):
+    """couldn't-observe != clean, applied to the probe's OWN precondition: we could not confirm the server
+    performs verifiable in-bounds file I/O, so no out-of-root result can be trusted -> INCONCLUSIVE."""
+    return ProbeResult("path_traversal", tool_name, "positive_control_unverified", marker=marker,
+        rationale=f"positive control unverified ({reason}): could not confirm in-bounds file I/O, so an "
+                  "out-of-root result cannot be trusted (INCONCLUSIVE — not CLEAN, not PROVEN)")
+
+
+async def _relative_roundtrip(session, tools, cleanups):
+    """SUBCASE-2 in-bounds control when NO root is advertised: verify the server does in-bounds file I/O via
+    a RELATIVE round-trip — write a canary to a relative name with any writer, read it back with any reader.
+    A relative path resolves to the server's OWN cwd/workspace (the only in-bounds location we can both
+    reach and reference). (ok, reason); ok=False => cannot construct / did not round-trip => INCONCLUSIVE."""
+    wt = next(((t, _writer_params(t)) for t in tools if _writer_params(t)), None)
+    rt = next((t for t in tools
+               if _candidate_params(t, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
+               and not _writer_params(t) and not _output_file_params(t)), None)
+    if not wt or rt is None:
+        return False, "no reader+writer pair to construct a relative in-bounds control"
+    writer, (path_p, content_p) = wt
+    rel = "pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt"
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    try:
+        await session.call_tool(writer.name, _build_args(writer, {path_p: rel, content_p: cmk}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    for param in _candidate_params(rt, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"]):
+        try:
+            txt = _result_text(await session.call_tool(rt.name, _build_args(rt, {param: _inject(rt, param, rel)})))
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if cmk in txt:
+            return True, "server round-trips a relative in-bounds canary (write+read in its own workspace)"
+    return False, "server did not round-trip a relative in-bounds canary"
+
+
+async def _read_control(session, tool, params, roots, cleanups, tools):
+    """Positive control for a reader. Advertised root: plant a canary INSIDE the root and confirm THIS tool
+    returns it via a plain in-root path (so a no-leak is a trustworthy CLEAN and a crafted-only leak is a
+    real bypass). No advertised root: fall back to the relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        cf.write_text(cmk)
+    except Exception:  # noqa: BLE001
+        return False, "could not plant the in-root read canary"
+    for param in params:
+        try:
+            txt = _result_text(await session.call_tool(
+                tool.name, _build_args(tool, {param: _inject(tool, param, str(cf))})))
+        except Exception:  # noqa: BLE001
+            txt = ""
+        if cmk in txt:
+            return True, "tool read its own in-root canary via a plain path"
+    return False, "tool did not read its own in-root canary via a plain path"
+
+
+async def _write_control(session, tool, path_p, content_p, roots, cleanups, tools):
+    """Positive control for a writer. Advertised root: write a marker to a plain in-root path and confirm it
+    landed. No advertised root: relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
+    cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        await session.call_tool(tool.name, _build_args(tool, {path_p: str(cf), content_p: cmk}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    if cf.exists() and cmk in cf.read_text(errors="replace"):
+        return True, "tool wrote its own in-root canary via a plain path"
+    return False, "tool did not write its own in-root canary via a plain path"
+
+
+async def _output_control(session, tool, op, roots, cleanups, tools):
+    """Positive control for an output-file tool. Advertised root: save to a plain in-root path and confirm
+    the file appears. No advertised root: relative in-bounds round-trip (SUBCASE-2)."""
+    wr, _reason = _ctrl_root(roots)
+    if not wr:
+        return await _relative_roundtrip(session, tools, cleanups)
+    cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".out")
+    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    try:
+        await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, str(cf))}))
+    except Exception:  # noqa: BLE001
+        pass
+    await asyncio.sleep(0.1)
+    if cf.exists():
+        return True, "tool wrote its own in-root output canary via a plain path"
+    return False, "tool did not write its own in-root output canary via a plain path"
+
+
 async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     out = []
-    roots = await _allowed_roots(session, tools)   # plant the canary OUTSIDE the server's real root
+    roots = await _allowed_roots(session, tools)   # the server's managed root(s); escapes target OUTSIDE them
     if roots:
         d = _outside_root_dir(roots)
         if d is None:   # root covers every candidate (e.g. '/') — no out-of-root path exists to test
             for tool in tools:
-                if _writer_params(tool) or _candidate_params(tool, _PATH_PARAM, _READ_DESC,
-                                                             ["path", "file", "filepath", "filename"]):
-                    out.append(ProbeResult("path_traversal", tool.name, NOT_APPLICABLE,
+                if (_writer_params(tool) or _output_file_params(tool)
+                        or _candidate_params(tool, _PATH_PARAM, _READ_DESC,
+                                             ["path", "file", "filepath", "filename"])):
+                    out.append(ProbeResult("path_traversal", tool.name, "not_applicable",
                         rationale="server's allowed root spans all candidate locations — no out-of-root "
                                   "path exists to test traversal (not a finding)"))
             return out
@@ -368,47 +785,232 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     marker = "PT-" + uuid.uuid4().hex[:12]
     canary = d / "canary.txt"
     canary.write_text(marker)
+    cleanups: list = []
+    # Read-escape payloads: the full CWE-22/23 variant space, all targeting our out-of-root canary.
+    read_payloads = _traversal_variants(canary, marker)
+    # Adjacent (A, sibling-prefix: default-on) + in-root (B, symlink: opt-in) plants, per advertised root.
+    sibling_planted = symlink_planted = False
+    for root in (roots or []):
+        sp = _plant_sibling(root, cleanups)
+        if sp:
+            read_payloads.append((sp[0], sp[1], "sibling-prefix (CVE-2025-53110)"))
+            sibling_planted = True
+        lk = _plant_symlink(root, cleanups)
+        if lk:
+            read_payloads.append((lk[0], lk[1], "symlink (CVE-2025-53109)"))
+            symlink_planted = True
+    had_reader = False
     try:
         for tool in tools:
             writer = _writer_params(tool)
-            if writer:                                   # arbitrary-write escape
+            if writer:                                   # arbitrary-write escape (path + caller content)
                 path_p, content_p = writer
                 wmark = "PW-" + uuid.uuid4().hex[:12]
                 target = d / f"escaped_{wmark}.txt"       # outside any server root
-                try:
-                    await session.call_tool(tool.name, _build_args(
-                        tool, {path_p: str(target), content_p: wmark}))
-                except Exception:  # noqa: BLE001
-                    pass
-                await asyncio.sleep(0.1)
-                wrote = target.exists() and wmark in target.read_text(errors="replace")
-                out.append(ProbeResult("path_traversal", tool.name, VULNERABLE if wrote else CLEAN,
-                                       marker=wmark, evidence=f"{tool.name}(write outside root)",
-                                       rationale=("wrote a file outside its root (arbitrary write)"
-                                                  if wrote else "write confined to root")))
+                abs_p = str(target)
+                returned, raised, landed = [], [], {}
+                # NAIVE absolute write first: if it lands, the tool writes anywhere it is told —
+                # unrestricted write is its declared contract (by_design). Only if the plain write is
+                # blocked do we test whether a ../ vector ESCAPES the boundary (PROVEN).
+                for lbl, path_val in (("plain-absolute-outside", abs_p),
+                                      ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
+                    target.unlink(missing_ok=True)
+                    try:
+                        returned.append(_result_text(await session.call_tool(
+                            tool.name, _build_args(tool, {path_p: path_val, content_p: wmark}))))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
+                    await asyncio.sleep(0.1)
+                    landed[lbl] = target.exists() and wmark in target.read_text(errors="replace")
+                    if lbl == "plain-absolute-outside" and landed[lbl]:
+                        break                              # no boundary -> by_design, don't bother crafting
+                target.unlink(missing_ok=True)
+                refused = any(_is_refusal(t) for t in returned + raised)
+                naive_land = landed.get("plain-absolute-outside")
+                crafted_land = landed.get("dotdot-outside")
+                if naive_land or crafted_land:
+                    if roots:                                  # a boundary is DECLARED -> any escape is a finding
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                            evidence=f"{tool.name}(out-of-root write)",
+                            rationale=("the server advertises a root, yet a plain absolute out-of-root write "
+                                       "landed — the declared boundary is NOT enforced (arbitrary write)"
+                                       if naive_land else
+                                       "the server advertises a root, a plain absolute out-of-root write was "
+                                       "blocked, yet a ../ vector wrote our file outside it — boundary ESCAPED")))
+                    elif naive_land:                           # no declared boundary -> unrestricted write is the contract
+                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=wmark,
+                            evidence=f"{tool.name}(absolute out-of-root write)",
+                            rationale="no boundary advertised and a plain absolute out-of-root write already "
+                                      "succeeds: unrestricted file write is the tool's declared contract — "
+                                      "by-design, not a traversal finding"))
+                    else:                                      # SUBCASE-1: no root, plain blocked, ../ escaped
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                            evidence=f"{tool.name}(dotdot write escape)",
+                            rationale="no advertised root, but a plain absolute out-of-root write was blocked "
+                                      "while a ../ vector wrote our file outside — an intended-but-bypassable "
+                                      "filter (real traversal write)"))
+                    continue
+                # No out-of-root write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
+                ctrl_ok, ctrl_why = await _write_control(session, tool, path_p, content_p, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, wmark, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=wmark,
+                        rationale="boundary held: in-bounds write verified, out-of-root write refused (plain and ../)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=wmark,
+                        evidence=f"{tool.name}(write outside root)",
+                        rationale="write confined (in-bounds positive control passed; no out-of-root write landed)"))
+                continue
+            op = _output_file_params(tool)
+            if op:                                        # output-file tool (content generated internally)
+                omark = "PTC-" + uuid.uuid4().hex[:10]
+                out_file = d / f"escaped_{omark}.out"     # in OUR out-of-root temp — we can stat it
+                abs_p = str(out_file)
+                returned, raised, landed = [], [], {}
+                # NAIVE absolute output path first: a save-file tool that writes to any absolute path saves
+                # wherever told (by_design). Only a confined output dir, escaped by a ../ vector, is PROVEN.
+                for lbl, t in (("plain-absolute-outside", abs_p),
+                               ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
+                    out_file.unlink(missing_ok=True)
+                    try:
+                        r = await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, t)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
+                    await asyncio.sleep(0.1)
+                    landed[lbl] = out_file.exists()       # OUR uniquely-named file landed outside -> escape
+                    if lbl == "plain-absolute-outside" and landed[lbl]:
+                        break                              # saves to any absolute path -> by_design
+                out_file.unlink(missing_ok=True)
+                refused = any(_is_refusal(t) for t in returned + raised)
+                naive_land = landed.get("plain-absolute-outside")
+                crafted_land = landed.get("dotdot-outside")
+                if naive_land or crafted_land:
+                    if roots:                                  # a boundary is DECLARED -> any escape is a finding
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                            evidence=("absolute-out-of-root" if naive_land else "dotdot-out-of-root"),
+                            rationale=("the server advertises a root, yet the tool saved OUR file to a plain "
+                                       "absolute out-of-directory path — output confinement NOT enforced"
+                                       if naive_land else
+                                       "the server advertises a root, the plain output path was confined, yet "
+                                       "a ../ vector wrote OUR file outside it — boundary ESCAPED (write-escape)")))
+                    elif naive_land:                           # no declared boundary -> saves wherever told
+                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=omark,
+                            evidence=f"{tool.name}(absolute output path)",
+                            rationale="no boundary advertised and a plain absolute output path already "
+                                      "succeeds: the tool saves wherever told — by-design"))
+                    else:                                      # SUBCASE-1: no root, plain confined, ../ escaped
+                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                            evidence="dotdot-out-of-root",
+                            rationale="no advertised root, but the plain output path was confined while a ../ "
+                                      "vector wrote OUR file outside — an intended-but-bypassable filter "
+                                      "(real write-escape)"))
+                    continue
+                # No out-of-dir write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
+                ctrl_ok, ctrl_why = await _output_control(session, tool, op, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, omark, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=omark,
+                        rationale="output path confined to the output directory (refused out-of-dir writes)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=omark,
+                        evidence=f"{tool.name}(output-dir escape)",
+                        rationale="output path confined to the output directory (in-bounds positive control passed)"))
                 continue
             params = _candidate_params(tool, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
             if not params:
                 continue
-            payloads = [str(canary), "../" * 20 + str(canary).lstrip(os.sep),
-                        str(canary).replace("/", "\\")]
-            fired, used = False, ""
+            had_reader = True
+            naive = [v for v in read_payloads if v[2] in _PT_NAIVE_LABELS]
+            crafted = [v for v in read_payloads if v[2] not in _PT_NAIVE_LABELS]
+            returned, raised = [], []
+            naive_leak = crafted_leak = refused = False
+            used = how = ""
+            # NAIVE first (plain absolute / ../), then the crafted CWE-22/23 bypass vectors. Whether a leak
+            # is a FINDING depends on whether a boundary is DECLARED (advertised root), decided below.
             for param in params:
-                for p in payloads:
+                for p, expect, label in naive:
                     try:
-                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
-                        r = None
-                    if r and marker in _result_text(r):    # only OUR planted marker counts
-                        fired, used = True, p
+                        txt = _result_text(await session.call_tool(
+                            tool.name, _build_args(tool, {param: _inject(tool, param, p)})))
+                        returned.append(txt)
+                    except Exception as exc:  # noqa: BLE001
+                        txt = ""
+                        raised.append(str(exc))
+                    if expect and expect in txt:
+                        naive_leak, used, how = True, p, label
                         break
-                if fired:
+                    if _is_refusal(txt):
+                        refused = True
+                if naive_leak:
                     break
-            out.append(ProbeResult("path_traversal", tool.name, VULNERABLE if fired else CLEAN, marker=marker,
-                                   evidence=used,
-                                   rationale=("returned a file outside its root (planted canary leaked)"
-                                              if fired else "did not return the out-of-root canary")))
+            if not naive_leak:
+                for param in params:
+                    for p, expect, label in crafted:
+                        try:
+                            txt = _result_text(await session.call_tool(
+                                tool.name, _build_args(tool, {param: _inject(tool, param, p)})))
+                            returned.append(txt)
+                        except Exception as exc:  # noqa: BLE001
+                            txt = ""
+                            raised.append(str(exc))
+                        if expect and expect in txt:
+                            crafted_leak, used, how = True, p, label
+                            break
+                        if _is_refusal(txt):
+                            refused = True
+                    if crafted_leak:
+                        break
+            if naive_leak or crafted_leak:
+                if roots:                                    # a boundary is DECLARED -> any out-of-root reach is a finding
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                        rationale=("the server advertises a root, yet a plain out-of-root path returned the "
+                                   "canary — the declared boundary is NOT enforced" if naive_leak else
+                                   f"the server advertises a root, a plain out-of-root path did not leak, yet a "
+                                   f"crafted vector ({how}) returned the out-of-root canary — boundary ESCAPED")))
+                elif naive_leak:                             # no declared boundary -> unrestricted read is the contract
+                    out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=marker,
+                        evidence=f"{tool.name} <- {how}",
+                        rationale="no boundary advertised and a plain out-of-root path already returns the "
+                                  "canary: unrestricted read is the tool's declared contract — by-design, "
+                                  "not traversal"))
+                else:                                        # SUBCASE-1: no root, plain denied, crafted leaked
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                        rationale=f"no advertised root, but a plain out-of-root path was denied while a crafted "
+                                  f"vector ({how}) returned the out-of-root canary — an intended-but-bypassable "
+                                  "filter (real traversal)"))
+            else:                                            # no leak -> positive-control split (CLEAN vs INCONCLUSIVE)
+                ctrl_ok, ctrl_why = await _read_control(session, tool, params, roots, cleanups, tools)
+                if not ctrl_ok:
+                    out.append(_pt_inconclusive(tool.name, marker, ctrl_why))
+                elif refused:
+                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=marker,
+                        rationale="boundary held: in-bounds read verified, every out-of-root vector refused "
+                                  "(plain and crafted)"))
+                else:
+                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=marker,
+                        rationale="did not return the out-of-root canary (in-bounds positive control passed)"))
+        # Honest NOT_APPLICABLE (never a silent CLEAN) for adjacent vectors we could not actually test.
+        if had_reader and not sibling_planted:
+            why = ("server's allowed root could not be determined at runtime" if not roots
+                   else "the server-root's parent is not writable (cannot plant the sibling canary)")
+            out.append(ProbeResult("path_traversal", "(sibling-prefix vector)", "not_applicable",
+                                   rationale="CVE-2025-53110 sibling-prefix NOT tested: " + why))
+        if had_reader and not symlink_planted:
+            why = ("in-root symlink is opt-in — set MCPRT_ALLOW_WRITE_INTO_ROOT=1 on a server you own"
+                   if not _ALLOW_WRITE_INTO_ROOT else
+                   ("server's allowed root could not be determined at runtime" if not roots
+                    else "the server root is not writable (cannot plant the in-root symlink)"))
+            out.append(ProbeResult("path_traversal", "(symlink vector)", "not_applicable",
+                                   rationale="CVE-2025-53109 in-root symlink NOT tested: " + why))
     finally:
+        for c in cleanups:
+            try:
+                c()
+            except Exception:  # noqa: BLE001
+                pass
         shutil.rmtree(d, ignore_errors=True)
     return out
 
@@ -481,48 +1083,121 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
     for label, name, text in surfaces:
         hits = _scan_conceal(name) + _scan_conceal(text)
         if hits:
-            out.append(ProbeResult("tool_poisoning", label, VULNERABLE,
+            out.append(ProbeResult("tool_poisoning", label, "static",
                                    evidence="; ".join(f"{c}: {e}" for c, e in hits),
                                    rationale="concealed payload in model-facing metadata "
                                              "(invisible in the approval view)"))
     return out
 
 
+# ---- SQL injection (CWE-89) — READ-ONLY payloads, honestly graded (#58) ----------------------------
+# Every payload below is read-only. A security probe must never mutate a caller's data: the old
+# "1); DROP TABLE x--" payload was removed for exactly that reason (dbhub executed multi-statement DDL live).
+def _sql_union_payloads(v: str, a: int, b: int) -> list[str]:
+    """UNION-exfil. Success = the per-run PRODUCT a*b in the response. Only real SQL evaluation produces
+    the number; a reflected payload carries the expression 'a*b', never the product — so this is PROOF.
+    Covers a string context (closes a quote) and a numeric context, 1-3 result columns."""
+    e = f"{a}*{b}"
+    tails = [f"{e}--", f"NULL,{e}--", f"NULL,NULL,{e}--"]
+    return [f"{v}' UNION SELECT {t}" for t in tails] + [f"0 UNION SELECT {t}" for t in tails]
+
+
+def _sql_boolean_triples(v: str) -> list[tuple[str, str, str]]:
+    """3-way boolean differential: (baseline, true-predicate, false-predicate), string + numeric context.
+    The string form closes the quote AND comments out the server's trailing text (`'--`), the standard
+    form for a LIKE/equality context, so the predicate really is the one we send."""
+    return [(v, f"{v}' OR '1'='1'--", f"{v}' AND '1'='2'--"), ("0", "0 OR 1=1", "0 AND 1=2")]
+
+
+_SQL_ERROR_PROBES = ["'", '"', "')--", "' OR '1'='1"]
+
+
+async def _sql_try(session, tool, param: str, value: str, returned: list, raised: list) -> str:
+    """Send one payload; return the response text (or the raised error text — some servers surface the
+    SQL error as a tool error, and that text is still the signal). Records what came back."""
+    try:
+        txt = _result_text(await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, value)})))
+        returned.append(txt)
+    except Exception as exc:  # noqa: BLE001
+        txt = str(exc)
+        raised.append(txt)
+    return txt
+
+
 async def probe_sql_injection(session, tools) -> list[ProbeResult]:
-    """Error-based SQL injection: a quote-bearing arg that surfaces a SQL parser error means
-    the input is concatenated into SQL unsanitized. Parameterised servers bind it as data and
-    stay quiet, so a SQL-specific error is a low-false-positive signal."""
+    """SQL injection, graded by HOW it was confirmed (honesty spine):
+      UNION-exfil   -> PROOF (the per-run product a*b returned)                          -> VULNERABLE
+      boolean 3-way -> INFERENCE (true/false split; a search tool can vary with input)   -> SUSPECTED
+      error-based   -> INFERENCE (a SQL parser error surfaced)                            -> SUSPECTED
+      time-based    -> EXCLUDED on purpose (wall-clock oracle: jitter/load false positives)
+    A dedicated SQL-execution tool is by_design (it runs SQL). Every payload is read-only."""
     out = []
+    a = 100000 + uuid.uuid4().int % 900000       # per-run, so the product is unique to this scan
+    b = 100000 + uuid.uuid4().int % 900000
+    product = str(a * b)
+    product_re = re.compile(rf"(?<!\d){product}(?!\d)")
     for tool in tools:
         params = _candidate_params(tool, _SQL_PARAM, _SQL_DESC, ["query", "sql", "term", "filter", "id"])
         if not params:
             continue
-        fired, used, ev = False, "", ""
-        for param in params:
-            for p in ["'", '"', "' OR '1'='1", "')--", "1); DROP TABLE x--"]:
-                try:
-                    r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    txt = _result_text(r)
-                except Exception as exc:  # noqa: BLE001 — some servers surface the SQL error as a tool error
-                    txt = str(exc)
-                if _SQL_ERR.search(txt) and not _SQL_FALSE.search(txt):   # exclude FTS5/full-text errors
-                    fired, used, ev = True, p, txt[:160]
-                    break
-            if fired:
-                break
-        if not fired:
-            out.append(ProbeResult("sql_injection", tool.name, CLEAN, evidence=used,
-                                   rationale="no SQL parser error surfaced"))
-            continue
         desc = (tool.description or "") + " " + tool.name
-        if _SQL_EXEC.search(desc):
-            out.append(ProbeResult("sql_injection", tool.name, CLEAN, evidence=used,
-                                   rationale="dedicated SQL-execution tool surfaced a SQL error — "
-                                             "by-design (it runs SQL), not injection"))
-        else:
-            out.append(ProbeResult("sql_injection", tool.name, VULNERABLE, evidence=used,
-                                   rationale=f"a non-SQL-execution tool concatenated input into SQL "
-                                             f"(error-based): {ev}"))
+        is_executor = bool(_SQL_EXEC.search(desc))
+        v = "zz_no_row_" + uuid.uuid4().hex[:6]  # a benign value that matches no row
+        returned, raised = [], []
+        proof = None
+        for param in params:                     # 1) PROOF first
+            for p in _sql_union_payloads(v, a, b):
+                txt = await _sql_try(session, tool, param, p, returned, raised)
+                if product_re.search(txt) and not _is_refusal(txt):
+                    proof = (p, txt[:160])
+                    break
+            if proof:
+                break
+        if proof:
+            if is_executor:
+                out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=proof[0],
+                                       rationale="dedicated SQL-execution tool computed a UNION product — "
+                                                 "by-design (it runs SQL), not injection"))
+            else:
+                out.append(ProbeResult("sql_injection", tool.name, "oracle", evidence=proof[0],
+                                       rationale=f"UNION-based SQL injection: the server returned the per-run "
+                                                 f"product {product}, which only SQL evaluation can produce "
+                                                 "(read-only payload)"))
+            continue
+        lead = None                              # 2) INFERENCE only — never confirmed on its own
+        for param in params:
+            for base, t_true, t_false in _sql_boolean_triples(v):
+                tb = await _sql_try(session, tool, param, base, returned, raised)
+                tt = await _sql_try(session, tool, param, t_true, returned, raised)
+                tf = await _sql_try(session, tool, param, t_false, returned, raised)
+                tt2 = await _sql_try(session, tool, param, t_true, returned, raised)   # determinism check
+                tf2 = await _sql_try(session, tool, param, t_false, returned, raised)
+                if tt != tf and tf == tb and tt2 == tt and tf2 == tf:
+                    lead = ("boolean", f"true '{t_true}' vs false '{t_false}' split, deterministic")
+                    break
+            if lead:
+                break
+            for p in _SQL_ERROR_PROBES:
+                txt = await _sql_try(session, tool, param, p, returned, raised)
+                if _SQL_ERR.search(txt) and not _SQL_FALSE.search(txt):   # exclude FTS5/full-text errors
+                    lead = ("error-based", txt[:160])
+                    break
+            if lead:
+                break
+        if lead:
+            kind, ev = lead
+            if is_executor:
+                out.append(ProbeResult("sql_injection", tool.name, "by_design", evidence=ev,
+                                       rationale="dedicated SQL-execution tool surfaced a SQL-level signal — "
+                                                 "by-design (it runs SQL)"))
+            else:
+                out.append(ProbeResult("sql_injection", tool.name, "signature", evidence=ev,
+                                       rationale=f"{kind} SQL inference, not a proof: {ev} — a search/filter "
+                                                 "tool can vary with input without being injectable, so this "
+                                                 "is a lead to confirm"))
+            continue
+        out.append(ProbeResult("sql_injection", tool.name, _negative_method(returned, raised),
+                               rationale="no UNION product, boolean split or SQL error surfaced"))
     return out
 
 
@@ -552,19 +1227,23 @@ async def probe_arg_injection(session, tools) -> list[ProbeResult]:
         if not params:
             continue
         fired, used, ev = False, "", ""
+        returned, raised = [], []
         for param in params:
             for p in ("--version", "--help", "-V"):
                 try:
                     r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
                     txt = _result_text(r)
+                    returned.append(txt)
                 except Exception as exc:  # noqa: BLE001
                     txt = str(exc)
+                    raised.append(txt)
                 if _FLAG_EFFECT.search(txt):
                     fired, used, ev = True, p, txt[:120]
                     break
             if fired:
                 break
-        out.append(ProbeResult("arg_injection", tool.name, VULNERABLE if fired else CLEAN, evidence=used,
+        out.append(ProbeResult("arg_injection", tool.name,
+                               "signature" if fired else _negative_method(returned, raised), evidence=used,
                                rationale=(f"leading-dash value interpreted as a CLI flag by the wrapped "
                                           f"binary — argument injection: {ev}" if fired
                                           else "input not interpreted as a CLI flag")))
@@ -582,19 +1261,23 @@ async def probe_ssti(session, tools) -> list[ProbeResult]:
         if not params:
             continue
         fired, used = False, ""
+        returned, raised = [], []
         for param in params:
             for p in _SSTI_PAYLOADS:
                 try:
                     r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
                     txt = _result_text(r)
-                except Exception:  # noqa: BLE001
+                    returned.append(txt)
+                except Exception as exc:  # noqa: BLE001
                     txt = ""
+                    raised.append(str(exc))
                 if _SSTI_MARK in txt:
                     fired, used = True, p
                     break
             if fired:
                 break
-        out.append(ProbeResult("ssti", tool.name, VULNERABLE if fired else CLEAN, evidence=used,
+        out.append(ProbeResult("ssti", tool.name,
+                               "oracle" if fired else _negative_method(returned, raised), evidence=used,
                                rationale=("template expression evaluated server-side "
                                           "(1337*1337 = 1787569 in output)" if fired
                                           else "template expression not evaluated")))
@@ -609,7 +1292,7 @@ async def probe_rug_pull(session, tools) -> list[ProbeResult]:
     import hashlib
 
     def h(t):
-        body = (t.description or "") + json.dumps(t.inputSchema or {}, ensure_ascii=False, sort_keys=True)
+        body = (t.description or "") + json.dumps(_schema(t), ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(body.encode()).hexdigest()
 
     before = {t.name: h(t) for t in tools}
@@ -621,17 +1304,17 @@ async def probe_rug_pull(session, tools) -> list[ProbeResult]:
     try:
         after_tools = (await session.list_tools()).tools
     except Exception:  # noqa: BLE001
-        return [ProbeResult("rug_pull", "(server)", CLEAN, rationale="could not re-enumerate tools")]
+        return [ProbeResult("rug_pull", "(server)", "error", rationale="could not re-enumerate tools")]
     after = {t.name: h(t) for t in after_tools}
     changed = [n for n in before if n in after and before[n] != after[n]]
     added = [n for n in after if n not in before]
     removed = [n for n in before if n not in after]
     if changed or added or removed:
-        return [ProbeResult("rug_pull", (changed or added or removed)[0], VULNERABLE,
+        return [ProbeResult("rug_pull", (changed or added or removed)[0], "observed_change",
                             evidence=f"changed={changed} added={added} removed={removed}",
                             rationale="tool definitions mutated within a session "
                                       "(dynamic redefinition — rug-pull indicator)")]
-    return [ProbeResult("rug_pull", "(server)", CLEAN,
+    return [ProbeResult("rug_pull", "(server)", "oracle_negative",
                         rationale="tool definitions stable across the session")]
 
 
@@ -662,6 +1345,7 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
             if not params:
                 continue
             fired, used = False, ""
+            returned, raised = [], []
             for param in params:
                 sentinel = d / ("s_" + uuid.uuid4().hex[:10])
                 dmarker = "deser-" + uuid.uuid4().hex[:10]
@@ -674,9 +1358,10 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
                 ]
                 for p in payloads:
                     try:
-                        await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
-                    except Exception:  # noqa: BLE001
-                        pass
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001
+                        raised.append(str(exc))
                     await asyncio.sleep(0.05)
                     if sentinel.exists() or sink.hit(dmarker):
                         fired, used = True, p
@@ -684,12 +1369,12 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
                 if fired:
                     break
             if fired:
-                out.append(ProbeResult("deserialization", tool.name, VULNERABLE, evidence=used[:120],
+                out.append(ProbeResult("deserialization", tool.name, "oracle", evidence=used[:120],
                            rationale="tool deserialized attacker input and executed code (unsafe "
                                      "yaml.load / pickle.loads / eval) — ground-truthed by a sentinel "
                                      "only RCE could create (CWE-502)"))
             else:
-                out.append(ProbeResult("deserialization", tool.name, CLEAN,
+                out.append(ProbeResult("deserialization", tool.name, _negative_method(returned, raised),
                            rationale="no deserialization payload achieved code execution"))
     finally:
         sink.stop()
@@ -710,6 +1395,25 @@ def _res_text(result) -> str:
     return "\n".join(out)
 
 
+_RES_CACHE: dict | None = None      # per-scan memo, set by scan_target: body-reading probes share one read per URI
+
+
+async def _read_resource(session, uri):
+    """resources/read, shared within one scan: context_oversharing and lure_text read each body once."""
+    if _RES_CACHE is None:                                    # outside scan_target: no sharing
+        return await asyncio.wait_for(session.read_resource(uri), _CALL_TIMEOUT_S)
+    key = (id(session), str(uri))             # keyed by session too: two servers can expose the same URI
+    if key not in _RES_CACHE:
+        try:
+            _RES_CACHE[key] = (await asyncio.wait_for(session.read_resource(uri), _CALL_TIMEOUT_S), None)
+        except Exception as exc:  # noqa: BLE001 — cache the failure too, so every reader sees the same outcome
+            _RES_CACHE[key] = (None, exc)
+    res, err = _RES_CACHE[key]
+    if err is not None:
+        raise err
+    return res
+
+
 async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     """Context oversharing (OWASP MCP10, CWE-200): a tool or resource hands the model data from the
     server's environment it was never scoped to see. Ground truth: scan_target plants a unique secret
@@ -718,38 +1422,242 @@ async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
     user-supplied value is not oversharing."""
     canary = _CTX_CANARY
     if not canary:
-        return [ProbeResult("context_oversharing", "(server)", CLEAN, rationale="no context canary planted")]
+        return [ProbeResult("context_oversharing", "(server)", "not_applicable", rationale="no context canary planted")]
     out: list[ProbeResult] = []
+    returned, raised = [], []
     for t in tools:                                   # exercise each tool with benign args
         try:
             text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
-        except Exception:  # noqa: BLE001
+            returned.append(text)
+        except Exception as exc:  # noqa: BLE001
+            raised.append(str(exc))
             continue
         if canary in text:
-            out.append(ProbeResult("context_oversharing", t.name, VULNERABLE, marker=canary,
+            out.append(ProbeResult("context_oversharing", t.name, "oracle", marker=canary,
                        rationale="tool returned the server's environment context (a planted secret) to "
                                  "the model — context oversharing (OWASP MCP10 / CWE-200)"))
     try:                                              # and every resource the server exposes
         for res in (await session.list_resources()).resources:
             try:
-                text = _res_text(await session.read_resource(res.uri))
-            except Exception:  # noqa: BLE001
+                text = _res_text(await _read_resource(session, res.uri))
+                returned.append(text)
+            except Exception as exc:  # noqa: BLE001
+                raised.append(str(exc))
                 continue
             if canary in text:
-                out.append(ProbeResult("context_oversharing", "resource:" + str(res.uri), VULNERABLE,
+                out.append(ProbeResult("context_oversharing", "resource:" + str(res.uri), "oracle",
                            marker=canary, rationale="resource exposed the server's environment context "
                                                     "(a planted secret) to the model (OWASP MCP10 / CWE-200)"))
     except Exception:  # noqa: BLE001 — many servers expose no resources endpoint
         pass
     if not out:
-        out.append(ProbeResult("context_oversharing", "(server)", CLEAN,
+        out.append(ProbeResult("context_oversharing", "(server)", _negative_method(returned, raised),
                    rationale="no tool or resource surfaced the planted environment secret"))
     return out
 
 
-ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal,
+_SCHEMA_DOC_KEYS = ("title", "description", "examples", "default")
+
+
+def _schema_docs(node, path: str = "") -> list[tuple[str, str]]:
+    """(path, text) for every documentation string in a JSON schema: titles, descriptions, examples, defaults."""
+    out: list[tuple[str, str]] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = f"{path}.{k}" if path else k
+            if k in _SCHEMA_DOC_KEYS and isinstance(v, str):
+                out.append((p, v))
+            elif k in _SCHEMA_DOC_KEYS and isinstance(v, list):
+                out += [(p, x) for x in v if isinstance(x, str)]
+            elif isinstance(v, (dict, list)):
+                out += _schema_docs(v, p)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out += _schema_docs(v, f"{path}[{i}]")
+    return out
+
+
+def _lure_rows(owner: str, surfaces: list[tuple[str, str]]) -> list[ProbeResult]:
+    """One SUSPECTED row per lure, with its surface and matched span as evidence. A CLEAN row when none is found,
+    so coverage shows the text was read; that CLEAN is only the static scan's own negative."""
+    rows = []
+    for path, text in surfaces:
+        for rule, span in scan_text(text):
+            rows.append(ProbeResult("lure_text", owner, "static", marker=rule,
+                                    evidence=f'{owner} / {path}: "{span}"', rationale=RULE_WHY[rule]))
+    if not rows:
+        rows.append(ProbeResult("lure_text", owner, "oracle_negative",
+                                rationale="static scan of the model-facing text found no lure (runtime elicitation "
+                                          "and sampling text is not visible without a call)"))
+    return rows
+
+
+async def probe_lure_text(session, tools) -> list[ProbeResult]:
+    """Model-directed lure text (Detector Unit 1): tool descriptions, parameter text, annotations, resource bodies and prompt text
+    that tell the model to forward a credential, override what it was told to do, call a forward safe, or request
+    a credential "for confirmation". Static, so every hit is a SUSPECTED lead, never VULNERABLE."""
+    out: list[ProbeResult] = []
+    for t in tools:
+        a = getattr(t, "annotations", None)
+        ann = a.model_dump(exclude_none=True) if hasattr(a, "model_dump") else dict(a or {})
+        surfaces = [("description", t.description or ""), ("title", getattr(t, "title", None) or "")]
+        surfaces += [(f"annotations.{k}", v) for k, v in ann.items() if isinstance(v, str)]
+        surfaces += [(f"schema.{p}", v) for p, v in _schema_docs(_schema(t))]
+        out += _lure_rows(t.name, surfaces)
+    try:
+        resources = (await session.list_resources()).resources
+    except Exception as exc:  # noqa: BLE001
+        resources = []
+        if getattr(getattr(exc, "error", None), "code", None) != -32601:    # -32601: no resources endpoint
+            out.append(ProbeResult("lure_text", "(resources)", "error",
+                                   rationale=f"resources/list failed: {_unwrap(exc)[:120]}"))
+    for r in resources:
+        owner = f"resource:{r.uri}"
+        try:
+            res = await _read_resource(session, r.uri)
+        except Exception as exc:  # noqa: BLE001
+            out.append(ProbeResult("lure_text", owner, "error",
+                                   rationale=f"resources/read failed: {_unwrap(exc)[:120]}"))
+            continue
+        contents = getattr(res, "contents", None) or []
+        texts = [c.text for c in contents if getattr(c, "text", None)]
+        if contents and not texts:                  # binary only: nothing was decoded, so nothing was scanned
+            out.append(ProbeResult("lure_text", owner, "error",
+                                   rationale="binary-only resource: body not decoded, lure text not scanned"))
+            continue
+        out += _lure_rows(owner, [("name", r.name or ""), ("description", r.description or ""),
+                                  ("body", "\n".join(texts))])
+    try:    # prompts are model-facing text too: a template's messages are what the model is handed
+        prompts = (await session.list_prompts()).prompts
+    except Exception as exc:  # noqa: BLE001
+        prompts = []
+        if getattr(getattr(exc, "error", None), "code", None) != -32601:    # -32601: no prompts endpoint
+            out.append(ProbeResult("lure_text", "(prompts)", "error",
+                                   rationale=f"prompts/list failed: {_unwrap(exc)[:120]}"))
+    for p in prompts:
+        owner = f"prompt:{p.name}"
+        args = list(p.arguments or [])
+        meta = [("name", p.name or ""), ("description", p.description or "")]
+        meta += [(f"argument.{a.name}", a.description or "") for a in args]
+        try:    # rendered with placeholder values, so the text the model would receive is what gets scanned
+            res = await asyncio.wait_for(session.get_prompt(p.name, {a.name: "example" for a in args}), _CALL_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            out.append(ProbeResult("lure_text", owner, "error", rationale=f"prompts/get failed: {_unwrap(exc)[:120]}"))
+            continue
+        texts = [m.content.text for m in (res.messages or []) if getattr(m.content, "text", None)]
+        out += _lure_rows(owner, meta + [("messages", "\n".join(texts))])
+    if not out:
+        out.append(ProbeResult("lure_text", "(server)", "not_applicable",
+                               rationale="no tools, resources or prompts exposed"))
+    return out
+
+
+async def probe_session_argument(session, tools) -> list[ProbeResult]:
+    """A session-type credential requested as a tool argument (Unit 2). Static and argument-level: one argument's own
+    description asks the model for the agent's session-type credential. A well-built server authenticates through its own
+    configuration, so a hit is a SUSPECTED lead, never VULNERABLE. The vocabulary and boundary are Unit 1's (hunt/lure_text.py)."""
+    out: list[ProbeResult] = []
+    for t in tools:
+        purpose_sessions = bool(re.search(r"\bsessions?\b", t.description or "", re.I))
+        found = False
+        for arg, spec in (_schema(t).get("properties") or {}).items():
+            spec = spec if isinstance(spec, dict) else {}
+            if non_string_type(spec):      # a credential is a string: an integer, number or boolean argument is not one
+                continue
+            desc, title = spec.get("description"), spec.get("title")
+            hits = [("description", r, s) for r, s in scan_argument_text(desc if isinstance(desc, str) else "")]
+            hits += [("title", r, s) for r, s in scan_argument_text(title if isinstance(title, str) else "")]
+            hits += [("name", r, s) for r, s in scan_argument_name(arg)]
+            for surface, rule, span in hits:
+                found = True
+                weaker = "; weaker: the tool's stated purpose involves sessions" if purpose_sessions else ""
+                out.append(ProbeResult("session_argument", t.name, "static", marker=rule,
+                                       evidence=f'{t.name} / argument {arg} ({surface}): "{span}"',
+                                       rationale="a tool argument asks the model for the agent's session-type credential" + weaker))
+        if not found:
+            out.append(ProbeResult("session_argument", t.name, "oracle_negative",
+                                   rationale="no argument requests the agent's session-type credential"))
+    return out
+
+
+# --- XXE (XML external entity): a tool parses attacker XML with external-entity resolution ----------
+# Oracle only, per-run: FIRES iff OUR planted-file nonce comes back (CWE-611 arbitrary file read) or OUR
+# loopback canary records the parser's out-of-band fetch (XXE-driven SSRF). A safe parser disables external
+# entities (defusedxml / resolve_entities=False) and never resolves our entity. Reflection is NOT proof: the
+# file nonce is independent of the payload text, so echoing the payload can never satisfy the oracle.
+# NON-DESTRUCTIVE: every payload is a SINGLE external-entity / external-DTD reference — no nested or parameter
+# entities, no expansion/amplification (never a billion-laughs). The file entity targets ONLY our own planted
+# nonce file, never a real system path. These invariants are asserted structurally in tests/test_xxe.py.
+_XML_PARAM = re.compile(r"xml|svg|xsl|xslt|dtd|soap|rss|feed|doc|document|content|markup|profile|body|data|payload|config", re.I)
+_XML_DESC = re.compile(r"\bxml\b|svg|xsl|xslt|\bparse|document|\bfeed\b|\brss\b|import|markup|\bdtd\b|entity|\bsoap\b", re.I)
+_XXE_FILE_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file://{path}">]><r>&x;</r>'
+_XXE_OOB_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "{url}">]><r>&x;</r>'
+_XXE_DTD_PAYLOAD = '<?xml version="1.0"?><!DOCTYPE r SYSTEM "{url}"><r>ok</r>'
+_XXE_PAYLOAD_TEMPLATES = (_XXE_FILE_PAYLOAD, _XXE_OOB_PAYLOAD, _XXE_DTD_PAYLOAD)
+
+
+async def probe_xxe(session, tools) -> list[ProbeResult]:
+    """XML external entity. Send XML payloads to string args (XML/markup-named prioritized, else the first
+    couple — name-free: the vocabulary only ORDERS attempts, the oracle DECIDES). Oracle = our planted-file
+    nonce in the output (file-read XXE) or our loopback canary recording the parser's outbound fetch (OOB)."""
+    out = []
+    sink = _Sink().start()
+    workdir = tempfile.mkdtemp(prefix="mcprt_xxe_")
+    try:
+        for tool in tools:
+            # Name-free: XML/markup-named params, else (when the tool's name/description says it parses
+            # documents) its first string params. The vocabulary only ORDERS; the oracle DECIDES. We do NOT
+            # blast XML at every string arg — a url/cmd param never parses XML, and driving one triggers real
+            # network/exec timeouts for zero added coverage (same discipline as every other probe).
+            params = _candidate_params(tool, _XML_PARAM, _XML_DESC, ["xml", "document", "content", "data", "body"])
+            if not params:
+                out.append(ProbeResult("xxe", tool.name, "not_applicable",
+                                       rationale="no XML/document argument to carry an entity payload"))
+                continue
+            tok = uuid.uuid4().hex[:12]                        # path + OOB token
+            nonce = "XXE" + uuid.uuid4().hex[:16]              # file CONTENTS — independent of the payload text
+            planted = os.path.join(workdir, f"xf_{tok}.txt")   # OUR file only; never a real system path
+            with open(planted, "w", encoding="utf-8") as f:
+                f.write(nonce)
+            oob = f"http://127.0.0.1:{sink.port}/{tok}"
+            payloads = [_XXE_FILE_PAYLOAD.format(path=planted),
+                        _XXE_OOB_PAYLOAD.format(url=oob),
+                        _XXE_DTD_PAYLOAD.format(url=oob + ".dtd")]
+            returned, raised = [], []
+            for param in params:
+                for pl in payloads:
+                    try:
+                        r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, pl)}))
+                        returned.append(_result_text(r))
+                    except Exception as exc:  # noqa: BLE001 — a failed call is an observation, not a crash
+                        raised.append(str(exc))
+            await asyncio.sleep(0.3)
+            if any(nonce in t for t in returned):              # A: an external entity resolved OUR planted file
+                out.append(ProbeResult("xxe", tool.name, "oracle", marker=nonce,
+                                       evidence=f"{tool.name}: planted-file nonce returned via XML entity",
+                                       rationale="resolved an external entity to an arbitrary planted file "
+                                                 "(XXE / arbitrary file read); a safe parser disables "
+                                                 "external-entity resolution"))
+            elif sink.hit(f"/{tok}"):                          # B/C: the parser made the out-of-band fetch
+                out.append(ProbeResult("xxe", tool.name, "oracle", marker=tok,
+                                       evidence=f"{tool.name} -> loopback canary via XML entity/DTD",
+                                       rationale="resolved an external entity/DTD to an attacker-controlled "
+                                                 "URL (out-of-band XXE / SSRF-via-XXE); a safe parser disables "
+                                                 "external-entity resolution"))
+            else:
+                out.append(ProbeResult("xxe", tool.name, _negative_method(returned, raised), marker=tok,
+                                       rationale="no external entity resolved (no planted-file read, no "
+                                                 "out-of-band fetch)"))
+    finally:
+        sink.stop()
+        shutil.rmtree(workdir, ignore_errors=True)
+    return out
+
+
+ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal, probe_xxe,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
-              probe_arg_injection, probe_deserialization, probe_context_oversharing]
+              probe_arg_injection, probe_deserialization, probe_context_oversharing,
+              probe_lure_text, probe_session_argument]
 
 
 class ScanError(RuntimeError):
@@ -770,6 +1678,24 @@ def _unwrap(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}".strip().rstrip(":").strip()[:200]
 
 
+# Timeouts (seconds), env-overridable — no per-tool/per-server special-casing. A single slow or
+# hanging tool must never wedge the whole scan, and a stuck connect must not hang forever.
+_CALL_TIMEOUT_S = float(os.environ.get("MCPRT_CALL_TIMEOUT_S", "20"))
+_CONNECT_TIMEOUT_S = float(os.environ.get("MCPRT_CONNECT_TIMEOUT_S", "30"))
+
+
+def _guard_call_tool(session, timeout: float) -> None:
+    """Bound every tool call on this session by `timeout`. Probes already treat a raised
+    exception as 'no result' and move on, so a hung tool is skipped, not fatal. One wrap
+    here covers all call sites — no per-tool logic."""
+    original = session.call_tool
+
+    async def guarded(*args, **kwargs):
+        return await asyncio.wait_for(original(*args, **kwargs), timeout)
+
+    session.call_tool = guarded
+
+
 async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                       surface: dict | None = None) -> list[ProbeResult]:
     # Spawn the target in a throwaway cwd so any stray write (by the server or a payload) lands
@@ -780,8 +1706,9 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     # Plant a unique secret in the server's environment. If any tool/resource surfaces it to the model,
     # the server overshares its context (MCP10) — ground truth, since a random UUID can't be coincidence.
     # ponytail: module global = one-scan-at-a-time; add a context arg if we ever scan concurrently.
-    global _CTX_CANARY
+    global _CTX_CANARY, _RES_CACHE
     _CTX_CANARY = "mcprt-ctx-" + uuid.uuid4().hex
+    _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=child_env, cwd=workdir)
@@ -789,11 +1716,13 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     try:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:
-                await s.initialize()
-                tools = (await s.list_tools()).tools
+                # Bound connect/handshake so an unresponsive server fails fast instead of hanging.
+                await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
+                _guard_call_tool(s, _CALL_TIMEOUT_S)
+                tools = (await asyncio.wait_for(s.list_tools(), _CONNECT_TIMEOUT_S)).tools
                 if surface is not None:          # inventory the attack surface in-session (no 2nd connect)
                     surface["tools"] = [{"name": t.name,
-                                         "params": sorted((getattr(t, "inputSchema", None) or {}).get("properties", {}))}
+                                         "params": sorted(_schema(t).get("properties", {}))}
                                         for t in tools]
                     try:
                         surface["resources"] = [str(getattr(r, "uri", getattr(r, "name", "")))
@@ -811,10 +1740,17 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                         except Exception as le:  # noqa: BLE001
                             surface["auth_gated"] = is_auth_error(str(le))
                 for probe in (probes or ALL_PROBES):
-                    results.extend(await probe(s, tools))
+                    # Isolate each probe: a timeout or error in one class must not discard the
+                    # verdicts already gathered by the others. Partial coverage beats no result.
+                    try:
+                        results.extend(await probe(s, tools))
+                    except Exception as pe:  # noqa: BLE001
+                        results.append(ProbeResult(getattr(probe, "__name__", "probe"), "-", "error",
+                                                   rationale=f"probe aborted: {_unwrap(pe) or type(pe).__name__}"))
     except Exception as exc:   # unwrap anyio/TaskGroup noise into a readable root cause (timeouts/cancel still propagate)
         raise ScanError(_unwrap(exc) or f"{type(exc).__name__}: {exc}"[:200]) from exc
     finally:
+        _RES_CACHE = None
         shutil.rmtree(workdir, ignore_errors=True)
     return results
 
@@ -840,7 +1776,9 @@ def _print(results: list[ProbeResult]) -> None:
         print("  (no candidate tools matched any probe)")
         return
     for r in results:
-        tag = {"VULNERABLE": "\033[31mVULN\033[0m", "CLEAN": "\033[32mok\033[0m"}.get(r.verdict, r.verdict)
+        tag = {"VULNERABLE": "\033[31mVULN\033[0m", "SUSPECTED": "\033[33mSUSPECT\033[0m",
+               "CLEAN": "\033[32mok\033[0m", "INCONCLUSIVE": "\033[90mINCONCL\033[0m",
+               "NOT_APPLICABLE": "\033[90mn/a\033[0m"}.get(r.verdict, r.verdict)
         print(f"  [{tag:>12}] {r.probe:<18} {r.tool:<22} {r.rationale}")
 
 
@@ -850,8 +1788,9 @@ def _selftest() -> bool:
     vuln = asyncio.run(scan_target([py, str(base / "vuln_server.py")]))
     safe = asyncio.run(scan_target([py, str(base / "safe_server.py")]))
 
-    def fired(results, probe):
-        return any(r.verdict == VULNERABLE for r in results if r.probe == probe)
+    def fired(results, probe):   # a probe "fires" if it reaches a POSITIVE signal — proof (VULNERABLE)
+        return any(r.verdict in (VULNERABLE, SUSPECTED)   # or inference lead (SUSPECTED), per the spine
+                   for r in results if r.probe == probe)
 
     print("vuln fixture (every probe must FIRE):")
     _print(vuln)

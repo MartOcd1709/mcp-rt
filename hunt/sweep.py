@@ -44,7 +44,8 @@ def _missing_env(reason: str) -> list[str]:
 
 from hunt.benchmark import grade_report
 from hunt.findings_db import DB
-from hunt.report import preserve, record, run_full_scan
+from hunt.report import CLASS_META, preserve, record, run_full_scan
+from mcp_rt import engine_version
 
 FS_DIR = "/tmp/fs_allowed"
 GIT_REPO = "/tmp/gitrepo"
@@ -222,17 +223,22 @@ def _verdict_for(cat: str) -> str:
 
 
 def _classify(reason: str) -> str:
-    """Bucket an INCONCLUSIVE reason so the denominator is honest (recoverable vs not-a-target)."""
+    """Bucket an INCONCLUSIVE reason so the denominator is honest (recoverable vs not-a-target).
+    Goal: almost nothing stays an opaque 'OTHER' — every inconclusive carries a real reason."""
     r = reason.lower()
-    if _NEEDS_SUB_RE.search(reason):
+    if _NEEDS_SUB_RE.search(reason) or "no command specified" in r:
         return "NEEDS_SUBCOMMAND"
-    if any(x in r for x in ("required environment", "client_id", "api key", "missing env",
-                            "must be set", "not configured", "credentials")):
+    if any(x in r for x in ("required environment", "client_id", "api key", "api_key", "missing env",
+                            "must be set", "not configured", "credentials", "specify a model",
+                            "set a default model", "--token", "token is", "bearer", "manquante",
+                            "令牌", "api-key", "auth", "connection string", "no connection", "--db",
+                            "环境变量", "未设置", "数据库", "getaddrinfo", "database file")):
         return "NEEDS_CONFIG"
     # Broken/incompatible package: Node module-resolution failures AND Python import failures
     # (e.g. "No module named 'mcp.server.fastmcp'" — a server pinned to the mcp 1.x API in our 2.x env).
-    if any(x in r for x in ("syntaxerror", "does not provide an export", "cannot find module",
-                            "err_module", "unexpected token",
+    if any(x in r for x in ("syntaxerror", "syntax error", "does not provide an export",
+                            "cannot find module", "err_module", "unexpected token", "invalid command",
+                            "err_package_path_not_exported", "schema is missing", "dynamic require of",
                             "no module named", "modulenotfounderror", "importerror")):
         return "BROKEN_PACKAGE"
     # npm package exposing multiple/ambiguous bins ("The following executables are available:") —
@@ -241,7 +247,15 @@ def _classify(reason: str) -> str:
         return "ENTRYPOINT_NOT_FOUND"
     if any(x in r for x in ("npm err", "404", "etarget", "install")):
         return "INSTALL_FAILED"
-    if "not found" in r:
+    # Server STARTED but we couldn't establish/complete an MCP session (handshake/transport error) —
+    # honest inconclusive: it ran, it just didn't speak clean MCP to us. Not a verdict on security.
+    if any(x in r for x in ("exceptiongroup", "taskgroup", "could not probe", "connection closed",
+                            "closedresource", "broken pipe", "mcperror", "err_invalid_url",
+                            "schema is mi", "transport", "reverse --url")):
+        return "PROTOCOL_ERROR"
+    if any(x in r for x in ("scan exceeded", "scan_timeout", "timeoutexpired", "timed out", "timeout")):
+        return "SCAN_TIMEOUT"
+    if any(x in r for x in ("not found", "enoent", "no such file")):
         return "ENTRYPOINT_NOT_FOUND"
     return "OTHER"
 
@@ -268,50 +282,89 @@ def prewarm(cmd: str) -> None:
         pass
 
 
+def _record_inc(db: DB, t: dict, verdict: str, cat: str, why: str, source: str, ev: str = "") -> dict:
+    """Record a non-graded outcome (INCONCLUSIVE / SETUP_FAILED) to the ledger and return its result dict."""
+    tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
+    db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}", engine_version=ev)
+    print(f"   -> {verdict} [{cat}] ({why[:70]})")
+    return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
+
+
+async def _sealed_scan(target_argv, token, timeout, pkg_name, extra_env=None):
+    """B1: run the full floor scan INSIDE the Unit-3 seal. Build the launcher (unshare -rn sandbox.py …),
+    run run_full_scan against it (so every floor probe runs against the sealed target with no probe change),
+    then read the launcher's report.json (seal proof) + events.jsonl (recorder egress).
+    Returns (rep, sealed, report, server_events)."""
+    from mcp_rt.runtime.runner import _read_events, _read_json, build_sealed_launcher
+    workdir = tempfile.mkdtemp(prefix="mcprt-sweep-seal-")
+    params, paths = build_sealed_launcher(list(target_argv), workdir, token, extra_env=extra_env)
+    launcher_argv = [params.command, *params.args]
+    rep = await asyncio.wait_for(
+        run_full_scan(launcher_argv, env=params.env, pkg_name=pkg_name, sealed=True), timeout)
+    report = _read_json(paths["report"])
+    events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
+    return rep, bool(report.get("sealed")), report, events
+
+
 def scan_one(t: dict, db: DB, timeout: int = 120, source: str = "npm") -> dict:
-    """Resolve launch → prewarm → full scan (with dummy-env config recovery) → record to the ledger.
-    The single per-target unit shared by `sweep` and `daily`; the opaque anyio TaskGroup is already
-    unwrapped to a real reason upstream (hunt.probes.scan_target). Returns a result dict."""
+    """B1 sealed sweep unit: resolve launch → run the full floor scan INSIDE the Unit-3 seal (fail-closed)
+    → merge the egress oracle → record. NO host fallback: a target whose seal is not proven is INCONCLUSIVE
+    (SANDBOX_UNPROVEN), never retried on the host. Launch-resolution/prewarm/diagnose are brief pre-seal host
+    runs (how we figure out HOW to launch); for an untrusted mass-run the OPERATOR performs the install in a
+    throwaway container — the one unsealed step (see docs/BATCH_AUDIT_DESIGN.md). Shared by `sweep` and
+    `daily`; `daily` inherits the seal for free."""
+    import secrets
+
+    from mcp_rt.runtime import observe
     print(f"== {t['name']} ==")
+    ev = engine_version()                                # resume key: a probe-source change re-scans (#19 B2)
     t["cmd"] = _resolve_launch(t["cmd"])                 # recover 'needs a subcommand' servers
     prewarm(t["cmd"])
-    rep = None
+    token = "HT-" + secrets.token_hex(8)
+    target_argv = shlex.split(t["cmd"])
+    rep = sealed = report = events = None
     try:
-        rep = asyncio.run(asyncio.wait_for(run_full_scan(shlex.split(t["cmd"])), timeout=timeout))
+        rep, sealed, report, events = asyncio.run(_sealed_scan(target_argv, token, timeout, t["name"]))
     except (asyncio.TimeoutError, TimeoutError):
-        # Got far enough to be slow (a fast crash raises ScanError, not a timeout): the server is
-        # probeable, just over budget (e.g. a live network call per tool). Distinct from can't-start.
-        cat = "SCAN_TIMEOUT"
-        why = f"scan exceeded {timeout}s (server started but slow — probeable; raise --timeout to complete)"
-        tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-        db.add_scan(tid, mode="sweep", verdict="INCONCLUSIVE", agent="n/a", notes=f"[{cat}] {why}")
-        print(f"   -> INCONCLUSIVE [{cat}] (over {timeout}s; raise --timeout to complete)")
-        return {"name": t["name"], "verdict": "INCONCLUSIVE", "cat": cat, "why": why}
+        return _record_inc(db, t, "INCONCLUSIVE", "SCAN_TIMEOUT",
+                           f"sealed scan exceeded {timeout}s (server started but slow; raise --timeout)", source, ev)
     except Exception:  # noqa: BLE001
         why = _diagnose(t["cmd"]); cat = _classify(why)  # honest category, not "ExceptionGroup"
         miss = _missing_env(why) if cat == "NEEDS_CONFIG" else []
-        if miss:                                          # config recovery: retry with dummy env
+        if miss:                                          # config recovery: retry SEALED with dummy target env
             try:
-                rep = asyncio.run(asyncio.wait_for(
-                    run_full_scan(shlex.split(t["cmd"]),
-                                  env={**os.environ, **{v: "mcprt-dummy" for v in miss}}),
-                    timeout=timeout))
+                rep, sealed, report, events = asyncio.run(
+                    _sealed_scan(target_argv, token, timeout, t["name"],
+                                 extra_env={v: "mcprt-dummy" for v in miss}))
                 print(f"   (config-recovered via dummy env: {', '.join(miss)})")
             except Exception:  # noqa: BLE001
                 rep = None
         if rep is None:
-            verdict = _verdict_for(cat)
-            tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
-            db.add_scan(tid, mode="sweep", verdict=verdict, agent="n/a", notes=f"[{cat}] {why}")
-            print(f"   -> {verdict} [{cat}] ({why[:70]})")
-            return {"name": t["name"], "verdict": verdict, "cat": cat, "why": why}
+            return _record_inc(db, t, _verdict_for(cat), cat, why, source, ev)
+    # Fail-closed: no host fallback. A scan we can't prove was sealed is INCONCLUSIVE, never a trusted CLEAN.
+    if not sealed:
+        return _record_inc(db, t, "INCONCLUSIVE", "SANDBOX_UNPROVEN",
+                           f"seal not proven: {(report or {}).get('error') or 'unknown'}", source, ev)
+    # Merge the Unit-3 egress oracle over the sealed server-phase events (outbound the floor probes don't see).
+    claim = " \n ".join(s.get("name", "") for s in (rep.get("surface", {}).get("tools") or []))
+    eg = observe.classify_egress(events, token, claim)
+    if isinstance(eg, dict) and eg.get("verdict") == "VULNERABLE":
+        f = {"cls": "egress", "tool": eg.get("tool") or "(server)",
+             "evidence": (eg.get("evidence") or "")[:300], "detail": eg.get("rationale", "")}
+        f.update(CLASS_META.get("egress", dict(sev="High", cwe="CWE-200", owasp=[], title="egress", fix="")))
+        rep["findings"].append(f)
+        rep["verdict"] = "VULNERABLE"
+    rep["target"] = " ".join(target_argv)                # record/report under the REAL target, not the launcher
     rdir = preserve(rep)
     record(rep, rdir)
     b = grade_report(rep)
     fired = ", ".join(f"{f['cls']}:{f['tool']}" for f in rep["findings"]) or "clean"
-    print(f"   -> Grade {b['grade']} ({b['score']}/100)  {fired}")
+    tid = db.add_target(name=t["name"], install_cmd=t["cmd"], source=source)
+    db.add_scan(tid, mode="sweep", verdict=rep["verdict"], agent="n/a", evidence=rdir,
+                notes=fired, engine_version=ev)          # resume anchor: this target @ this engine_version
+    print(f"   -> [SEALED] Grade {b['grade']} ({b['score']}/100)  {fired}")
     return {"name": t["name"], "verdict": rep["verdict"], "grade": b["grade"],
-            "score": b["score"], "findings": rep["findings"], "report_dir": rdir}
+            "score": b["score"], "findings": rep["findings"], "report_dir": rdir, "sealed": True}
 
 
 # --- PyPI / uvx discovery (the Python MCP ecosystem — npm's search misses it entirely) -----------
@@ -376,6 +429,46 @@ def discover_pypi(cap: int, seen: set | None = None) -> list[dict]:
     return out
 
 
+# --- B3: one honest, ranked batch-triage report over a sweep run -----------------------------------
+_VERDICT_RANK = {"VULNERABLE": 0, "SUSPECTED": 1, "INCONCLUSIVE": 2, "SETUP_FAILED": 3, "CLEAN": 4}
+
+
+def batch_report(db: DB, ev: str) -> str:
+    """Ranked Markdown triage over the sweep rows at engine_version `ev`: VULNERABLE → SUSPECTED →
+    INCONCLUSIVE → SETUP_FAILED → CLEAN. INCONCLUSIVE and SETUP_FAILED are kept visible and NEVER folded into
+    clean (the honest denominator is the asset). One row per target (its latest sweep scan at this engine)."""
+    rows = db.conn.execute(
+        "SELECT t.name, s.verdict, s.notes, s.evidence, s.scanned_at FROM scans s "
+        "JOIN targets t ON t.id = s.target_id WHERE s.mode='sweep' AND s.engine_version=? "
+        "ORDER BY s.scanned_at", (ev,)).fetchall()
+    latest = {r["name"]: r for r in rows}                       # last sweep row per target wins
+    items = sorted(latest.values(), key=lambda r: (_VERDICT_RANK.get(r["verdict"], 9), r["name"]))
+    c = Counter(r["verdict"] for r in items)
+    graded = c.get("VULNERABLE", 0) + c.get("SUSPECTED", 0) + c.get("CLEAN", 0)
+    ran = graded + c.get("INCONCLUSIVE", 0)                     # setup-failed never ran
+    out = ["# mcp-rt batch sweep — triage report", "",
+           f"engine_version: `{ev}`  ·  targets: {len(items)}", "",
+           "## Coverage (INCONCLUSIVE / SETUP_FAILED never folded into clean)",
+           f"- **VULNERABLE**: {c.get('VULNERABLE', 0)}",
+           f"- SUSPECTED (leads): {c.get('SUSPECTED', 0)}",
+           f"- CLEAN: {c.get('CLEAN', 0)}",
+           f"- INCONCLUSIVE: {c.get('INCONCLUSIVE', 0)}  (ran, no verdict reached)",
+           f"- SETUP_FAILED: {c.get('SETUP_FAILED', 0)}  (never ran — excluded from the reliability denominator)",
+           f"- verdict rate: {graded}/{ran} of servers that ran reached a verdict" if ran else "", "",
+           "## Targets (ranked)", "", "| target | verdict | detail |", "|---|---|---|"]
+    out += [f"| {r['name']} | {r['verdict']} | {(r['notes'] or '')[:90]} |" for r in items]
+    return "\n".join(x for x in out if x is not None) + "\n"
+
+
+def write_batch_report(db: DB, ev: str, outdir: str = "bench_results") -> str:
+    """Write the batch triage report to bench_results/ (gitignored, like the Unit-3 scorecard)."""
+    d = __import__("pathlib").Path(outdir)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"batch_sweep_{ev}.md"
+    p.write_text(batch_report(db, ev))
+    return str(p)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="hunt.sweep", description="mass-sweep MCP servers")
     p.add_argument("--cap", type=int, default=10, help="max servers to test")
@@ -416,8 +509,13 @@ def main(argv=None) -> int:
     print(f"sweep: {len(targets)} target(s)\n")
 
     db = DB()
-    grades, classes, inconclusive, setup_failed, incat = Counter(), Counter(), 0, 0, Counter()
+    ev = engine_version()
+    grades, classes, inconclusive, setup_failed, incat, skipped = Counter(), Counter(), 0, 0, Counter(), 0
     for t in targets:
+        if db.scanned_at_engine(t["name"], ev):          # resume: already scanned at the current engine (#19 B2)
+            print(f"== {t['name']} == skip (already scanned at engine {ev})")
+            skipped += 1
+            continue
         r = scan_one(t, db, timeout=args.timeout, source="npm")
         if r["verdict"] in ("INCONCLUSIVE", "SETUP_FAILED"):
             incat[r["cat"]] += 1
@@ -429,11 +527,14 @@ def main(argv=None) -> int:
             grades[r["grade"]] += 1
             for f in r["findings"]:
                 classes[f["cls"]] += 1
+    report_path = write_batch_report(db, ev)              # B3: one honest, ranked batch triage report
     db.close()
 
     graded = sum(grades.values())
     ran = graded + inconclusive          # servers that actually started (setup_failed never did)
     print("\n=== sweep summary ===")
+    if skipped:
+        print(f"resumed:          {skipped} skipped (already scanned at engine {ev})")
     print(f"servers tested:   {graded}  (+{inconclusive} inconclusive, +{setup_failed} setup-failed)")
     if ran:
         print(f"verdict rate:     {graded}/{ran} = {100*graded//ran}% of servers that ran reached a verdict")
@@ -442,6 +543,7 @@ def main(argv=None) -> int:
     print(f"grade distribution: {dict(grades)}")
     print(f"findings by class:  {dict(classes)}")
     print(f"total findings:     {sum(classes.values())}")
+    print(f"batch report:     {report_path}")
     print("ledger:", DB().summary())
     return 0
 

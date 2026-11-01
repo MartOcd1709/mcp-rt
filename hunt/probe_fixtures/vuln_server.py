@@ -10,10 +10,13 @@ probe actually fires. The safe twin (safe_server.py) has the same tools done cor
 """
 from __future__ import annotations
 
+import io
 import re
 import sqlite3
 import subprocess
 import urllib.request
+import xml.sax
+from xml.sax.handler import ContentHandler, feature_external_ges
 
 import anyio
 import yaml
@@ -48,6 +51,22 @@ def _render(s: str) -> str:
                 return m.group(0)
         return m.group(0)
     return re.sub(r"(?:\{\{|\$\{|#\{|<%=)\s*([^}%]+?)\s*(?:\}\}|\}|%>)", repl, s)
+
+
+def _xxe_parse(xml_text: str) -> str:
+    """Vulnerable XML parse: external general entities ENABLED → resolves file:// and http:// entities (XXE,
+    CWE-611). A safe parser leaves this feature off (the default) or uses defusedxml."""
+    chunks: list[str] = []
+
+    class _H(ContentHandler):
+        def characters(self, data):
+            chunks.append(data)
+
+    p = xml.sax.make_parser()
+    p.setFeature(feature_external_ges, True)   # noqa: S317 — deliberately vulnerable fixture
+    p.setContentHandler(_H())
+    p.parse(io.StringIO(xml_text))
+    return "imported profile: " + "".join(chunks)
 
 
 @server.list_tools()
@@ -95,6 +114,9 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(name="load_config", description="Load configuration from a YAML document.",
                    inputSchema={"type": "object", "properties": {"data": {"type": "string"}},
                                 "required": ["data"]}),
+        types.Tool(name="import_profile", description="Import a profile from an XML document.",
+                   inputSchema={"type": "object", "properties": {"xml": {"type": "string"}},
+                                "required": ["xml"]}),
     ]
 
 
@@ -134,6 +156,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return "executed"
         if name == "load_config":                       # insecure deserialization: full-loader yaml (CWE-502)
             return str(yaml.load(arguments["data"], Loader=yaml.Loader))   # noqa: S506 — deliberately vulnerable
+        if name == "import_profile":                     # XXE: external general entities enabled (CWE-611)
+            return _xxe_parse(arguments["xml"])
         return f"unknown tool {name}"
     try:
         out = await anyio.to_thread.run_sync(work)
