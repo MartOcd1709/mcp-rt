@@ -327,6 +327,25 @@ Clearly marked so nothing here is sold as present-tense:
 
 ---
 
+## Recognition
+
+**Black Hat Europe 2026 — Arsenal (selected).** The version of mcp-rt selected for the Black Hat Europe
+2026 Arsenal was an agent red-team framework that proved credential exfiltration from Claude Code, Codex
+and Gemini through malicious MCP servers.
+
+Today's mcp-rt is a different, cutting-edge tool built on that research: a complete MCP security
+lifecycle engine. Every difference below comes with a proof you can run or open:
+
+| Black Hat Europe 2026 selection | mcp-rt today | Proof |
+|---|---|---|
+| Red-teams AI coding agents | Full MCP security lifecycle: discover → scan → confirm → correlate → report | `mcp-rt hunt-all`; [command reference](#command-reference) |
+| Honeytoken exfiltration tests | 28 oracle-proven detection classes, incl. the 2026 MCP specification | `mcp-rt demo`: 19 classes CONFIRMED on vulnerable hosts, every safe twin silent |
+| Runs malicious test servers | Rootless sealed sandbox (`unshare -rn`) with an egress oracle; fail-closed to INCONCLUSIVE | [`hunt/sandbox.py`](hunt/sandbox.py), [`tests/test_sweep_sealed.py`](tests/test_sweep_sealed.py) |
+| Manual attack runs | Oracle-gated autonomous assessment tier + multi-agent pentest loop | `mcp-rt assess-agent`, [`tests/test_agent_tier_run.py`](tests/test_agent_tier_run.py) |
+| Per-attack verdicts | Exploit-path correlation, root-cause locator, Ed25519-signed offline-verifiable attestations | [`mcp_rt/correlate.py`](mcp_rt/correlate.py), [`tests/test_correlate.py`](tests/test_correlate.py), `mcp-rt attest --verify` |
+| Lab-only results | Known CVE classes reproduced live on real servers; real advisories credited | `server-filesystem@0.6.2` sibling-prefix traversal (CVE-2025-53110 class) fires, `@1.0.0` clean; 3 GHSAs below |
+| Research harness | 851 automated tests, CI on Python 3.11/3.12, GitHub Action with SARIF, multi-tenant platform | `python -m pytest -q`; [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
+
 ## Credited disclosures
 
 Real vulnerabilities in open-source MCP servers, reported privately, fixed by the maintainers, and
