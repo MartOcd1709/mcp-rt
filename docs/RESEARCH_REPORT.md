@@ -158,7 +158,7 @@ This result demonstrates that Claude Code's defenses, while sophisticated, opera
 
 **Client confirmed VULNERABLE:** Claude Code 2.1
 **Scanner result:** MCP-Scan: 0 findings. ghostprobe: 0 findings. Cisco mcp-scanner: 0 findings.
-**Disclosure status:** Pending
+**Disclosure status:** In progress
 
 This attack achieves what no prior server-side attack does: it severs the collection and exfiltration events across two independent agent invocations with no shared context window.
 
@@ -409,7 +409,7 @@ All findings with confirmed honeytoken canary evidence have been disclosed to th
 |---------|----------------|--------|-----------|--------|
 | MCP-09-CC | Anthropic HackerOne | server\_side\_workflow (Claude Code) | June 2026 | Submitted |
 | MCP-01-CC | Anthropic HackerOne | fake\_authority\_brand (Claude Code) | June 2026 | Submitted |
-| MCP-09-CC-2 | Anthropic HackerOne | cross\_session\_temporal (Claude Code) | June 2026 | Pending |
+| MCP-09-CC-2 | Anthropic HackerOne | cross\_session\_temporal (Claude Code) | June 2026 | In progress |
 | MCP-09-OX | OpenAI Bugcrowd | server\_side\_workflow (Codex) | June 2026 | Submitted |
 | MCP-01-OX | OpenAI Bugcrowd | fake\_authority\_brand (Codex) | June 2026 | Submitted |
 | MCP-01-OX-2 | OpenAI Bugcrowd | bash\_exfil\_injection (Codex) | June 2026 | Submitted |
