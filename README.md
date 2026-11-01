@@ -6,6 +6,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Black Hat Arsenal](https://img.shields.io/badge/Black%20Hat-Arsenal%202026-red.svg)](https://www.blackhat.com/html/arsenal.html)
 
+> 🏆 **Selected for Black Hat Europe 2026 Arsenal.** This release is a ground-up evolution of that tool:
+> what began as an agent red-team framework is now a complete MCP security lifecycle engine — every
+> capability backed by a proof you can run. See [Recognition](#recognition).
+
 AI coding agents (Claude Code, Codex, Cursor, Cline, Gemini) connect to MCP servers that read your
 files, credentials, and network. Thousands are published; each is privileged by design. **mcp-rt tells
 you — with ground truth, not heuristics — whether a given MCP server is actually exploitable.**
@@ -326,6 +330,25 @@ Clearly marked so nothing here is sold as present-tense:
 - **Management console** — launch runs, browse findings, reports and the target catalog from `mcp-rt serve`.
 
 ---
+
+## Recognition
+
+**Black Hat Europe 2026 — Arsenal (selected).** mcp-rt was selected for the Black Hat Europe 2026 Arsenal
+as an agent red-team framework that proved credential exfiltration from Claude Code, Codex and Gemini
+through malicious MCP servers.
+
+The current mcp-rt is a substantially different and far more advanced tool built on that research.
+Every row below comes with a proof a reviewer can run or open:
+
+| Black Hat Europe 2026 selection | mcp-rt today | Proof |
+|---|---|---|
+| Red-teams AI coding agents | Full MCP security lifecycle: discover → scan → confirm → correlate → report | `mcp-rt hunt-all`; [command reference](#command-reference) |
+| Honeytoken exfiltration tests | 28 oracle-proven detection classes, incl. the 2026 MCP specification | `mcp-rt demo`: 19 classes CONFIRMED on vulnerable hosts, every safe twin silent |
+| Runs malicious test servers | Rootless sealed sandbox (`unshare -rn`) with an egress oracle; fail-closed to INCONCLUSIVE | [`hunt/sandbox.py`](hunt/sandbox.py), [`tests/test_sweep_sealed.py`](tests/test_sweep_sealed.py) |
+| Manual attack runs | Oracle-gated autonomous assessment tier + multi-agent pentest loop | `mcp-rt assess-agent`, [`tests/test_agent_tier_run.py`](tests/test_agent_tier_run.py) |
+| Per-attack verdicts | Exploit-path correlation, root-cause locator, Ed25519-signed offline-verifiable attestations | [`mcp_rt/correlate.py`](mcp_rt/correlate.py), [`tests/test_correlate.py`](tests/test_correlate.py), `mcp-rt attest --verify` |
+| Lab-only results | Known CVE classes reproduced live on real servers; real advisories credited | `server-filesystem@0.6.2` sibling-prefix traversal (CVE-2025-53110 class) fires, `@1.0.0` clean; 3 GHSAs below |
+| Research harness | 851 automated tests, CI on Python 3.11/3.12, GitHub Action with SARIF, multi-tenant platform | `python -m pytest -q`; [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 
 ## Credited disclosures
 
