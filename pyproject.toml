@@ -23,7 +23,7 @@ classifiers = [
   "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-  "mcp",
+  "mcp==1.22.0",
   "rich",
   "anthropic",
   "google-genai",
