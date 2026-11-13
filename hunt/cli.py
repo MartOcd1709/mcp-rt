@@ -81,6 +81,7 @@ _COMMANDS = {
     "hunt-cap": ("hunt.hunt_cap", "main"),       # MCP-00 Leg 1: undeclared-capability (strace sensor)
     "hunt-agent": ("hunt.hunt_agent", "main"),   # MCP-00 Leg 2: agent-in-the-loop (Advanced Red-Team)
     "supply": ("hunt.supply_chain", "main"),     # MCP04: supply-chain / install-time code execution
+    "provenance": ("hunt.provenance", "main"),   # MCP04: repo-level trojanized-repo provenance (static, acquisition-time)
     "db": ("hunt.dbview", "main"),               # inspect the findings database without SQL
     "taxonomy": ("mcp_rt.taxonomy", "main"),     # T5: master attack taxonomy + coverage matrix (source of truth)
     "check": ("hunt.check", "main"),             # assess a server completely (scan + supply + MCP-CAP)
