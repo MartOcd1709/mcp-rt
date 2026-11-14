@@ -23,7 +23,12 @@ def test_restricted_purpose_tool_is_not_by_design():
     for desc in ["Filter rows by a boolean field expression",
                  "Build a view from stage specifications",   # the fiftyone shape
                  "Search the notes database by term",
-                 "Apply a transform to the dataset"]:
+                 "Apply a transform to the dataset",
+                 # verb + "<restricted> expression" must NOT be excused (false-negative gap, CIO-found):
+                 "Evaluate the filter expression against each row",
+                 "Run the filter expression",
+                 "Evaluate the formula expression for the column",
+                 "Execute the query expression"]:
         assert not _DECLARES_EVAL.search(desc), desc
 
 

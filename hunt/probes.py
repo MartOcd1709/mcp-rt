@@ -1224,8 +1224,12 @@ _CODE_DESC = re.compile(r"express|formula|filter|evaluat|comput|calcul|\brule\b|
 _CODE_PAYLOADS = ["9973*9967", "(9973*9967)", "str(9973*9967)"]
 _CODE_MARK = "99400891"   # 9973*9967 — distinctive, won't occur naturally; appears only if evaluated
 # A tool whose DECLARED purpose is running code/expressions is doing its job (by-design), like a shell.
+# arm-1 does NOT include bare "expression" in its object group: a RESTRICTED tool is also described
+# "evaluate/run the <filter|formula|query> expression", and excusing those would silently miss a real
+# eval-injection (coverage-over-zero-FP: never silently miss). Genuine declared-evaluators still match
+# via "arbitrary ... expression" (arm-2), "... evaluator" (arm-4), or an object like code/python.
 _DECLARES_EVAL = re.compile(
-    r"(execut\w*|run|eval\w*|interpret\w*)[^.\n]{0,24}(code|python|script|expression|program|command)|"
+    r"(execut\w*|run|eval\w*|interpret\w*)[^.\n]{0,24}(code|python|script|program|command)|"
     r"arbitrary\s+(code|python|expression|script)|code\s+(execution|interpreter|runner)|"
     r"\b(python|code|script)\s+(interpreter|runner|executor|evaluator)\b", re.I)
 
