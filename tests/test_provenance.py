@@ -22,6 +22,8 @@ CASES = {
     "n5_ioc_docs": CLEAN,           # describes IOCs only — must NOT flag a research repo
     "n6_research_sample": SUSPECT,  # IOC docs + benign sample, no lure → capped at SUSPECT
     "n7_readable_hook": CLEAN,      # readable .claude/hooks/*.py — the big FP, must stay CLEAN
+    "n8_release_link": CLEAN,       # README links to its own RELEASE asset (.zip) — must NOT fire (b)
+    "r1_deceptive_link": HIGH_RISK, # real-world FakeGit shape: benign-anchor links → committed .zip
 }
 
 
@@ -50,6 +52,21 @@ def test_n5_research_docs_do_not_trip_any_signal():
 def test_n6_capped_by_security_docs():
     r = analyze_repo(FIX / "n6_research_sample")
     assert r["verdict"] == SUSPECT and r["security_docs_context"] is True
+
+
+def test_r1_deceptive_link_is_high_via_signal_b():
+    # Real-world-derived anchor (FakeGit deceptive-link lure): benign anchor text, href -> committed
+    # .zip. Signal (b) must fire on the link shape (no run-verb prose), giving a+b = HIGH_RISK.
+    r = analyze_repo(FIX / "r1_deceptive_link")
+    assert r["verdict"] == HIGH_RISK and {"a", "b"} <= set(r["fired"])
+    assert any("link" in h["why"] for h in r["signals"]["readme_lure"])
+
+
+def test_n8_release_link_does_not_false_positive():
+    # A legit repo linking to its own RELEASE asset (.zip on /releases/, not committed, not /raw/)
+    # must NOT trip (b) — the precision guard for the deceptive-link signal.
+    r = analyze_repo(FIX / "n8_release_link")
+    assert r["verdict"] == CLEAN and r["signals"]["readme_lure"] == []
 
 
 def test_recall_gaps_are_stated():

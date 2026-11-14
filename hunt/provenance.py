@@ -78,6 +78,9 @@ _LURE_BYPASS = re.compile(
 # research phrasing that must NOT be read as an end-user run-lure (N5/N6)
 _RESEARCH_RUN = re.compile(r"\b(detonate|run|execute)\b[^.\n]{0,40}"
                            r"\b(sandbox|isolated vm|isolated virtual machine|analysis vm|cuckoo)\b", re.I)
+# (b) deceptive-link lure: benign anchor text whose href is a committed/raw binary (real FakeGit shape).
+# Captures both markdown `](href)` and HTML `href="..."`.
+_HREF = re.compile(r"\]\(\s*<?([^)\s>]+)|href\s*=\s*[\"']([^\"']+)", re.I)
 
 _HASH_LINE = re.compile(r"^[\s*|>-]*[0-9a-fA-F]{32}(?:[0-9a-fA-F]{8}){0,4}[\s|].*$|"
                         r"\b[0-9a-f]{64}\b", re.I)  # MD5/SHA1/SHA256 — an IOC table, not code
@@ -224,6 +227,53 @@ def _looks_like_obfuscated_script(path: Path) -> bool:
     return False
 
 
+def _hrefs(text: str):
+    for m in _HREF.finditer(text):
+        yield (m.group(1) or m.group(2) or "").strip().strip("<>")
+
+
+def _resolve_committed(root: Path, readme: Path, href: str) -> str | None:
+    """A relative href that points at an EXISTING committed archive/executable in the tree, else None."""
+    h = href.split()[0].split("#")[0].split("?")[0]
+    if not h or "://" in h or h.startswith(("mailto:", "#", "data:", "//")):
+        return None
+    for start in (readme.parent, root):
+        cand = Path(os.path.normpath(start / h.lstrip("/")))
+        try:
+            cand.relative_to(root)
+        except ValueError:
+            continue
+        if cand.is_file() and _artifact_kind(cand):
+            return _rel(root, cand)
+    return None
+
+
+def _deceptive_link_hits(root: Path, readme: Path, text: str) -> list[dict]:
+    """(b) deceptive links — benign anchor text, href → an in-repo committed binary or a /raw/ binary URL.
+    Precision: a link to a RELEASE asset or an external docs site does NOT fire (the tell is in-repo/raw)."""
+    funnel: dict[str, int] = {}
+    raw: list[str] = []
+    for href in _hrefs(text):
+        low = href.lower()
+        if low.startswith(("http://", "https://")):
+            if ("/raw/" in low or "raw.githubusercontent.com" in low) and "/releases/" not in low \
+                    and Path(low.split("?")[0]).suffix in (_ARCHIVE_EXT | _EXE_EXT):
+                raw.append(href)          # /raw/ URL to a committed binary — not a release asset
+            continue                      # any other URL (release page, external docs) → not a (b) tell
+        tgt = _resolve_committed(root, readme, href)
+        if tgt:
+            funnel[tgt] = funnel.get(tgt, 0) + 1
+    hits = []
+    for tgt, n in funnel.items():
+        why = "deceptive link to a committed in-repo binary" + (
+            f" (funnel: {n} benign-looking links -> one archive)" if n >= 2 else "")
+        hits.append({"path": _rel(root, readme), "why": why, "evidence": f"-> {tgt}"})
+    for u in raw[:3]:
+        hits.append({"path": _rel(root, readme), "why": "link to a /raw/ committed-binary URL",
+                     "evidence": u[:120]})
+    return hits
+
+
 def _sig_readme_lure(root: Path):
     hits = []
     for p in _iter_files(root):
@@ -242,6 +292,7 @@ def _sig_readme_lure(root: Path):
                 if _RESEARCH_RUN.search(span):
                     continue               # research "detonate in a sandbox" — not an end-user lure
                 hits.append({"path": _rel(root, p), "why": why, "evidence": m.group(0)[:120]})
+        hits.extend(_deceptive_link_hits(root, p, text))
     return hits
 
 
