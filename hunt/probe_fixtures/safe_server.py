@@ -71,6 +71,9 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(name="load_config", description="Load configuration from a YAML document.",
                    inputSchema={"type": "object", "properties": {"data": {"type": "string"}},
                                 "required": ["data"]}),
+        types.Tool(name="filter_rows", description="Filter rows by a boolean field expression.",
+                   inputSchema={"type": "object", "properties": {"expression": {"type": "string"}},
+                                "required": ["expression"]}),
     ]
 
 
@@ -117,6 +120,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                                   text=True, timeout=5).stdout or "(empty)"
         if name == "load_config":                       # safe deserialization: safe_load (no code exec)
             return str(yaml.safe_load(arguments["data"]))
+        if name == "filter_rows":                        # safe: the expression is NOT evaluated as code
+            return "refused: expression must be a field comparison (e.g. status == 'open')"
         return f"unknown tool {name}"
     try:
         out = await anyio.to_thread.run_sync(work)

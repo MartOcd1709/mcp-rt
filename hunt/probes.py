@@ -1208,6 +1208,31 @@ _TEMPLATE_DESC = re.compile(r"template|render|format|greet|message|email|report|
 _SSTI_PAYLOADS = ["{{1337*1337}}", "${1337*1337}", "#{1337*1337}", "<%= 1337*1337 %>"]
 _SSTI_MARK = "1787569"   # 1337*1337 — distinctive, won't occur naturally; appears only if evaluated
 
+# Code / expression injection (CWE-94): a tool evaluates a caller-supplied expression as PYTHON.
+# Distinct from SSTI (template syntax {{}}) and command_injection (shell). The payload is a BARE
+# expression whose distinctive arithmetic PRODUCT appears only if it was evaluated — a template
+# engine won't evaluate a non-{{}} expression, and an echo returns the literal, not the product.
+# CASE MATRIX (the calibration gates):
+#   restricted-purpose tool (filter/query/transform) that evaluates it -> oracle -> VULNERABLE
+#   tool that DECLARES it runs code/expressions (an evaluator/interpreter)  -> by_design -> CLEAN
+#   safe parser / rejection / echo (literal returned, product absent)       -> negative  -> CLEAN
+#   call errors / refusal                                                   -> INCONCLUSIVE / CLEAN
+_CODE_PARAM = re.compile(r"expr|expression|formula|filter|query|rule|condition|eval|code|script|"
+                         r"lambda|transform|calc|compute|stage|clause|predicate", re.I)
+_CODE_DESC = re.compile(r"express|formula|filter|evaluat|comput|calcul|\brule\b|condition|lambda|"
+                        r"transform|predicate|query", re.I)
+_CODE_PAYLOADS = ["9973*9967", "(9973*9967)", "str(9973*9967)"]
+_CODE_MARK = "99400891"   # 9973*9967 — distinctive, won't occur naturally; appears only if evaluated
+# A tool whose DECLARED purpose is running code/expressions is doing its job (by-design), like a shell.
+# arm-1 does NOT include bare "expression" in its object group: a RESTRICTED tool is also described
+# "evaluate/run the <filter|formula|query> expression", and excusing those would silently miss a real
+# eval-injection (coverage-over-zero-FP: never silently miss). Genuine declared-evaluators still match
+# via "arbitrary ... expression" (arm-2), "... evaluator" (arm-4), or an object like code/python.
+_DECLARES_EVAL = re.compile(
+    r"(execut\w*|run|eval\w*|interpret\w*)[^.\n]{0,24}(code|python|script|program|command)|"
+    r"arbitrary\s+(code|python|expression|script)|code\s+(execution|interpreter|runner)|"
+    r"\b(python|code|script)\s+(interpreter|runner|executor|evaluator)\b", re.I)
+
 # Argument injection / CLI-flag smuggling: a tool wraps a CLI and passes a param as an argv
 # element. A leading-dash value is then interpreted as a FLAG (no shell metacharacters needed —
 # defeats allowlists that only block shell chars). Ground truth: inject a benign flag and detect
@@ -1281,6 +1306,47 @@ async def probe_ssti(session, tools) -> list[ProbeResult]:
                                rationale=("template expression evaluated server-side "
                                           "(1337*1337 = 1787569 in output)" if fired
                                           else "template expression not evaluated")))
+    return out
+
+
+async def probe_code_injection(session, tools) -> list[ProbeResult]:
+    """Code / expression injection (CWE-94): a tool evaluates a caller-supplied expression as PYTHON
+    (9973*9967 -> 99400891 in the output) rather than parsing it safely or echoing it. A bare
+    (non-template) expression that returns the PRODUCT proves evaluation. BY-DESIGN gate: a tool that
+    DECLARES it runs code/expressions (an evaluator/interpreter) is doing its job (CLEAN); only a
+    RESTRICTED-purpose tool (filter/query/transform) that evaluates is VULNERABLE."""
+    out = []
+    for tool in tools:
+        name_desc = (tool.name or "") + " " + (tool.description or "")
+        params = _candidate_params(tool, _CODE_PARAM, _CODE_DESC,
+                                   ["expression", "expr", "filter", "query", "formula"])
+        if not params:
+            continue
+        fired, used = False, ""
+        returned, raised = [], []
+        for param in params:
+            for p in _CODE_PAYLOADS:
+                try:
+                    r = await session.call_tool(tool.name, _build_args(tool, {param: _inject(tool, param, p)}))
+                    txt = _result_text(r)
+                    returned.append(txt)
+                except Exception as exc:  # noqa: BLE001
+                    txt = ""
+                    raised.append(str(exc))
+                if _CODE_MARK in txt:
+                    fired, used = True, p
+                    break
+            if fired:
+                break
+        if fired and _DECLARES_EVAL.search(name_desc):
+            method, why = "by_design", ("a declared code/expression evaluator ran the expression "
+                                        "(its advertised purpose) — not a finding")
+        elif fired:
+            method, why = "oracle", ("a restricted-purpose tool evaluated a caller expression as Python "
+                                     "(9973*9967 = 99400891 in output) — code injection")
+        else:
+            method, why = _negative_method(returned, raised), "expression not evaluated as code"
+        out.append(ProbeResult("code_injection", tool.name, method, evidence=used, rationale=why))
     return out
 
 
@@ -1654,7 +1720,7 @@ async def probe_xxe(session, tools) -> list[ProbeResult]:
     return out
 
 
-ALL_PROBES = [probe_ssrf, probe_command_injection, probe_path_traversal, probe_xxe,
+ALL_PROBES = [probe_ssrf, probe_command_injection, probe_code_injection, probe_path_traversal, probe_xxe,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
               probe_arg_injection, probe_deserialization, probe_context_oversharing,
               probe_lure_text, probe_session_argument]

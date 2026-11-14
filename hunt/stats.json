@@ -1,13 +1,32 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-13T11:01:16",
-  "class_count": 13,
+  "generated_at": "2026-11-14T21:41:19",
+  "class_count": 29,
   "detection_classes": [
     {
       "id": "arg_injection",
       "title": "Argument Injection / CLI Flag Smuggling",
       "severity": "High",
       "cwe": "CWE-88",
+      "owasp": [
+        "MCP05"
+      ]
+    },
+    {
+      "id": "authz_idor",
+      "title": "Broken Object/Function-Level Authorization (IDOR/BOLA)",
+      "severity": "High",
+      "cwe": "CWE-639",
+      "owasp": [
+        "MCP02",
+        "MCP07"
+      ]
+    },
+    {
+      "id": "code_injection",
+      "title": "Code / Expression Injection (eval)",
+      "severity": "Critical",
+      "cwe": "CWE-94",
       "owasp": [
         "MCP05"
       ]
@@ -49,6 +68,16 @@
       ]
     },
     {
+      "id": "elicitation_credential_harvest",
+      "title": "Elicitation Credential Harvest (MCP-00c)",
+      "severity": "High",
+      "cwe": "CWE-522",
+      "owasp": [
+        "MCP06",
+        "MCP01"
+      ]
+    },
+    {
       "id": "deserialization",
       "title": "Insecure Deserialization",
       "severity": "Critical",
@@ -58,8 +87,64 @@
       ]
     },
     {
+      "id": "proto_pollution",
+      "title": "JS Prototype Pollution -> Privilege Escalation",
+      "severity": "High",
+      "cwe": "CWE-1321",
+      "owasp": [
+        "MCP05",
+        "MCP02"
+      ]
+    },
+    {
+      "id": "lethal_trifecta",
+      "title": "Lethal Trifecta: Private-Data Exfil via Untrusted Input",
+      "severity": "Critical",
+      "cwe": "CWE-200",
+      "owasp": [
+        "MCP06",
+        "MCP10"
+      ]
+    },
+    {
+      "id": "lure_text",
+      "title": "Model-Directed Lure Text (static lead)",
+      "severity": "Medium",
+      "cwe": "CWE-74",
+      "owasp": [
+        "MCP03",
+        "MCP06"
+      ]
+    },
+    {
+      "id": "open_redirect",
+      "title": "Open Redirect -> Session-Token Exfiltration",
+      "severity": "High",
+      "cwe": "CWE-601",
+      "owasp": [
+        "MCP01"
+      ]
+    },
+    {
       "id": "path_traversal",
       "title": "Path Traversal / Arbitrary File Access",
+      "severity": "High",
+      "cwe": "CWE-22",
+      "owasp": [
+        "MCP05",
+        "MCP02"
+      ]
+    },
+    {
+      "id": "redos",
+      "title": "ReDoS / Catastrophic Backtracking",
+      "severity": "Medium",
+      "cwe": "CWE-1333",
+      "owasp": []
+    },
+    {
+      "id": "roots_path_manipulation",
+      "title": "Roots Path Manipulation (MCP-00 / MCP-29)",
       "severity": "High",
       "cwe": "CWE-22",
       "owasp": [
@@ -74,6 +159,24 @@
       "cwe": "CWE-89",
       "owasp": [
         "MCP05"
+      ]
+    },
+    {
+      "id": "sampling_instruction_laundering",
+      "title": "Sampling Instruction Laundering (MCP-00b)",
+      "severity": "High",
+      "cwe": "CWE-94",
+      "owasp": [
+        "MCP06"
+      ]
+    },
+    {
+      "id": "telemetry_leak",
+      "title": "Sensitive Data in Telemetry / Logs",
+      "severity": "Medium",
+      "cwe": "CWE-532",
+      "owasp": [
+        "MCP08"
       ]
     },
     {
@@ -96,6 +199,15 @@
       ]
     },
     {
+      "id": "session_argument",
+      "title": "Session-Type Credential Requested as a Tool Argument (static lead)",
+      "severity": "Medium",
+      "cwe": "CWE-522",
+      "owasp": [
+        "MCP01"
+      ]
+    },
+    {
       "id": "supply_chain",
       "title": "Supply Chain / Install-Time Code Execution",
       "severity": "High",
@@ -115,12 +227,46 @@
       ]
     },
     {
+      "id": "shadow_impersonation",
+      "title": "Tool Shadowing / Name Impersonation",
+      "severity": "High",
+      "cwe": "CWE-706",
+      "owasp": [
+        "MCP09"
+      ]
+    },
+    {
       "id": "tool_poisoning",
       "title": "Tool-Metadata Concealment (Tool Poisoning)",
       "severity": "High",
       "cwe": "CWE-74",
       "owasp": [
         "MCP03"
+      ]
+    },
+    {
+      "id": "resource_limit",
+      "title": "Unbounded Resource Amplification",
+      "severity": "Medium",
+      "cwe": "CWE-770",
+      "owasp": []
+    },
+    {
+      "id": "mcp_cap",
+      "title": "Undeclared Capability / Consent Gap (MCP-00, strace lead)",
+      "severity": "Medium",
+      "cwe": "CWE-862",
+      "owasp": [
+        "MCP02"
+      ]
+    },
+    {
+      "id": "xxe",
+      "title": "XML External Entity (XXE) + OOB/SSRF",
+      "severity": "High",
+      "cwe": "CWE-611",
+      "owasp": [
+        "MCP05"
       ]
     }
   ],
@@ -154,7 +300,7 @@
     {
       "id": "MCP06",
       "title": "Intent Flow Subversion (Prompt Injection via Context)",
-      "tested": false
+      "tested": true
     },
     {
       "id": "MCP07",
@@ -164,12 +310,12 @@
     {
       "id": "MCP08",
       "title": "Lack of Audit and Telemetry",
-      "tested": false
+      "tested": true
     },
     {
       "id": "MCP09",
       "title": "Shadow MCP Servers",
-      "tested": false
+      "tested": true
     },
     {
       "id": "MCP10",
@@ -178,86 +324,17 @@
     }
   ],
   "ledger": {
-    "servers_tested": 156,
-    "servers_ran": 112,
-    "confirmed": 4,
-    "clean": 71,
-    "inconclusive": 37,
-    "setup_failed": 44,
-    "under_coordinated_disclosure": 4,
-    "candidates_triaged_out": 92,
+    "servers_tested": 3,
+    "servers_ran": 3,
+    "confirmed": 1,
+    "clean": 2,
+    "inconclusive": 0,
+    "setup_failed": 0,
+    "under_coordinated_disclosure": 1,
+    "candidates_triaged_out": 0,
     "clean_named": [
-      "@achmadya-dev/mcp-mysql-query@0.3.2",
-      "@achmadya-dev/mcp-sqlite-query",
-      "@ahmetbarut/mcp-database-server@1.2.0",
-      "@bensons/mcp-exec",
-      "@cynosure-mcp/file-access",
-      "@dev.saqibaziz/mcp-pdf-reader@1.1.0",
-      "@devzhou/mcp-mysql",
-      "@exoticknight/mcp-file-merger@1.0.1",
-      "@huzhihui_c/mcp-postgres",
-      "@huzhihui_c/mcp-ssh",
-      "@iflow-mcp/basit-devbe-local-mcp-server",
-      "@iflow-mcp/mcp-ssh-manager",
-      "@iflow-mcp/mcp-terminal",
-      "@jadchene/mcp-ssh-service",
-      "@jahrulnr/mcp-ssh-agentic",
-      "@m_sea_bass/relpath-filesystem-mcp",
-      "@modelcontextprotocol/server-everything",
-      "@modelcontextprotocol/server-filesystem",
-      "@modelcontextprotocol/server-filesystem@latest",
-      "@modelcontextprotocol/server-memory",
-      "@modelcontextprotocol/server-sequential-thinking",
-      "@mseep/mcp-mongodb-mysql-server",
-      "@nam088/mcp-database-server",
-      "@neonlightdev/mcp-server-filesystem-ignore",
-      "@objekt.sh/mcp-upload@0.1.5",
-      "@omniboard/mcp",
-      "@pyrokine/mcp-ssh",
-      "@redf0x1/mcp-server-filesystem",
-      "@rog0x/mcp-file-tools",
-      "@rootpilot/mcp-ssh-diagnose",
-      "@rturv/mcp-pdf-reader@1.0.0",
-      "@sajithrw/mcp-mysql@1.0.0",
-      "@seepine/mcp-terminal",
-      "@sylphlab/tools-filesystem-mcp",
-      "agentfetch-mcp",
-      "agentic-terminal-mcp-shubham96@0.1.0",
-      "agentic_mcp_terminal@0.1.0",
-      "agentic_terminal_mcp@0.1.0",
-      "agentic_terminal_mcp_sayani@0.1.1",
-      "agentic_terminal_mcp_sk@0.1.0",
-      "alibabacloud-dms-mcp-server-inner@0.1.9",
-      "alibabacloud-dms-mcp-server@0.1.23",
-      "atlassian-jira-mcp (indirect-injection via ticket)",
-      "codepage-bridge-mcp",
-      "douban-mcp-cli@1.0.0-alpha.0",
-      "hostinger-api-mcp",
-      "mcp-atlassian",
-      "mcp-code-context",
-      "mcp-fetch-server",
-      "mcp-pdf-server",
-      "mcp-server-commands",
-      "mcp-server-fetch",
-      "mcp-server-filesystem",
-      "mcp-server-filesystem-smart",
-      "mcp-server-git",
-      "mcp-shell-execute",
-      "mcp-simple-memory",
-      "mcp-sqlite-tools-plus",
-      "mcp-ssh-ops",
-      "mcp-ssh-persistent",
-      "mcp-ssh-terminal",
-      "metamcp-filesystem-server-downloads",
-      "npx -y @m_sea_bass/relpath-filesystem-mcp /tmp/fs_allowed",
-      "npx -y @zhxblcdx/mcp-ssh",
-      "onestep-mcp-filesystem-server",
-      "server-filesystem",
-      "smarter-faster-better-mcp",
-      "ssh-mcp-pro",
-      "terminal-driver-mcp",
-      "terminal-history-mcp",
-      "zenith-mcp"
+      "@bytebase/dbhub@latest",
+      "mcp-server-git"
     ],
     "published_findings": []
   },

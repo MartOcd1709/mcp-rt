@@ -32,6 +32,11 @@ CLASS_META = {
         title="Command / Code Injection",
         fix="Never build shell strings from input; spawn with an argv array (no shell=True); "
             "do not eval/exec untrusted code; prefer parameterised, non-shell APIs."),
+    "code_injection": dict(sev="Critical", cwe="CWE-94", owasp=["MCP05"],
+        title="Code / Expression Injection (eval)",
+        fix="Never eval/exec a caller-supplied expression in a restricted-purpose tool. Replace the "
+            "expression DSL with structured input, or a real allow-listed parser (parse to an AST and "
+            "reconstruct from a fixed op allow-list); an emptied namespace is not a security boundary."),
     "sql_injection": dict(sev="High", cwe="CWE-89", owasp=["MCP05"],
         title="SQL Injection",
         fix="Use parameterised queries / bound parameters exclusively; never concatenate input into SQL."),

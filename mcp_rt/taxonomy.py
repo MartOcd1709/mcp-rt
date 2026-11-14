@@ -152,6 +152,7 @@ _CAP = "hunt/hunt_cap.py::_selftest (declared vs observed caps, reader not flagg
 TAXONOMY: list[Item] = [
     # --- classic server-impl bugs (ground-truth probes, vuln+safe fixtures) ---
     Item("CMD-INJ", "Command Injection", ("MCP38:MCP-07", "OWASP-MCP:MCP05", "ASI:ASI05", "CoSAI:CoSAI-21", "CoSAI:CoSAI-31", "CIS:CIS-9"), "command_injection", COVERED, _PROBE),
+    Item("CODE-INJ", "Code / Expression Injection (eval)", ("MCP38:MCP-07", "OWASP-MCP:MCP05", "ASI:ASI05", "CoSAI:CoSAI-21"), "code_injection", COVERED, _PROBE),
     Item("ARG-INJ", "Argument Injection", ("MCP38:MCP-07", "OWASP-MCP:MCP05", "CoSAI:CoSAI-21"), "arg_injection", COVERED, _PROBE),
     Item("PATH-TRAV", "Path Traversal / File System Exposure", ("MCP38:MCP-08", "OWASP-MCP:MCP05", "OWASP-MCP:MCP02", "CoSAI:CoSAI-22", "CIS:CIS-6"), "path_traversal", COVERED, _PROBE),
     Item("SSRF", "Server-Side Request Forgery", ("MCP38:MCP-09", "OWASP-MCP:MCP05", "OWASP-MCP:MCP02", "CoSAI:CoSAI-26", "CIS:CIS-2"), "ssrf", COVERED, _PROBE),

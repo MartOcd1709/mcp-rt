@@ -117,6 +117,9 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(name="import_profile", description="Import a profile from an XML document.",
                    inputSchema={"type": "object", "properties": {"xml": {"type": "string"}},
                                 "required": ["xml"]}),
+        types.Tool(name="filter_rows", description="Filter rows by a boolean field expression.",
+                   inputSchema={"type": "object", "properties": {"expression": {"type": "string"}},
+                                "required": ["expression"]}),
     ]
 
 
@@ -158,6 +161,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return str(yaml.load(arguments["data"], Loader=yaml.Loader))   # noqa: S506 — deliberately vulnerable
         if name == "import_profile":                     # XXE: external general entities enabled (CWE-611)
             return _xxe_parse(arguments["xml"])
+        if name == "filter_rows":                        # code injection: a FILTER tool evals the expr (CWE-94)
+            return str(eval(arguments["expression"]))     # noqa: S307 — restricted-purpose tool, deliberately vulnerable
         return f"unknown tool {name}"
     try:
         out = await anyio.to_thread.run_sync(work)
