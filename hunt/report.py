@@ -54,9 +54,12 @@ CLASS_META = {
         fix="realpath the target and verify it stays within an allowed root; reject '..', absolute "
             "paths and escaping symlinks; apply the same check to write/edit/move operations."),
     "tool_poisoning": dict(sev="High", cwe="CWE-74", owasp=["MCP03"],
-        title="Tool-Metadata Concealment (Tool Poisoning)",
-        fix="Reject invisible/non-printable Unicode (TAG block U+E0000-E007F, zero-width, bidi, "
-            "variation selectors) in tool names/descriptions/schemas; show the model's exact input in the approval view."),
+        title="Tool Poisoning (model-directed instructions in server metadata)",
+        fix="Model-facing text describes, it never instructs: remove directives to the model from tool descriptions, "
+            "schema text (descriptions, defaults, enums), server instructions, resource/prompt text and tool results; "
+            "never reference secret files or the model's context; reject invisible Unicode (TAG block U+E0000-E007F, "
+            "zero-width, bidi), HTML comments and off-screen padding. Clients: show the model's exact input in the "
+            "approval view and pin tool definitions (hash) so any change is re-reviewed."),
     "lure_text": dict(sev="Medium", cwe="CWE-74", owasp=["MCP03", "MCP06"],   # lead-only, see LEAD_ONLY_CLASSES
         title="Model-Directed Lure Text (static lead)",
         fix="Keep credentials out of model-facing text: never tell the model to take one from its context or pass one "

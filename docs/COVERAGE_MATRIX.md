@@ -4,7 +4,7 @@
 > COVERED means a zero-FP proof exists (vuln+safe fixture/test). PARTIAL/PLANNED/N-A are shown openly;
 > we never claim zero unknown-unknowns.
 
-**Canonical items:** 76  ·  **COVERED (zero-FP):** 49 (64.5%)  ·  **PARTIAL:** 14  ·  **PLANNED:** 11  ·  **N-A:** 2
+**Canonical items:** 79  ·  **COVERED (zero-FP):** 50 (63.3%)  ·  **PARTIAL:** 16  ·  **PLANNED:** 11  ·  **N-A:** 2
 
 ## Per-standard coverage
 
@@ -23,6 +23,7 @@
 |---|---|---|---|---|---|
 | ARG-INJ | Argument Injection | COVERED | arg_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-07, OWASP-MCP:MCP05, CoSAI:CoSAI-21 |
 | CMD-INJ | Command Injection | COVERED | command_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-07, OWASP-MCP:MCP05, ASI:ASI05, CoSAI:CoSAI-21, CoSAI:CoSAI-31, CIS:CIS-9 |
+| CODE-INJ | Code / Expression Injection (eval) | COVERED | code_injection | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-07, OWASP-MCP:MCP05, ASI:ASI05, CoSAI:CoSAI-21 |
 | CONSENT-BYPASS | Consent / Approval Bypass + Fatigue | COVERED | permission_prompt_bypass | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-23, ASI:ASI09, CoSAI:CoSAI-13, CoSAI:CoSAI-9 |
 | CONTEXT-OVERSHARE | Context Over-Sharing / Manifest Exposure | COVERED | context_oversharing | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-34, OWASP-MCP:MCP10, CoSAI:CoSAI-20 |
 | CROSS-SERVER | Cross-Server Tool Poisoning | COVERED | cross_server_poisoning | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-14, ASI:ASI07, CoSAI:CoSAI-6 |
@@ -30,7 +31,7 @@
 | EXFIL-CHANNELS | Data Exfiltration via Channels | COVERED | egress_evasion | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-24, MCP38:MCP-32, CoSAI:CoSAI-24, CoSAI:CoSAI-26 |
 | LETHAL-TRIFECTA | Lethal Trifecta: Private-Data Exfil via Untrusted Input | COVERED | lethal_trifecta | tests/test_tool_lethal_trifecta.py (T12.3 — deterministic data-flow: private canary exfils | OWASP-MCP:MCP06, OWASP-MCP:MCP10, MCP38:MCP-24, CoSAI:CoSAI-24, ASI:ASI01 |
 | OPEN-REDIRECT | Open Redirect -> Session-Token Exfiltration | COVERED | open_redirect | tests/test_tool_open_redirect.py (T11.3 — token leaks off-origin + ATO replay; safe allowl | OWASP-MCP:MCP01, CoSAI:CoSAI-19 |
-| OUTPUT-INJ | Insecure Output / Return-Value Injection | COVERED | return_value_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-22, OWASP-MCP:MCP06, CoSAI:CoSAI-4 |
+| OUTPUT-INJ | Insecure Output / Return-Value Injection | COVERED | return_value_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none); deterministic: tool | MCP38:MCP-22, OWASP-MCP:MCP06, CoSAI:CoSAI-4 |
 | P00-RESOURCE | Resource Content Injection (protocol-00) | COVERED | mcp_resource_injection | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-12, OWASP-MCP:MCP06, ASI:ASI06, CoSAI:CoSAI-4 |
 | P00B-SAMPLING | Sampling Instruction Laundering (protocol-00b) | COVERED | sampling_instruction_laundering | tests/test_sampling_host.py | MCP38:MCP-20, ASI:ASI01, CoSAI:CoSAI-11 |
 | P00C-ELICIT | Elicitation Credential Harvest (protocol-00c) | COVERED | elicitation_credential_harvest | tests/test_elicitation_host.py | MCP38:MCP-23, ASI:ASI09, CoSAI:CoSAI-9 |
@@ -45,7 +46,7 @@
 | RESOURCE-AMP | Unbounded Resource Amplification | COVERED | resource_limit | tests/test_tool_resource_limit.py (T11.6 — missing-bound + honored-above-cap + scales; def | MCP38:MCP-33, CoSAI:CoSAI-33, CoSAI:CoSAI-14, CIS:CIS-10, ASI:ASI08 |
 | ROOTS-PATH | Roots Path Manipulation (MCP-29 ours) | COVERED | roots_path_manipulation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-08 |
 | RUG-PULL | Rug Pull / Dynamic Mutation | COVERED | rug_pull | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-16, OWASP-MCP:MCP03, ASI:ASI04, CoSAI:CoSAI-32 |
-| SCHEMA-POISON | Full Schema Poisoning | COVERED | schema_examples_steering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11, OWASP-MCP:MCP03, CoSAI:CoSAI-3 |
+| SCHEMA-POISON | Full Schema Poisoning | COVERED | schema_examples_steering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none); deterministic: tool | MCP38:MCP-11, OWASP-MCP:MCP03, CoSAI:CoSAI-3 |
 | SELF-ATTEST | Tool Annotation Self-Attestation (readOnly lie) | COVERED | tool_annotation_self_attestation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
 | SHADOW-SERVER | Shadow MCP Servers / Tool-Name Impersonation | COVERED | shadow_impersonation | tests/test_tool_shadow_impersonation.py (T12.2 — shadow overrides trusted under a last-win | MCP38:MCP-18, MCP38:MCP-13, OWASP-MCP:MCP09, CoSAI:CoSAI-6, CoSAI:CoSAI-5 |
 | SPEC-CACHESCOPE | cacheScope cross-tenant cache poisoning | COVERED | mcp_rt/cachescope.py | tests/test_cachescope_poisoning.py (T10.1 — leak+poison fire via reference shared cache; s | SPEC2026:SPEC2026-cachescope, CoSAI:CoSAI-10 |
@@ -63,7 +64,7 @@
 | TELEMETRY-LEAK | Sensitive Data in Telemetry/Logs (CWE-532) | COVERED | telemetry_leak | tests/test_tool_telemetry_leak.py (T12.1 — secret in low-priv-readable telemetry fires; re | OWASP-MCP:MCP08, CoSAI:CoSAI-19, CIS:CIS-6 |
 | TOKEN-PASS | Token Passthrough / Confused Deputy | COVERED | token_passthrough | hunt/family_b_fixtures/{vuln,safe}_oauth_server.py + tests/test_oauth.py | MCP38:MCP-02, OWASP-MCP:MCP01, OWASP-MCP:MCP07, ASI:ASI03, CoSAI:CoSAI-16, CoSAI:CoSAI-18, CoSAI:CoSAI-8, CIS:CIS-3 |
 | TOOL-AUTHZ-IDOR | Tool-Level Broken Object/Function Authorization (IDOR/BOLA) | COVERED | authz_idor | tests/test_tool_authz_idor.py (T11.1 — object-IDOR + function-authz fire; safe owner/role- | MCP38:MCP-04, OWASP-MCP:MCP02, OWASP-MCP:MCP07, CoSAI:CoSAI-8 |
-| TOOL-POISON | Tool Description Poisoning | COVERED | tool_poisoning | hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe) | MCP38:MCP-10, OWASP-MCP:MCP03, ASI:ASI01, CoSAI:CoSAI-2 |
+| TOOL-POISON | Tool Description Poisoning | COVERED | tool_poisoning | tests/test_tool_poisoning.py (37 class-derived variants caught, 40 hard negatives silent;  | MCP38:MCP-10, OWASP-MCP:MCP03, ASI:ASI01, CoSAI:CoSAI-2 |
 | TOOL-SATURATION | Tool-Count Saturation | COVERED | tool_count_saturation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
 | TOOL-SHADOW | Tool Shadowing | COVERED | tool_shadowing | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-13, CoSAI:CoSAI-5 |
 | TRUST-LAUNDER | Proxy/Aggregator Trust Laundering | COVERED | proxy_aggregator_trust_laundering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-18, ASI:ASI07, CoSAI:CoSAI-9 |
@@ -71,6 +72,7 @@
 | UNICODE-CONCEAL | Unicode / Hidden-Character Concealment | COVERED | hidden_unicode | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11 |
 | XXE | XML External Entity (XXE) + OOB/SSRF | COVERED | xxe | tests/test_tool_xxe.py (T11.2 — file-read + OOB/SSRF fire; safe ext-GES off; CWE-611) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-26 |
 | DNS-REBIND | DNS Rebinding | PARTIAL | dns_rebinding | class exists but no vuln+safe fixture located -> not COVERED until a fixture proves it zer | MCP38:MCP-31, OWASP-MCP:MCP07, CoSAI:CoSAI-26 |
+| LURE-TEXT | Model-Directed Lure Text (static lead) | PARTIAL | lure_text | SUSPECTED ceiling: static rule families over tool, parameter, annotation, resource and pro | OWASP-MCP:MCP03, OWASP-MCP:MCP06 |
 | MEMORY-POISON | Memory & Context Poisoning | PARTIAL | cross_session_temporal | resource/temporal payloads touch it; persistent-memory corruption proof pending | ASI:ASI06, MCP38:MCP-12, CoSAI:CoSAI-4 |
 | MISSING-AUTH | Insufficient Authentication/Authorization | PARTIAL | — | missing-auth enforcement probed; full OAuth-flow attacks pending (hunt/oauth_harness.py) [ | OWASP-MCP:MCP07, MCP38:MCP-29, CoSAI:CoSAI-18, CIS:CIS-3 |
 | MISSING-INTEGRITY | Missing Integrity / Verification | PARTIAL | — | our signed attestation is the mitigation; rug_pull detects mutation; no integrity-absence  | MCP38:MCP-27, ASI:ASI04, CoSAI:CoSAI-23, CIS:CIS-8 |
@@ -82,6 +84,7 @@
 | RATE-DOS | Resource Exhaustion / DoS / Denial-of-Wallet | PARTIAL | — | unbounded amplification now COVERED (RESOURCE-AMP) + catastrophic backtracking (REDOS); re | MCP38:MCP-33, MCP38:MCP-29, CoSAI:CoSAI-14, CoSAI:CoSAI-33, ASI:ASI08, CIS:CIS-10 |
 | SANDBOX-ESCAPE | Sandbox Escape | PARTIAL | — | command_injection/deserialization detect the exec primitive; sandbox-escape-specific probe | MCP38:MCP-37, ASI:ASI05 |
 | SECRET-EXPOSURE | Secret / Session-Token Exposure | PARTIAL | — | we flag secret exfil via honeytoken egress; static secret-in-code scan not a class yet | OWASP-MCP:MCP01, CoSAI:CoSAI-19, CIS:CIS-6 |
+| SESSION-ARG | Session-Type Credential Requested as a Tool Argument (static lead) | PARTIAL | session_argument | SUSPECTED ceiling: an argument-level static lead; never a finding and never proof that an  | OWASP-MCP:MCP01 |
 | SPEC-MCP-APPS | MCP Apps UI injection (+ clickjacking/CSP/perms leads) | PARTIAL | mcp_rt/mcp_apps_ui.py | injection->executable-context is COVERED (confirmed, oracle-gated); clickjacking/UI-redres | SPEC2026:SPEC2026-mcp-apps |
 | UNRESTRICTED-NET | Unrestricted Network Access | PARTIAL | network_position_delivery | delivery-position payloads; egress policy not asserted as a server finding | MCP38:MCP-32, CoSAI:CoSAI-26, CIS:CIS-9 |
 | CORS | CORS / Origin Policy Bypass | PLANNED | — | no CORS/origin-policy probe [SAM1-22] | CoSAI:CoSAI-30, CIS:CIS-2 |

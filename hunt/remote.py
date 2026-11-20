@@ -50,7 +50,7 @@ async def _connect_and_run(url: str, headers: dict):
             async with cm as streams:
                 read, write = streams[0], streams[1]
                 async with ClientSession(read, write) as s:
-                    await s.initialize()
+                    s.mcprt_instructions = getattr(await s.initialize(), "instructions", None) or ""
                     tools = (await s.list_tools()).tools
                     results = []
                     for probe in _REMOTE_PROBES:
@@ -124,7 +124,7 @@ async def check_unauthenticated(url: str, headers: dict | None = None) -> bool:
                 cm = sse_client(url, headers=noauth)
             async with cm as streams:
                 async with ClientSession(streams[0], streams[1]) as s:
-                    await s.initialize()
+                    s.mcprt_instructions = getattr(await s.initialize(), "instructions", None) or ""
                     await s.list_tools()
                     return True
         except Exception:  # noqa: BLE001

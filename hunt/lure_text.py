@@ -40,7 +40,7 @@ _LEAD = re.compile(
     r"(?:\b(?:always|please|first|then|also|now|next|finally|must|should|ensure|again|just|immediately|simply|and|"
     r"ensure you|make sure you|make sure to|be sure you|be sure to|remember to|"
     r"you must|you should|you need to|you have to)|,)\s*$", re.I)
-_SPLIT = re.compile(r"[.!?;:\n]+")
+_SPLIT = re.compile(r"(?:[.!?;:](?=\s|$))+|\n+")   # path-aware: the "." in ~/.aws/credentials never ends a sentence
 _LIST_START = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s")
 
 
@@ -181,8 +181,11 @@ _INJECT = (
     re.compile(r"\b(?:ignore|disregard|forget|override|bypass|abandon)\b[^.!?;\n]{0,40}?\b"
                r"(?:earlier|previous|prior|above|preceding|original|existing|past|system)\s+(?:guidance|directions?|context)\b",
                re.I),
-    re.compile(r"\b(?:do not|don't|never|must not|should not)\s+(?:tell|inform|notify|mention|alert)\s+"
-               r"(?:the\s+)?(?:user|human|operator)\b", re.I),
+    # "do not mention THIS STEP to the user": an object may sit between the verb and the user. Hiding a secret VALUE
+    # ("never mention the API key to the user") protects it and stays quiet.
+    re.compile(r"\b(?:do not|don't|never|must not|should not)\s+(?:tell|inform|notify|mention|alert|reveal|disclose)\b"
+               r"(?:(?!\b(?:passwords?|api\s+keys?|keys?|tokens?|secrets?|credentials?)\b)[^.!?;\n]){0,60}?"
+               r"\b(?:to\s+)?(?:the\s+)?(?:user|human|operator)\b(?!s)", re.I),
     re.compile(r"\b(?:silently|secretly|covertly|quietly)\s+(?:send|forward|pass|include|upload|post|transmit|share)\w*",
                re.I),
     re.compile(r"\bwithout\s+(?:the\s+)?(?:user|human)(?:'s)?\s+(?:knowledge|knowing|consent|awareness|noticing)\b",
