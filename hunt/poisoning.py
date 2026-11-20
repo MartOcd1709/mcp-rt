@@ -28,6 +28,9 @@ Kinds (confidence):
   sensitive_access          MEDIUM  a directive to read a secret file or the model's context, with no sink found.
   off_purpose_secret_ref    MEDIUM  a secret path unrelated to the tool's own purpose (language-independent).
   hidden_encoding           MEDIUM  concealment characters present (TAG / zero-width / bidi / ANSI) with no decoded directive.
+  tool_hijacking            M / H   an order to call ANOTHER tool, corroborated (coercion, attacker literals, state-changing
+                                    target, condition on another tool, priority claim); a bare sibling reference stays quiet.
+  parameter_tampering       M / H   an order to change how another tool is called ("set `path` to ... regardless of input").
 
 Static analysis sees the instruction, not whether an agent obeys it, so the probe reports every kind as a lead
 (SUSPECTED). Confirming compliance takes an agent run against a planted canary (the engagement's agent tier).
@@ -64,6 +67,9 @@ WHY = {
     "off_purpose_secret_ref": "a secret file referenced by a tool whose purpose has nothing to do with it",
     "hidden_encoding": "invisible or direction-changing characters in model-facing text",
     "dangerous_command": "a destructive or persistence shell command handed to the model",
+    "tool_hijacking": "the model is ordered to call another tool, corroborated by coercion, attacker-chosen arguments, a "
+                      "state-changing target or a condition on another tool (implicit/explicit-trigger function hijacking)",
+    "parameter_tampering": "the model is told to change the arguments of another tool's call (parameter tampering)",
     "secret_content_parameter": "a parameter whose name asks for the contents of a secret file or the model's context",
 }
 
@@ -123,6 +129,12 @@ _OVERRIDE = (
                r"rules|directives|guidelines|guardrails|system\s+(?:message|prompt))\b"),
     re.compile(r"(?i)\b(?:you\s+are\s+now\s+(?:in|operating|acting|free|no\s+longer|a|an|the|my)|from\s+now\s+on,?\s+you|"
                r"new\s+(?:system\s+)?instructions?\s*:|developer\s+mode|jailbreak(?:en)?\s+mode)"),
+    # a tool claiming precedence over the user, or telling the model to act regardless of what the user asked
+    re.compile(r"(?i)\b(?:priority|precedence)\b[^.\n]{0,40}?\b(?:higher|greater|above|over|supersedes?)\b[^.\n]{0,30}?"
+               r"\b(?:user|query|request|instructions?)\b|\b(?:has|have|takes?)\s+(?:the\s+)?(?:highest|top|absolute)\s+"
+               r"priority\b|\boverrides?\s+(?:the\s+|any\s+)?user(?:'s)?\s+(?:request|query|input|instructions?|intent)"),
+    re.compile(r"(?i)\bregardless\s+of\s+(?:the\s+|any\s+)?(?:user(?:'s)?(?:\s+(?:input|request|query|intent|choice))?|"
+               r"(?:the\s+)?(?:input|request|query)|(?:intended|original(?:ly)?\s+intended|requested)\b)"),
 )
 _CONCEAL = (
     re.compile(r"(?ix)\b(?:do\s+not|don't|never|must\s+not|should\s+not|shouldn't|avoid)\s+"
@@ -300,6 +312,8 @@ def _exfil(sentences: list[str]) -> list[str]:
 def _sensitive_access(sentences: list[str]) -> list[str]:
     out = []
     for sent in sentences:
+        if _is_function_statement(sentences, sent):
+            continue
         for cl in _clauses(sent):
             m = _directive_at(cl, _READ_V)
             if (m and _sources(cl[m.start():])) or (_RUN_CAT.search(cl) and _sources(cl) and not _NEG.search(cl)):
@@ -355,6 +369,111 @@ def _off_purpose(text: str, purpose: str) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------- tool hijacking / parameter tampering
+# A tool's text that orders the model to CALL ANOTHER TOOL, or to change how another tool is called, is the dominant
+# real-world poisoning shape (MCPTox: explicit/implicit-trigger function hijacking + parameter tampering). A sibling
+# reference alone is normal workflow guidance ("use list_directory first"), so it must be CORROBORATED: coercion, an
+# attacker-chosen literal argument, a state-changing target, a condition on another tool, or a priority claim.
+_IDENT = r"[A-Za-z][\w.-]*?(?:[_-][\w.-]+|[a-z][A-Z][\w.-]*)"            # snake / kebab / camel (CASE-SENSITIVE)
+_QUOTED_IDENT = rf"[`'\"](?P<q>{_IDENT})[`'\"]|[`'\"](?P<w>[a-z]+)[`'\"]\s+tool\b"
+_QI = rf"[`'\"](?:{_IDENT})[`'\"]"                                       # same, no capture (for reuse)
+_CALL_V = r"(?i:call|calling|use|using|invoke|invoking|run|running|fetch|execute|trigger)"
+_TOOL_CALL = re.compile(rf"\b{_CALL_V}\s+(?:(?i:the)\s+)?(?:{_QUOTED_IDENT}|(?P<b>{_IDENT}))")
+_COND_OTHER = re.compile(rf"\b(?i:before|when|whenever|after|while|each\s+time|every\s+time|prior\s+to)\s+"
+                         rf"(?:(?i:you)\s+)?(?:(?i:use|using|call|calling|invoke|invoking|run|running)\s+)?"
+                         rf"(?:(?i:the\s+tool)\s+)?(?:(?i:the)\s+)?(?:{_QUOTED_IDENT}|(?P<b>{_IDENT}))")
+_COERCE = re.compile(
+    r"\bMUST\b|\b(?i:you\s+(?:must|have\s+to|need\s+to)|mandatory|(?:is|are)\s+(?:required|needed|necessary|critical|"
+    r"essential)|requires?\s+(?:calling|that\s+you|using)|not\s+optional|must\s+do\s+it|critical\s+(?:for|to)|"
+    r"(?:skipping|failure\s+to|failing\s+to|omitting|ignoring|not\s+doing)\b[^.\n]{0,50}?\bwill|"
+    r"(?:security|compliance|internal)\s+(?:check|requirement|protocol|policy|step)|system\s+policy\s+requires)\b"
+    r"|\bSECURITY\s+(?:PROTOCOL|ADVISORY|NOTICE)\b")
+_LITERAL = re.compile(r"'[^'\n]{1,80}'|\"[^\"\n]{1,80}\"|`[^`\n]{1,80}`|\b(?i:UIDs?|IDs?|amount|number)\s*[:=]?\s*\d{3,}|"
+                      r"[\w.+-]+@[\w-]+\.[\w.-]+|https?://\S+|\bvalue\s+\[\s*\]|=\s*\d{4,}")
+_STATE_WORDS = re.compile(r"(?:^|[_\-.\s]|(?<=[a-z])(?=[A-Z]))(?i:delete|remove|void|put|post|write|send|mark|move|set|"
+                          r"create|update|kill|drop|execute|exec|run|computer|agent|transfer|pay|commit|push|add|edit|config|"
+                          r"overwrite|reset|clear|destroy|purge|grant|revoke|deploy|install)")
+_PARAM_REF = rf"(?:{_QI}|{_IDENT}|(?i:[a-z_]+)\s+(?i:parameter|argument|field|param))"
+_TAMPER = re.compile(
+    rf"\b(?i:append|prepend|add|insert|inject)\s+(?:{_QI}|'[^'\n]{{1,80}}'|\"[^\"\n]{{1,80}}\")\s+(?i:to|into)\s+(?:(?i:the)\s+)?"
+    rf"(?:(?i:end\s+of\s+(?:the\s+)?)|(?i:user'?s?)\s+)?[\w`'\" -]{{0,30}}?(?i:query|message|list|names|prompt|command|"
+    rf"input|argument|parameter|field|request|path|url|content|body)"
+    rf"|\b(?i:set|change|changed|modify|override|replace|redirect(?:ed)?|swap|force|append\s+to|prepend\s+to)\s+"
+    rf"(?:(?i:the|all|any)\s+)?{_PARAM_REF}(?:\s+(?i:parameter|argument|field|param|value|input))?"
+    rf"[^.\n]{{0,40}}?\b(?i:to|with|as|into)\b"
+    rf"|\b(?:(?i:the)\s+)?{_PARAM_REF}\s+(?:(?i:parameter|argument|field)\s+)?(?:MUST|(?i:must|should))\s+"
+    rf"(?:(?i:always)\s+)?(?i:be)\s+(?i:changed|set|replaced|redirected|overridden)"
+    rf"|\b(?i:all|any|every)\s+[`'\"]?[\w.-]+[`'\"]?\s+(?i:requests?|calls?|queries)\b[^.\n]{{0,60}}?\b(?i:must)\s+(?i:be)\s+"
+    rf"(?i:performed|redirected|sent|routed|calculated|run)\b")
+
+
+_EXAMPLE_TAIL = re.compile(r"(?i)\b(?:e\.g\.|i\.e\.|for\s+example|for\s+instance|such\s+as|like\s*:|example\s*:|"
+                           r"examples?\s+(?:of|include))[\s\S]*$")   # everything after an example marker is documentation
+
+
+_FORCED_FIRST = re.compile(r"\b(?:MUST|(?i:must|should|need\s+to|have\s+to))\s+(?:(?i:always)\s+)?(?i:first)\s+"
+                           r"(?i:call|use|invoke|run|fetch|read|load|send|get)\b")
+_TAMPER_SCOPE = re.compile(r"\b(?i:the\s+user'?s|in\s+all\s+(?:calls|requests|queries)|every\s+(?:call|request|query|"
+                           r"commit|message)|(?:any|all)\s+(?:\w+\s+){0,3}?(?:requests?|calls?|queries|searches|messages?)|"
+                           r"automatically|regardless)\b")
+
+
+def _refs(rx: re.Pattern, text: str) -> list[str]:
+    return [m.group("q") or m.group("w") or m.group("b") or "" for m in rx.finditer(text)]
+
+
+def _other(names: list[str], purpose: str) -> list[str]:
+    self_words = set(_purpose_words(purpose))
+    return [n for n in names if n and n.lower() not in {"this", "that", "the", "a", "tool"}
+            and set(_purpose_words(n)) != self_words]
+
+
+def _hijack(text: str, purpose: str) -> list[Hit]:
+    hits: list[Hit] = []
+    sents = _sentences(text)
+    for i, sent in enumerate(sents):
+        if _NEG.search(sent.split(",")[0]) and not _COERCE.search(sent):
+            continue
+        called = _other(_refs(_TOOL_CALL, sent), purpose)
+        cond = _other(_refs(_COND_OTHER, sent), purpose)
+        tamper = _TAMPER.search(sent)
+        if not (called or (tamper and (cond or _TAMPER_SCOPE.search(" ".join(sents[i:i + 2])))) or
+                (cond and _SINK_NET.search(sent))):
+            continue
+        ctx = " ".join(sents[i:i + 2])                          # corroboration: this sentence or the next one
+        if cond and not called and _SINK_NET.search(sent) and _directive_at(sent.split(",")[-1], _SINK_V):
+            hits.append(Hit("tool_hijacking", HIGH, sent[:200]))       # message hijacking: on another tool's use, ship data out
+            continue
+        signals = {
+            "forced_first": bool(_FORCED_FIRST.search(sent)),
+            "coercion": bool(_COERCE.search(ctx)),
+            "literal": bool(_LITERAL.search(_EXAMPLE_TAIL.sub("", re.sub(_QUOTED_IDENT, "", sent)))),
+            "state": any(_STATE_WORDS.search(n) for n in called),
+            "cond_other": bool(cond),
+            "override": any(rx.search(ctx) for rx in _OVERRIDE[2:]),
+        }
+        n = sum(signals.values())
+        if tamper and (cond or signals["override"] or _TAMPER_SCOPE.search(ctx)):
+            conf = HIGH if (signals["literal"] or signals["override"]) else MEDIUM
+            hits.append(Hit("parameter_tampering", conf, sent[:200]))
+        elif called and n >= 2:
+            strong = signals["override"] or (signals["coercion"] and (signals["literal"] or signals["state"])) or \
+                (signals["cond_other"] and (signals["literal"] or signals["state"]))
+            hits.append(Hit("tool_hijacking", HIGH if strong else MEDIUM, sent[:200]))
+    return hits
+
+
+_FUNC_VERB = re.compile(r"^(?:Get|Gets|Read|Reads|List|Lists|Search|Searches|Fetch|Fetches|Return|Returns|Retrieve|"
+                        r"Retrieves|Show|Shows|Query|Queries|Find|Finds|Check|Checks|Count|Counts|Preview|Previews|Load|"
+                        r"Loads|Access|Accesses|Open|Opens|View|Views|Look\s+up|Looks\s+up|Scan|Scans|Collect|Collects)\b")
+
+
+def _is_function_statement(sentences: list[str], sent: str) -> bool:
+    """A description's opening sentence that starts with a verb states what the tool does ("Get recent messages from a
+    channel"); it is not an order to the model."""
+    return bool(sentences) and sent is sentences[0] and bool(_FUNC_VERB.match(sent))
+
+
 def _analyze(text: str, purpose: str, layer: str) -> list[Hit]:
     sents = _sentences(text)
     hits: list[Hit] = []
@@ -377,6 +496,7 @@ def _analyze(text: str, purpose: str, layer: str) -> list[Hit]:
     if shadow:
         strong = any(h.kind == "user_concealment" for h in hits) or bool(_SINK_NET.search(text))
         hits += [Hit("tool_shadowing", HIGH if strong else MEDIUM, s[:200], layer) for s in shadow]
+    hits += [h if h.layer == layer else Hit(h.kind, h.confidence, h.span, layer) for h in _hijack(text, purpose)]
     if layer == "visible" and not exfil and not access:
         hits += [Hit("off_purpose_secret_ref", MEDIUM, s[:200], layer) for s in _off_purpose(text, purpose)]
     return hits
