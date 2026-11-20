@@ -393,18 +393,40 @@ _LITERAL = re.compile(r"'[^'\n]{1,80}'|\"[^\"\n]{1,80}\"|`[^`\n]{1,80}`|\b(?i:UI
 _STATE_WORDS = re.compile(r"(?:^|[_\-.\s]|(?<=[a-z])(?=[A-Z]))(?i:delete|remove|void|put|post|write|send|mark|move|set|"
                           r"create|update|kill|drop|execute|exec|run|computer|agent|transfer|pay|commit|push|add|edit|config|"
                           r"overwrite|reset|clear|destroy|purge|grant|revoke|deploy|install)")
-_PARAM_REF = rf"(?:{_QI}|{_IDENT}|(?i:[a-z_]+)\s+(?i:parameter|argument|field|param))"
+_QTOK = r"[`'\"][\w.#:/@-]{1,40}[`'\"]"                                 # any quoted/backticked token
+_PARAM_NOUN = r"(?i:parameter|argument|field|param|option|flag|value|input|property)"
+_PARAM_REF = rf"(?:{_PARAM_NOUN}\s+)?(?:{_QTOK}|{_IDENT}|(?i:[a-z_]+)\s+{_PARAM_NOUN})"
+_DET = r"(?:(?i:the|all|any|every|each|this)\s+)?"
+_TAMPER_TARGET = (r"(?i:query|queries|message|messages|list|names|prompt|command|commands|input|argument|parameter|field|"
+                  r"request|requests|path|url|content|body|id|ids|address|search|searches|string)")
 _TAMPER = re.compile(
-    rf"\b(?i:append|prepend|add|insert|inject)\s+(?:{_QI}|'[^'\n]{{1,80}}'|\"[^\"\n]{{1,80}}\")\s+(?i:to|into)\s+(?:(?i:the)\s+)?"
-    rf"(?:(?i:end\s+of\s+(?:the\s+)?)|(?i:user'?s?)\s+)?[\w`'\" -]{{0,30}}?(?i:query|message|list|names|prompt|command|"
-    rf"input|argument|parameter|field|request|path|url|content|body)"
-    rf"|\b(?i:set|change|changed|modify|override|replace|redirect(?:ed)?|swap|force|append\s+to|prepend\s+to)\s+"
-    rf"(?:(?i:the|all|any)\s+)?{_PARAM_REF}(?:\s+(?i:parameter|argument|field|param|value|input))?"
-    rf"[^.\n]{{0,40}}?\b(?i:to|with|as|into)\b"
-    rf"|\b(?:(?i:the)\s+)?{_PARAM_REF}\s+(?:(?i:parameter|argument|field)\s+)?(?:MUST|(?i:must|should))\s+"
-    rf"(?:(?i:always)\s+)?(?i:be)\s+(?i:changed|set|replaced|redirected|overridden)"
-    rf"|\b(?i:all|any|every)\s+[`'\"]?[\w.-]+[`'\"]?\s+(?i:requests?|calls?|queries)\b[^.\n]{{0,60}}?\b(?i:must)\s+(?i:be)\s+"
-    rf"(?i:performed|redirected|sent|routed|calculated|run)\b")
+    # set / change / modify X (parameter) to Y   |   set the parameter `x` to Y
+    rf"\b(?i:set|change|changed|modify|override|replace|redirect(?:ed)?|swap|force|adjust|alter|convert|"
+    rf"append\s+to|prepend\s+to)\s+{_DET}{_PARAM_REF}(?:\s+{_PARAM_NOUN})?[^.\n]{{0,40}}?\b(?i:to|with|as|into)\b"
+    # modify the `x` parameter (accordingly / in all calls): the parameter noun makes it explicit
+    rf"|\b(?i:set|change|modify|override|adjust|alter|replace|update|rewrite)\s+{_DET}{_QTOK}\s+{_PARAM_NOUN}\b"
+    # append / add / insert 'LITERAL' (argument) to (any|all|the) <target>
+    rf"|\b(?i:append|prepend|add|insert|inject)\s+(?:(?i:the)\s+)?(?:{_QTOK}|'[^'\n]{{1,80}}'|\"[^\"\n]{{1,80}}\")"
+    rf"(?:\s+{_PARAM_NOUN}|\s+(?i:suffix|prefix|tag|filter))?\s+(?i:to|into)\s+{_DET}(?:(?i:end\s+of)\s+{_DET})?"
+    rf"(?:(?i:user'?s?)\s+)?(?:{_QTOK}|[\w`'\" -]{{0,30}}?{_TAMPER_TARGET})"
+    # remove / strip X from any <thing> submitted to `tool`
+    rf"|\b(?i:remove|strip|drop|delete|omit|truncate|redact)\b[^.\n]{{0,50}}?\b(?i:from)\s+{_DET}[^.\n]{{0,40}}?"
+    rf"\b(?i:submitted|passed|sent|given|provided)\s+(?i:to)\b"
+    # `x` (parameter) must be changed / set / redirected
+    rf"|\b(?:(?i:the)\s+)?{_PARAM_REF}\s+(?:{_PARAM_NOUN}\s+)?(?:MUST|(?i:must|should))\s+(?:(?i:always)\s+)?(?i:be)\s+"
+    rf"(?i:changed|set|replaced|redirected|overridden|converted|restricted)"
+    # all/any X requests must be performed / redirected / changed ... (passive policy over other calls)
+    rf"|\b(?i:all|any|every)\s+(?:[`'\"]?[\w.-]+[`'\"]?\s+){{0,5}}?(?i:requests?|calls?|queries|searches|lookups|"
+    rf"calculations|commits?|messages?)\b[^.\n]{{0,80}}?\b(?i:must)\s+(?:(?i:be|use)\s+)?(?:(?i:automatically)\s+)?"
+    rf"(?i:performed|redirected|sent|routed|calculated|run|converted|changed|restricted|based|made|for)\b"
+    # you must instead <do something else> (replace the user's intended call)
+    rf"|\b(?:MUST|(?i:must|should))\s+(?i:instead)\s+(?i:show|use|call|return|send|fetch|query|run|search|open)\b")
+_TAMPER_SCOPE = re.compile(
+    r"\b(?i:the\s+user'?s|(?:when|whenever|if|each\s+time)\s+(?:a\s+|the\s+)?user\b|in\s+all\s+(?:calls|requests|queries)|"
+    r"every\s+(?:call|request|query|commit|message|search)|for\s+any\b|"
+    r"(?:any|all|every)\s+(?:[`'\"]?[\w.-]+[`'\"]?\s+){0,5}?(?:requests?|calls?|queries|searches|lookups|calculations|"
+    r"messages?|commits?|branches|addresses|address)|any\s+call\s+to|on\s+any\s+call|"
+    r"automatically|regardless|instead)\b")
 
 
 _EXAMPLE_TAIL = re.compile(r"(?i)\b(?:e\.g\.|i\.e\.|for\s+example|for\s+instance|such\s+as|like\s*:|example\s*:|"
@@ -413,9 +435,6 @@ _EXAMPLE_TAIL = re.compile(r"(?i)\b(?:e\.g\.|i\.e\.|for\s+example|for\s+instance
 
 _FORCED_FIRST = re.compile(r"\b(?:MUST|(?i:must|should|need\s+to|have\s+to))\s+(?:(?i:always)\s+)?(?i:first)\s+"
                            r"(?i:call|use|invoke|run|fetch|read|load|send|get)\b")
-_TAMPER_SCOPE = re.compile(r"\b(?i:the\s+user'?s|in\s+all\s+(?:calls|requests|queries)|every\s+(?:call|request|query|"
-                           r"commit|message)|(?:any|all)\s+(?:\w+\s+){0,3}?(?:requests?|calls?|queries|searches|messages?)|"
-                           r"automatically|regardless)\b")
 
 
 def _refs(rx: re.Pattern, text: str) -> list[str]:
@@ -428,7 +447,16 @@ def _other(names: list[str], purpose: str) -> list[str]:
             and set(_purpose_words(n)) != self_words]
 
 
-def _hijack(text: str, purpose: str) -> list[Hit]:
+def _own_param_only(sent: str, own: frozenset) -> bool:
+    """True when every parameter the sentence talks about is one of THIS tool's own parameters."""
+    if not own:
+        return False
+    toks = {t.strip("`'\"") for t in re.findall(_QTOK, sent)} | set(re.findall(_IDENT, sent))
+    named = {t for t in toks if t in own or re.fullmatch(r"[\w-]{1,40}", t)}
+    return bool(named) and named <= own
+
+
+def _hijack(text: str, purpose: str, own: frozenset = frozenset()) -> list[Hit]:
     hits: list[Hit] = []
     sents = _sentences(text)
     for i, sent in enumerate(sents):
@@ -453,6 +481,8 @@ def _hijack(text: str, purpose: str) -> list[Hit]:
             "override": any(rx.search(ctx) for rx in _OVERRIDE[2:]),
         }
         n = sum(signals.values())
+        if tamper and _own_param_only(tamper.group(0), own):
+            continue                                            # usage docs for this tool's own parameters
         if tamper and (cond or signals["override"] or _TAMPER_SCOPE.search(ctx)):
             conf = HIGH if (signals["literal"] or signals["override"]) else MEDIUM
             hits.append(Hit("parameter_tampering", conf, sent[:200]))
@@ -474,7 +504,7 @@ def _is_function_statement(sentences: list[str], sent: str) -> bool:
     return bool(sentences) and sent is sentences[0] and bool(_FUNC_VERB.match(sent))
 
 
-def _analyze(text: str, purpose: str, layer: str) -> list[Hit]:
+def _analyze(text: str, purpose: str, layer: str, own: frozenset = frozenset()) -> list[Hit]:
     sents = _sentences(text)
     hits: list[Hit] = []
     exfil = _exfil(sents)
@@ -496,22 +526,24 @@ def _analyze(text: str, purpose: str, layer: str) -> list[Hit]:
     if shadow:
         strong = any(h.kind == "user_concealment" for h in hits) or bool(_SINK_NET.search(text))
         hits += [Hit("tool_shadowing", HIGH if strong else MEDIUM, s[:200], layer) for s in shadow]
-    hits += [h if h.layer == layer else Hit(h.kind, h.confidence, h.span, layer) for h in _hijack(text, purpose)]
+    hits += [h if h.layer == layer else Hit(h.kind, h.confidence, h.span, layer) for h in _hijack(text, purpose, own)]
     if layer == "visible" and not exfil and not access:
         hits += [Hit("off_purpose_secret_ref", MEDIUM, s[:200], layer) for s in _off_purpose(text, purpose)]
     return hits
 
 
-def scan(text: str, purpose: str = "") -> list[Hit]:
-    """Every poisoning hit in one piece of model-facing text. `purpose` = the owning tool's name (off-purpose check)."""
+def scan(text: str, purpose: str = "", own_params=()) -> list[Hit]:
+    """Every poisoning hit in one piece of model-facing text. `purpose` = the owning tool's name (off-purpose check);
+    `own_params` = that tool's own parameter names (documenting its OWN parameters is not tampering)."""
+    own = frozenset(own_params or ())
     if not text or not text.strip():
         return []
     visible, hidden, present = _layers(text)
-    hits = _analyze(visible, purpose, "visible")
+    hits = _analyze(visible, purpose, "visible", own)
     seen_spans = {h.span for h in hits}
     concealed = False
     for name, layer_text in hidden:
-        for h in _analyze(layer_text, purpose, f"hidden:{name}"):
+        for h in _analyze(layer_text, purpose, f"hidden:{name}", own):
             if h.kind == "off_purpose_secret_ref" or h.span in seen_spans:
                 continue
             concealed = True

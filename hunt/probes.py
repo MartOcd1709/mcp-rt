@@ -1070,6 +1070,7 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
     from hunt import poisoning
 
     owners: list[tuple[str, str, list[tuple[str, str]]]] = []      # (owner, purpose, [(surface, text)])
+    own = {t.name: tuple(poisoning.parameter_names(t)) for t in tools}
     owners += poisoning.server_surfaces(session)
     for t in tools:
         owners.append((t.name, t.name, poisoning.tool_surfaces(t)))
@@ -1110,7 +1111,7 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
             if not text:
                 continue
             scanned += 1
-            for h in poisoning.scan(text, purpose=purpose):
+            for h in poisoning.scan(text, purpose=purpose, own_params=own.get(owner, ())):
                 key = (owner, path, h.kind, h.span)
                 if key in seen:
                     continue

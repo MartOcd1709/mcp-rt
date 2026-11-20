@@ -63,7 +63,8 @@ def _score(rows, split, which):
     rows = [r for r in rows if which == "all" or split.get(r["server"]) == which]
     out = []
     for r in rows:
-        hits = poisoning.scan(r["text"], purpose=r["tool"])
+        own = re.findall(r"(?m)^\s*-\s*([\w.-]+):", r["text"])     # the tool's own listed arguments
+        hits = poisoning.scan(r["text"], purpose=r["tool"], own_params=own)
         out.append({**r, "kinds": sorted({h.kind for h in hits}), "high": any(h.confidence == "high" for h in hits)})
     return out
 
