@@ -2,8 +2,8 @@
 
     MCPTOX_DIR=/path/to/mcptox-f85189f pytest tests/test_mcptox_benchmark.py
 
-Locks the measured result of the frozen detector (commit e853985) on the TEST split — 23 servers never inspected
-while tuning: recall 80.5% (182/226 pure poisoned descriptions), 0/181 false positives on the real clean tools.
+Locks the measured result of the frozen detector on the TEST split (23 servers whose misses are never inspected):
+run #1 (e853985) recall 80.5%; run #2 (14c88e3, parameter tampering v2) recall 88.9% (201/226), 0/181 false positives.
 A change that drops recall or adds a false positive on real tools fails here.
 """
 import os
@@ -23,7 +23,7 @@ def _bench():
     return b
 
 
-@pytest.mark.parametrize("split,min_recall", [("test", 0.80), ("all", 0.84)])
+@pytest.mark.parametrize("split,min_recall", [("test", 0.88), ("all", 0.91)])
 def test_mcptox_recall_and_zero_false_positives(split, min_recall):
     b = _bench()
     sp, clean, pure, _ = b.load(Path(DATA))
