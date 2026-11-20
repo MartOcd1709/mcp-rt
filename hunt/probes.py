@@ -1061,8 +1061,8 @@ _POISON_MAX_CALLS = int(os.environ.get("MCPRT_POISON_MAX_CALLS", "64"))   # runt
 
 
 async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
-    """Tool poisoning (MCP03; detector: hunt/poisoning.py). Model-directed instructions hidden or planted in ANY
-    model-facing text: tool description / title / annotations / every schema string, the server's `instructions`,
+    """Tool poisoning (MCP03; detector: hunt/poisoning.py). Model-directed directives hidden or planted in ANY
+    model-facing text: tool description / title / annotations / every schema string, the server's guide text,
     resource and prompt text, and what tools RETURN or RAISE for a benign call (return-value / ATPA poisoning).
     Hidden layers (TAG block, zero-width, base64/hex, HTML comments, off-screen padding, homoglyphs) are decoded.
     Static: every hit is a SUSPECTED lead carrying its confidence, never VULNERABLE; an agent run against a planted
@@ -1070,8 +1070,7 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
     from hunt import poisoning
 
     owners: list[tuple[str, str, list[tuple[str, str]]]] = []      # (owner, purpose, [(surface, text)])
-    if instr := (getattr(session, "mcprt_instructions", "") or ""):
-        owners.append(("(server)", "", [("instructions", instr)]))
+    owners += poisoning.server_surfaces(session)
     for t in tools:
         owners.append((t.name, t.name, poisoning.tool_surfaces(t)))
     for t in tools[:_POISON_MAX_CALLS]:                             # runtime: what a benign call returns / raises
@@ -1130,7 +1129,7 @@ async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
                                        rationale=f"{poisoning.WHY[h.kind]} (confidence {h.confidence.upper()}; static lead)"))
     if not out:
         out.append(ProbeResult("tool_poisoning", "(server)", "oracle_negative",
-                               rationale=f"no model-directed instruction in {scanned} model-facing surface(s), "
+                               rationale=f"no model-directed directive in {scanned} model-facing surface(s), "
                                          "incl. hidden layers and what tools return"))
     return out
 
@@ -1844,7 +1843,9 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
             async with ClientSession(read, write) as s:
                 # Bound connect/handshake so an unresponsive server fails fast instead of hanging.
                 init = await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
-                s.mcprt_instructions = getattr(init, "instructions", None) or ""   # model-facing: read by tool_poisoning
+                from hunt import poisoning as _poisoning
+
+                _poisoning.remember_init(s, init)              # the server's guide text: read by tool_poisoning
                 _guard_call_tool(s, _CALL_TIMEOUT_S)
                 tools = (await asyncio.wait_for(s.list_tools(), _CONNECT_TIMEOUT_S)).tools
                 if surface is not None:          # inventory the attack surface in-session (no 2nd connect)

@@ -463,3 +463,17 @@ def scan_name(name: str) -> list[Hit]:
 def parameter_names(tool) -> list[str]:
     t = tool if isinstance(tool, dict) else tool.model_dump(exclude_none=True)
     return list(((t.get("inputSchema") or {}).get("properties") or {}).keys())
+
+
+
+# ---------------------------------------------------------------- the server's own guide text (initialize)
+def remember_init(session, init) -> None:
+    """Keep the server's `instructions` (InitializeResult) on the session: hosts may put it in the system prompt, so it
+    is model-facing text like any tool description."""
+    session.mcprt_server_guide = getattr(init, "instructions", None) or ""
+
+
+def server_surfaces(session) -> list[tuple[str, str, list[tuple[str, str]]]]:
+    """(owner, purpose, [(surface, text)]) for the server-level text recorded by remember_init."""
+    text = getattr(session, "mcprt_server_guide", "") or ""
+    return [("(server)", "", [("instructions", text)])] if text else []
