@@ -144,6 +144,10 @@ STANDARDS: dict[str, dict] = {
 _PROBE = "hunt/probes.py::_selftest (vuln+safe fixtures, must fire on vuln / stay silent on safe)"
 _OAUTH = "hunt/family_b_fixtures/{vuln,safe}_oauth_server.py + tests/test_oauth.py"
 _AGENT = "tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none)"
+# deterministic tool-poisoning detector (hunt/poisoning.py): measured, not asserted
+_POISON = ("tests/test_tool_poisoning.py (37 class-derived variants caught, 40 hard negatives silent; real-world precision: "
+           "975 surfaces of 9 real MCP servers / 187 tools, 0 hits; 11 surfaces end-to-end on random-named stdio servers) + "
+           "tests/test_tool_poisoning_heldout.py (published variants: first held-out run 5/11, class-level fixes since)")
 _CAP = "hunt/hunt_cap.py::_selftest (declared vs observed caps, reader not flagged)"
 
 # ---- the canonical taxonomy --------------------------------------------------------------
@@ -166,7 +170,7 @@ TAXONOMY: list[Item] = [
     Item("MULTITENANCY", "Improper Multitenancy", ("MCP38:MCP-06", "CoSAI:CoSAI-10"), None, PARTIAL, notes="our platform enforces org isolation (tested); not a target-server probe"),
     Item("MISSING-AUTH", "Insufficient Authentication/Authorization", ("OWASP-MCP:MCP07", "MCP38:MCP-29", "CoSAI:CoSAI-18", "CIS:CIS-3"), None, PARTIAL, notes="missing-auth enforcement probed; full OAuth-flow attacks pending (hunt/oauth_harness.py)", gap_ticket="SAM1-15"),
     # --- tool / schema / description poisoning ---
-    Item("TOOL-POISON", "Tool Description Poisoning", ("MCP38:MCP-10", "OWASP-MCP:MCP03", "ASI:ASI01", "CoSAI:CoSAI-2"), "tool_poisoning", COVERED, _PROBE),
+    Item("TOOL-POISON", "Tool Description Poisoning", ("MCP38:MCP-10", "OWASP-MCP:MCP03", "ASI:ASI01", "CoSAI:CoSAI-2"), "tool_poisoning", COVERED, _POISON),
     Item("SESSION-ARG", "Session-Type Credential Requested as a Tool Argument (static lead)", ("OWASP-MCP:MCP01",),
          "session_argument", PARTIAL, evidence="tests/test_session_arg_heldout.py",
          notes="SUSPECTED ceiling: an argument-level static lead; never a finding and never proof that an agent supplied the "
@@ -175,7 +179,8 @@ TAXONOMY: list[Item] = [
          evidence="tests/test_lure_text.py, tests/test_lure_heldout.py, tests/test_lure_rework.py",
          notes="SUSPECTED ceiling: static rule families over tool, parameter, annotation, resource and prompt text; never a "
                "finding and never proof of agent compliance; runtime elicitation and sampling text are out of scope"),
-    Item("SCHEMA-POISON", "Full Schema Poisoning", ("MCP38:MCP-11", "OWASP-MCP:MCP03", "CoSAI:CoSAI-3"), "schema_examples_steering", COVERED, _AGENT),
+    Item("SCHEMA-POISON", "Full Schema Poisoning", ("MCP38:MCP-11", "OWASP-MCP:MCP03", "CoSAI:CoSAI-3"), "schema_examples_steering", COVERED, _AGENT + "; deterministic: tool_poisoning reads every schema string "
+     "(description/default/enum/examples/const) and parameter names"),
     Item("UNICODE-CONCEAL", "Unicode / Hidden-Character Concealment", ("MCP38:MCP-11",), "hidden_unicode", COVERED, _AGENT),
     Item("TOOL-SHADOW", "Tool Shadowing", ("MCP38:MCP-13", "CoSAI:CoSAI-5"), "tool_shadowing", COVERED, _AGENT),
     Item("CROSS-SERVER", "Cross-Server Tool Poisoning", ("MCP38:MCP-14", "ASI:ASI07", "CoSAI:CoSAI-6"), "cross_server_poisoning", COVERED, _AGENT),
@@ -188,7 +193,8 @@ TAXONOMY: list[Item] = [
     Item("P00-RESOURCE", "Resource Content Injection (protocol-00)", ("MCP38:MCP-12", "OWASP-MCP:MCP06", "ASI:ASI06", "CoSAI:CoSAI-4"), "mcp_resource_injection", COVERED, _AGENT, notes="MCP-00 family: attacker-controlled resource content routed to the model"),
     Item("P00B-SAMPLING", "Sampling Instruction Laundering (protocol-00b)", ("MCP38:MCP-20", "ASI:ASI01", "CoSAI:CoSAI-11"), "sampling_instruction_laundering", COVERED, "tests/test_sampling_host.py"),
     Item("P00C-ELICIT", "Elicitation Credential Harvest (protocol-00c)", ("MCP38:MCP-23", "ASI:ASI09", "CoSAI:CoSAI-9"), "elicitation_credential_harvest", COVERED, "tests/test_elicitation_host.py"),
-    Item("OUTPUT-INJ", "Insecure Output / Return-Value Injection", ("MCP38:MCP-22", "OWASP-MCP:MCP06", "CoSAI:CoSAI-4"), "return_value_injection", COVERED, _AGENT),
+    Item("OUTPUT-INJ", "Insecure Output / Return-Value Injection", ("MCP38:MCP-22", "OWASP-MCP:MCP06", "CoSAI:CoSAI-4"), "return_value_injection", COVERED, _AGENT + "; deterministic: tool_poisoning scans what each tool returns or raises "
+     "for a benign call (tests/test_tool_poisoning.py tool_result + error_text surfaces)"),
     Item("STRUCT-OUT", "Structured-Output Resource-Link Injection (MCP-28 ours)", ("MCP38:MCP-12", "SPEC2026:SPEC2026-requeststate"), "structured_output_resource_link", COVERED, _AGENT, notes="aligns to 2026-07-28 structured output; link-handle steering"),
     Item("ROOTS-PATH", "Roots Path Manipulation (MCP-29 ours)", ("MCP38:MCP-08",), "roots_path_manipulation", COVERED, _AGENT),
     Item("CONSENT-BYPASS", "Consent / Approval Bypass + Fatigue", ("MCP38:MCP-23", "ASI:ASI09", "CoSAI:CoSAI-13", "CoSAI:CoSAI-9"), "permission_prompt_bypass", COVERED, _AGENT),
