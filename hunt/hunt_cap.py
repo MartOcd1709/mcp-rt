@@ -36,7 +36,13 @@ _DECL_WRITE = re.compile(
     r"upload|store|insert|update|patch|\btouch\b|\bmount\b|\bset\b|persist|commit|export|download", re.I)
 _DECL_EXEC = re.compile(
     r"\brun\b|execute|\bexec\b|shell|command|spawn|subprocess|process|script|eval|compile|interpreter|"
-    r"\bpython\b|\bbash\b|\bsh\b|invoke|launch|\bbuild\b|\bgit\b|\bnpm\b|\bpip\b|terminal", re.I)
+    r"\bpython\b|\bbash\b|\bsh\b|invoke|launch|\bbuild\b|\bgit\b|\bnpm\b|\bpip\b|terminal|"
+    # a named program the tool says it runs declares that spawn ("Fetch a web page via curl")
+    r"\b(?:via|using|with|through|wraps?|calls?|runs?|shells?\s+out\s+to)\s+(?:the\s+)?`?(?:curl|wget|ffmpeg|ffprobe|"
+    r"docker|podman|kubectl|helm|ssh|scp|rsync|tar|zip|unzip|7z|make|gcc|clang|node|deno|bun|java|ruby|perl|php|"
+    r"cargo|rustc|grep|rg|ripgrep|sed|awk|find|pandoc|imagemagick|magick|libreoffice|soffice|osascript|powershell|"
+    r"xdg-open|jq|yq|sqlite3|psql|mysql|terraform|aws|gcloud|az|gh)\b|"
+    r"\b(?:curl|wget|ffmpeg|kubectl|rsync|pandoc|ripgrep|imagemagick|terraform)\b", re.I)
 
 
 @dataclass
@@ -100,11 +106,18 @@ def parse_strace_events(lines) -> set[tuple[str, str]]:
     """Reduce strace output to the set of (capability, detail) the child exercised, where detail is
     the path / address / binary. Carrying the detail lets baseline-diff cancel startup noise precisely
     (a tool's write to ~/x is kept even though python also writes __pycache__ at startup). Reads are
-    never returned; local IPC and device/cache writes are excluded."""
+    never returned; local IPC and device/cache writes are excluded.
+    Execs are counted per binary: the launch is `/usr/bin/python`, a SECOND spawn of the same interpreter is
+    `/usr/bin/python#2`. Otherwise a tool that runs `python -c ...` / `node -e ...` (the commonest payload shape)
+    would hide behind the server's own launch in the baseline."""
     ev: set[tuple[str, str]] = set()
+    seen_exec: dict[str, int] = {}
     for ln in lines:
-        if _RE_EXECVE.search(ln):
-            ev.add((CAP_EXEC, _first_quoted(ln)))
+        if _RE_EXECVE.search(ln) and "= -1" not in ln:          # a failed execve (PATH probing) spawned nothing
+            binary = _first_quoted(ln)
+            seen_exec[binary] = seen_exec.get(binary, 0) + 1
+            n = seen_exec[binary]
+            ev.add((CAP_EXEC, binary if n == 1 else f"{binary}#{n}"))
         if (_RE_CONNECT_INET.search(ln) or _RE_SOCKET_INET.search(ln)) and not _RE_LOCAL_SOCK.search(ln):
             ev.add((CAP_NETWORK, _inet_detail(ln)))
         if _RE_FS_MUTATE.search(ln):
@@ -124,7 +137,43 @@ def _dirname(path: str) -> str:
     return path.rsplit("/", 1)[0] if "/" in path else path
 
 
-def novel_caps(tool_events, baseline) -> set[str]:
+_SEG_SPLIT = re.compile(r"/+")
+
+
+def volatile_templates(b1_paths, b2_paths) -> list[re.Pattern]:
+    """Paths whose NAME changes between two identical startups (mkdtemp dirs, per-run logs, random cache keys)
+    are startup noise by definition. Each such pair becomes a template: the segments that differ are wildcards
+    (keeping their common prefix/suffix), so the same churn in a per-tool launch is never mistaken for the tool."""
+    out: list[re.Pattern] = []
+    a_only, b_only = set(b1_paths) - set(b2_paths), set(b2_paths) - set(b1_paths)
+    for pa in sorted(a_only):
+        sa = _SEG_SPLIT.split(pa)
+        for pb in sorted(b_only):
+            sb = _SEG_SPLIT.split(pb)
+            if len(sa) != len(sb):
+                continue
+            diff = [i for i, (x, y) in enumerate(zip(sa, sb)) if x != y]
+            if not 1 <= len(diff) <= 2:
+                continue
+            parts = []
+            for i, (x, y) in enumerate(zip(sa, sb)):
+                if i not in diff:
+                    parts.append(re.escape(x))
+                    continue
+                pre = len(os.path.commonprefix([x, y]))
+                suf = len(os.path.commonprefix([x[::-1], y[::-1]]))
+                suf = min(suf, len(x) - pre, len(y) - pre)
+                parts.append(re.escape(x[:pre]) + r"[^/]+" + (re.escape(x[len(x) - suf:]) if suf else ""))
+            out.append(re.compile("^" + "/".join(parts) + "$"))
+            break
+    return out
+
+
+def _volatile(path: str, templates) -> bool:
+    return any(t.match(path) or t.match(_dirname(path)) for t in templates)
+
+
+def novel_caps(tool_events, baseline, volatile=()) -> set[str]:
     """Capabilities a tool exercised that the startup baseline did NOT. Writes are compared at
     DIRECTORY granularity, not exact path: a launcher (npx/uvx/node) scribbles uniquely-named temp
     and log files every run (e.g. ~/.npm/_cacache/tmp/<random>), so exact-path diff never cancels
@@ -135,7 +184,7 @@ def novel_caps(tool_events, baseline) -> set[str]:
     novel: set[str] = set()
     for cap, detail in tool_events:
         if cap == CAP_WRITE:
-            if _dirname(detail) not in base_write_dirs:
+            if _dirname(detail) not in base_write_dirs and not _volatile(detail, volatile):
                 novel.add(CAP_WRITE)
         elif (cap, detail) not in base_other:
             novel.add(cap)
@@ -289,10 +338,15 @@ async def _run_traced(argv, env, call_timeout) -> list[Hypothesis]:
     import os
     debug = bool(os.environ.get("MCPRT_CAP_DEBUG"))
     baseline, tools_by_name = await _trace_session(argv, env, call_timeout, None, debug)
+    # a second identical startup reveals which write paths are volatile (random per launch): startup noise
+    baseline2, _ = await _trace_session(argv, env, call_timeout, None, debug)
+    writes = lambda ev: [p for c, p in ev if c == CAP_WRITE]  # noqa: E731
+    volatile = volatile_templates(writes(baseline), writes(baseline2))
+    baseline = baseline | baseline2
     hyps: list[Hypothesis] = []
     for name, tool in tools_by_name.items():
         events, _ = await _trace_session(argv, env, call_timeout, name, debug)
-        new_caps = novel_caps(events, baseline)   # capabilities that appear ONLY when this tool runs
+        new_caps = novel_caps(events, baseline, volatile)   # capabilities that appear ONLY when this tool runs
         if debug:
             print(f"[cap-debug]   {name}: new-vs-baseline caps = {sorted(new_caps) or 'none'}")
         hyps += classify_gaps(name, declared_caps(tool), new_caps)
