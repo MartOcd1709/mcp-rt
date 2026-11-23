@@ -153,7 +153,7 @@ CLASS_META = {
         fix="Validate roots boundaries server-side; never substitute or shadow a client-declared root; "
             "canonicalize and confine every roots-scoped read to the approved root; reject path escapes."),
     "mcp_cap": dict(sev="Medium", cwe="CWE-862", owasp=["MCP02"],
-        title="Undeclared Capability / Consent Gap (MCP-00, strace lead)",
+        title="Undeclared Capability / Consent Gap (MCP-00)",   # a strace lead is SUSPECTED; a canary proof is VULNERABLE
         fix="Declare every capability the server exercises; surface undeclared syscalls (network/exec/file) "
             "for consent; apply least-capability so observed behavior matches the declared manifest."),
 }

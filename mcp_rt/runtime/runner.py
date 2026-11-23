@@ -67,17 +67,28 @@ def load_hints():
 
 
 async def _drive(params, token, timeout, hints=None):
-    out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "hinted_tools": [], "error": None}
+    out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "samplings": [],
+           "hinted_tools": [], "error": None}
+
+    async def sample(context, params):
+        # A server that asks the CLIENT's model to complete something gets a completion carrying our token, so if it
+        # ships the model's output anywhere, the seal sees it. The request text is kept for the laundering lead.
+        text = " ".join(getattr(m.content, "text", "") or "" for m in (getattr(params, "messages", None) or []))
+        sys_prompt = getattr(params, "systemPrompt", None) or ""
+        out["samplings"].append({"text": (sys_prompt + " " + text).strip()[:2000]})
+        return types.CreateMessageResult(role="assistant", model="mcprt-sealed-sampler", stopReason="endTurn",
+                                         content=types.TextContent(type="text", text=f"Summary ready. {token}-SAMPLE"))
 
     async def elicit(context, request):
         # Every elicitation is answered with the token, so a server that asks for a secret gets ours.
         schema = getattr(request, "requestedSchema", None) or {}
         out["elicitations"].append(sorted((schema.get("properties") or {}).keys()))
-        content = {k: _sample(v, token) for k, v in (schema.get("properties") or {}).items()}
+        content = {k: (f"{token}-ELICIT" if (v or {}).get("type", "string") == "string" and not (v or {}).get("enum")
+                       else _sample(v, token)) for k, v in (schema.get("properties") or {}).items()}
         return types.ElicitResult(action="accept", content=content)
     try:
         async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write, elicitation_callback=elicit) as session:
+            async with ClientSession(read, write, elicitation_callback=elicit, sampling_callback=sample) as session:
                 init = await asyncio.wait_for(session.initialize(), timeout)
                 out["instructions"] = init.instructions
                 out["server_name"] = init.serverInfo.name if init.serverInfo else None
@@ -129,6 +140,44 @@ def _summary(ev, token):
             "token_hits": observe.token_hits(payload, token)}
 
 
+_PEM_HEAD, _PEM_TAIL = "-----BEGIN " + "OPENSSH PRIVATE KEY-----", "-----END " + "OPENSSH PRIVATE KEY-----"
+# Fake credentials planted in the sealed HOME (MCP-00 proof). Every secret value is the run token plus a label, so a
+# leak names exactly WHAT was stolen. Formats mirror the real files a credential-hunting server goes after.
+HONEYFILES = {
+    ".aws/credentials": "[default]\naws_access_key_id = AKIA-MCPRT-CANARY\naws_secret_access_key = {t}-AWS\n",
+    ".ssh/id_rsa": _PEM_HEAD + "\n{t}-SSH\n" + _PEM_TAIL + "\n",
+    ".config/gcloud/application_default_credentials.json": '{{"type": "authorized_user", "client_secret": "{t}-GCP"}}\n',
+    ".netrc": "machine api.github.com login ci-bot password {t}-NETRC\n",
+    ".env": "OPENAI_API_KEY={t}-ENV\nDATABASE_URL=postgres://app:{t}-ENV@db.internal/prod\n",
+    ".cursor/mcp.json": '{{"mcpServers": {{"internal": {{"command": "srv", "env": {{"API_TOKEN": "{t}-MCPCFG"}}}}}}}}\n',
+    ".bash_history": "export GITHUB_TOKEN={t}-HIST\n",
+    ".kube/config": "users:\n- name: admin\n  user:\n    token: {t}-KUBE\n",
+}
+
+
+def plant_honeyfiles(home, token):
+    for rel, tmpl in HONEYFILES.items():
+        f = Path(home) / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(tmpl.format(t=token))
+        os.chmod(f, 0o600)
+
+
+def leaks_of(events, token):
+    """Which PLANTED secrets left the server: [{secret, dst, excerpt}] (labels: HONEYFILES, ELICIT, SAMPLE)."""
+    labels = ("AWS", "SSH", "GCP", "NETRC", "ENV", "MCPCFG", "HIST", "KUBE", "ELICIT", "SAMPLE")
+    out, seen = [], set()
+    for e in events:
+        payload = base64.b64decode(e.get("payload") or "")
+        for lab in labels:
+            if (lab, e.get("dst"), e.get("port")) in seen or not observe.token_hits(payload, f"{token}-{lab}"):
+                continue
+            seen.add((lab, e.get("dst"), e.get("port")))
+            out.append({"secret": lab, "dst": f"{e.get('proto', 'tcp')} {e.get('dst')}:{e.get('port')}",
+                        "excerpt": payload[:400].decode("utf-8", "replace")})
+    return out
+
+
 def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=None):
     """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
     Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
@@ -142,6 +191,7 @@ def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=
              "strace_probe": "probe.strace", "server_json": "server.json"}
     paths = {k: os.path.join(workdir, v) for k, v in names.items()}
     Path(paths["server_json"]).write_text(json.dumps(list(target_argv)))
+    plant_honeyfiles(workdir, token)          # HOME is the workdir: the planted secrets are what a thief would find
     port = random.SystemRandom().randint(20000, 60000)
     host_ino = os.stat("/proc/self/ns/net").st_ino
     launcher = ["unshare", "-rn", "--", sys.executable, "-I", str(LAUNCHER),
@@ -184,6 +234,7 @@ def run_server(argv, *, token=None, timeout=120.0, hints=None):
             "proof": report.get("checks", {}), "proof_error": report.get("error"),
             "tools": [t["name"] for t in drive["tools"]], "calls": drive["calls"],
             "driver_error": drive["error"], "elicitations": drive["elicitations"], "refused": refused,
+            "samplings": drive["samplings"], "leaks": leaks_of(server_events, token),
             "hinted": bool(hints), "hinted_tools": drive["hinted_tools"],
             "limits": LIMITS, "workdir": workdir}
 

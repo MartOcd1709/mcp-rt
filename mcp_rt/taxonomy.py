@@ -148,7 +148,7 @@ _AGENT = "tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none)"
 _POISON = ("tests/test_tool_poisoning.py (37 class-derived variants caught, 40 hard negatives silent; real-world precision: "
            "975 surfaces of 9 real MCP servers / 187 tools, 0 hits; 11 surfaces end-to-end on random-named stdio servers) + "
            "tests/test_tool_poisoning_heldout.py (published variants: first held-out run 5/11, class-level fixes since)")
-_CAP = ("tests/test_hunt_cap_battery.py (real strace sensor, random-named servers: undeclared network/write/exec caught incl. same-interpreter child spawn; declared fetch/write/run, named CLI binary, reader, volatile mkdtemp startup all silent: 18/18 exact) + hunt/hunt_cap.py::_selftest")
+_CAP = ("tests/test_hunt_cap_battery.py (real strace sensor, random-named servers: undeclared network/write/exec caught incl. same-interpreter child spawn; declared fetch/write/run, named CLI binary, reader, volatile mkdtemp startup all silent: 18/18 exact) + tests/test_mcp00_proof.py (LIVE sealed canary run: planted fake credentials leaving = PROVEN; argument echo to a declared destination = lead) + hunt/hunt_cap.py::_selftest")
 
 # ---- the canonical taxonomy --------------------------------------------------------------
 # One record per canonical attack item. external_refs lists every standard id it satisfies, so a
@@ -191,8 +191,8 @@ TAXONOMY: list[Item] = [
     Item("PI-DIRECT", "Prompt Injection (direct)", ("MCP38:MCP-19", "OWASP-MCP:MCP06", "ASI:ASI01", "CoSAI:CoSAI-11"), "prompt_template_injection", COVERED, _AGENT),
     Item("PI-INDIRECT", "Prompt Injection (indirect)", ("MCP38:MCP-20", "OWASP-MCP:MCP06", "ASI:ASI01", "CoSAI:CoSAI-11"), "indirect_prompt_injection", COVERED, _AGENT),
     Item("P00-RESOURCE", "Resource Content Injection (protocol-00)", ("MCP38:MCP-12", "OWASP-MCP:MCP06", "ASI:ASI06", "CoSAI:CoSAI-4"), "mcp_resource_injection", COVERED, _AGENT, notes="MCP-00 family: attacker-controlled resource content routed to the model"),
-    Item("P00B-SAMPLING", "Sampling Instruction Laundering (protocol-00b)", ("MCP38:MCP-20", "ASI:ASI01", "CoSAI:CoSAI-11"), "sampling_instruction_laundering", COVERED, "tests/test_sampling_host.py"),
-    Item("P00C-ELICIT", "Elicitation Credential Harvest (protocol-00c)", ("MCP38:MCP-23", "ASI:ASI09", "CoSAI:CoSAI-9"), "elicitation_credential_harvest", COVERED, "tests/test_elicitation_host.py"),
+    Item("P00B-SAMPLING", "Sampling Instruction Laundering (protocol-00b)", ("MCP38:MCP-20", "ASI:ASI01", "CoSAI:CoSAI-11"), "sampling_instruction_laundering", COVERED, "tests/test_sampling_host.py + tests/test_mcp00_proof.py (LIVE sealed run: server-initiated sampling recorded + scanned; sampled completion exfiltrated = PROVEN)"),
+    Item("P00C-ELICIT", "Elicitation Credential Harvest (protocol-00c)", ("MCP38:MCP-23", "ASI:ASI09", "CoSAI:CoSAI-9"), "elicitation_credential_harvest", COVERED, "tests/test_elicitation_host.py + tests/test_mcp00_proof.py (LIVE sealed run: elicitation answered with a planted value; the answer leaving = PROVEN)"),
     Item("OUTPUT-INJ", "Insecure Output / Return-Value Injection", ("MCP38:MCP-22", "OWASP-MCP:MCP06", "CoSAI:CoSAI-4"), "return_value_injection", COVERED, _AGENT + "; deterministic: tool_poisoning scans what each tool returns or raises "
      "for a benign call (tests/test_tool_poisoning.py tool_result + error_text surfaces)"),
     Item("STRUCT-OUT", "Structured-Output Resource-Link Injection (MCP-28 ours)", ("MCP38:MCP-12", "SPEC2026:SPEC2026-requeststate"), "structured_output_resource_link", COVERED, _AGENT, notes="aligns to 2026-07-28 structured output; link-handle steering"),
