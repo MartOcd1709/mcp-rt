@@ -51,6 +51,7 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     findings: list[dict] = []     # ground-truth (decide the verdict)
     leads: list[dict] = []        # observed, not yet ground-truthed (never counted as findings)
     seen: set = set()
+    surface: dict = {}            # tool manifest (with per-tool digests): drift detection across assessments
 
     def add_finding(cls, tool, detail, sev="Medium", source="probe"):
         key = (cls, tool)
@@ -64,6 +65,7 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     try:
         from hunt.report import run_full_scan
         rep = asyncio.run(run_full_scan(cmd))
+        surface = rep.get("surface") or {}
         for f in rep.get("findings", []):
             add_finding(f.get("cls", ""), f.get("tool", ""),
                         f.get("detail") or f.get("evidence", ""), f.get("sev", "Medium"), "probe")
@@ -100,6 +102,24 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
             components["mcp_cap"] = f"skipped: {type(e).__name__}: {str(e)[:80]}"
     else:
         components["mcp_cap"] = "not requested"
+
+    # ---- 2b. MCP-00 PROOF: one sealed canary run (planted credentials, elicitation + sampling honeypots) -------
+    if do_cap:
+        _emit(progress, "phase 2b · MCP-00 canary proof: sealed run with planted credentials, egress recorded…")
+        try:
+            from hunt.mcp00_proof import from_sealed
+            from mcp_rt.runtime.runner import run_server
+            proof = from_sealed(run_server(cmd, timeout=float(os.environ.get("MCPRT_SEALED_TIMEOUT_S", "90"))))
+            for f in proof["findings"]:
+                add_finding(f["cls"], f["tool"], f["detail"], f["sev"], f["source"])
+            leads.extend(proof["leads"])
+            components["mcp00_proof"] = proof["status"]
+            _emit(progress, f"  MCP-00 proof: {proof['status']}")
+            for f in proof["findings"]:
+                _emit(progress, f"  PROVEN · {f['detail'][:160]}")
+        except Exception as e:  # noqa: BLE001 — a seal that cannot run is INCONCLUSIVE, never a silent CLEAN
+            components["mcp00_proof"] = f"inconclusive: {type(e).__name__}: {str(e)[:80]}"
+            _emit(progress, f"  MCP-00 proof could not run: {str(e)[:100]}")
 
     # ---- 3. AI autonomous agent (ReAct) + ground-truth oracle confirmation -------------------
     if do_agent and ai_configured():
@@ -154,4 +174,4 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
             + " · ".join(f"{k}:{v}" for k, v in components.items()))
     _emit(progress, note)
     return {"target": target, "verdict": verdict, "findings": findings, "leads": leads,
-            "chains": chains, "components": components, "note": note}
+            "chains": chains, "components": components, "note": note, "surface": surface}

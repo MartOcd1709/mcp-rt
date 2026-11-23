@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http.server
+import hashlib
 import json
 import os
 import re
@@ -1851,7 +1852,11 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
                 tools = (await asyncio.wait_for(s.list_tools(), _CONNECT_TIMEOUT_S)).tools
                 if surface is not None:          # inventory the attack surface in-session (no 2nd connect)
                     surface["tools"] = [{"name": t.name,
-                                         "params": sorted(_schema(t).get("properties", {}))}
+                                         "params": sorted(_schema(t).get("properties", {})),
+                                         # what the model is shown for this tool, pinned: a later change = drift
+                                         "digest": hashlib.sha256(json.dumps([t.name, t.description or "", _schema(t)],
+                                                                             sort_keys=True).encode()).hexdigest()[:16],
+                                         "text": (t.description or "")[:600]}
                                         for t in tools]
                     try:
                         surface["resources"] = [str(getattr(r, "uri", getattr(r, "name", "")))
