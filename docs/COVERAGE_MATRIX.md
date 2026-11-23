@@ -68,7 +68,7 @@
 | TOOL-SATURATION | Tool-Count Saturation | COVERED | tool_count_saturation | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-34 |
 | TOOL-SHADOW | Tool Shadowing | COVERED | tool_shadowing | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-13, CoSAI:CoSAI-5 |
 | TRUST-LAUNDER | Proxy/Aggregator Trust Laundering | COVERED | proxy_aggregator_trust_laundering | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-18, ASI:ASI07, CoSAI:CoSAI-9 |
-| UNDECLARED-CAP | Undeclared Capability / Consent Gap (MCP-00) | COVERED | mcp_cap | hunt/hunt_cap.py::_selftest (declared vs observed caps, reader not flagged) | MCP38:MCP-05, OWASP-MCP:MCP02, ASI:ASI02, CoSAI:CoSAI-20 |
+| UNDECLARED-CAP | Undeclared Capability / Consent Gap (MCP-00) | COVERED | mcp_cap | tests/test_hunt_cap_battery.py (real strace sensor, random-named servers: undeclared netwo | MCP38:MCP-05, OWASP-MCP:MCP02, ASI:ASI02, CoSAI:CoSAI-20 |
 | UNICODE-CONCEAL | Unicode / Hidden-Character Concealment | COVERED | hidden_unicode | tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none) | MCP38:MCP-11 |
 | XXE | XML External Entity (XXE) + OOB/SSRF | COVERED | xxe | tests/test_tool_xxe.py (T11.2 — file-read + OOB/SSRF fire; safe ext-GES off; CWE-611) | MCP38:MCP-09, OWASP-MCP:MCP05, CoSAI:CoSAI-26 |
 | DNS-REBIND | DNS Rebinding | PARTIAL | dns_rebinding | class exists but no vuln+safe fixture located -> not COVERED until a fixture proves it zer | MCP38:MCP-31, OWASP-MCP:MCP07, CoSAI:CoSAI-26 |

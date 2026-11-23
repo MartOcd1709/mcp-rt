@@ -148,7 +148,7 @@ _AGENT = "tests/test_hunt_agent.py (MockVulnerable fires >=1 / MockSecure none)"
 _POISON = ("tests/test_tool_poisoning.py (37 class-derived variants caught, 40 hard negatives silent; real-world precision: "
            "975 surfaces of 9 real MCP servers / 187 tools, 0 hits; 11 surfaces end-to-end on random-named stdio servers) + "
            "tests/test_tool_poisoning_heldout.py (published variants: first held-out run 5/11, class-level fixes since)")
-_CAP = "hunt/hunt_cap.py::_selftest (declared vs observed caps, reader not flagged)"
+_CAP = ("tests/test_hunt_cap_battery.py (real strace sensor, random-named servers: undeclared network/write/exec caught incl. same-interpreter child spawn; declared fetch/write/run, named CLI binary, reader, volatile mkdtemp startup all silent: 18/18 exact) + hunt/hunt_cap.py::_selftest")
 
 # ---- the canonical taxonomy --------------------------------------------------------------
 # One record per canonical attack item. external_refs lists every standard id it satisfies, so a
