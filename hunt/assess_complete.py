@@ -52,6 +52,7 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     leads: list[dict] = []        # observed, not yet ground-truthed (never counted as findings)
     seen: set = set()
     surface: dict = {}            # tool manifest (with per-tool digests): drift detection across assessments
+    phase1: dict = {}             # the direct-probe report: OWASP scorecard, tool-by-tool coverage, supply chain
 
     def add_finding(cls, tool, detail, sev="Medium", source="probe"):
         key = (cls, tool)
@@ -66,6 +67,7 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
         from hunt.report import run_full_scan
         rep = asyncio.run(run_full_scan(cmd))
         surface = rep.get("surface") or {}
+        phase1 = rep
         for f in rep.get("findings", []):
             add_finding(f.get("cls", ""), f.get("tool", ""),
                         f.get("detail") or f.get("evidence", ""), f.get("sev", "Medium"), "probe")
@@ -174,4 +176,36 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
             + " · ".join(f"{k}:{v}" for k, v in components.items()))
     _emit(progress, note)
     return {"target": target, "verdict": verdict, "findings": findings, "leads": leads,
-            "chains": chains, "components": components, "note": note, "surface": surface}
+            "chains": chains, "components": components, "note": note, "surface": surface,
+            "compliance": merge_compliance(phase1.get("compliance") or [], findings, leads,
+                                           components.get("mcp00_proof", "")),
+            "coverage": phase1.get("coverage") or [], "mcp06": phase1.get("mcp06") or {},
+            "supply_posture": phase1.get("supply_posture")}
+
+
+def merge_compliance(compliance: list[dict], findings: list[dict], leads: list[dict], canary_status: str = "") -> list[dict]:
+    """The OWASP MCP Top 10 scorecard for the WHOLE engagement. Phase 1 scores it from the direct probes; the later
+    phases add evidence: a proven finding (any phase) fails its controls, a lead marks them SUSPECTED (never over a
+    FAIL), and a sealed run whose seal was proven tested MCP02 (no planted secret left during real tool calls).
+    Everything else stays NOT TESTED; nothing is assumed to pass. Phase 1 missing -> all ten start NOT TESTED."""
+    from hunt.report import CLASS_META, OWASP_MCP_TOP10
+
+    if not compliance:
+        compliance = [{"id": k, "title": v, "status": "NOT TESTED"} for k, v in OWASP_MCP_TOP10.items()]
+    status = {c["id"]: c["status"] for c in compliance}
+
+    def controls(cls: str) -> list[str]:
+        return [c for c in CLASS_META.get(cls, {}).get("owasp", []) if c in status]
+
+    for f in findings:
+        for c in controls(f.get("cls", "")):
+            status[c] = "FAIL"
+    for lead in leads:
+        for c in controls(lead.get("kind", "")):
+            if status[c] != "FAIL":
+                status[c] = "SUSPECTED"
+    if "seal proven" in canary_status:
+        for c in controls("mcp_cap"):
+            if status[c] == "NOT TESTED":
+                status[c] = "PASS"
+    return [{**c, "status": status[c["id"]]} for c in compliance]
