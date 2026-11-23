@@ -1057,36 +1057,81 @@ def _scan_conceal(text: str) -> list[tuple[str, str]]:
     return hits
 
 
-async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
-    """Flag servers that conceal payloads in model-facing metadata (invisible to approval).
+_POISON_MAX_CALLS = int(os.environ.get("MCPRT_POISON_MAX_CALLS", "64"))   # runtime surfaces: one benign call per tool
 
-    Deterministic, agent-free: inspects each tool's name/description/schema (and resources /
-    prompts) for concealment Unicode. A hit means the server hides content the human never
-    sees but the model ingests verbatim — the approval-view fidelity gap.
-    """
-    out = []
-    surfaces = [(t.name, t.name, json.dumps(_schema(t), ensure_ascii=False)
-                 + " " + (t.description or "")) for t in tools]
-    try:    # resources & prompts carry model-facing text too; many servers lack them
+
+async def probe_tool_poisoning(session, tools) -> list[ProbeResult]:
+    """Tool poisoning (MCP03; detector: hunt/poisoning.py). Model-directed directives hidden or planted in ANY
+    model-facing text: tool description / title / annotations / every schema string, the server's guide text,
+    resource and prompt text, and what tools RETURN or RAISE for a benign call (return-value / ATPA poisoning).
+    Hidden layers (TAG block, zero-width, base64/hex, HTML comments, off-screen padding, homoglyphs) are decoded.
+    Static: every hit is a SUSPECTED lead carrying its confidence, never VULNERABLE; an agent run against a planted
+    canary is what would confirm that a model obeys it."""
+    from hunt import poisoning
+
+    owners: list[tuple[str, str, list[tuple[str, str]]]] = []      # (owner, purpose, [(surface, text)])
+    own = {t.name: tuple(poisoning.parameter_names(t)) for t in tools}
+    owners += poisoning.server_surfaces(session)
+    for t in tools:
+        owners.append((t.name, t.name, poisoning.tool_surfaces(t)))
+    for t in tools[:_POISON_MAX_CALLS]:                             # runtime: what a benign call returns / raises
+        text, err = await _benign_call(session, t)
+        runtime = [(k, v) for k, v in (("result", text), ("error", err)) if v]
+        if runtime:
+            owners.append((t.name, t.name, runtime))
+    try:
         for r in (await session.list_resources()).resources:
-            surfaces.append(("resource:" + (r.name or str(r.uri)), str(r.uri),
-                             (r.name or "") + " " + (r.description or "")))
-    except Exception:  # noqa: BLE001
+            surf = [("name", r.name or ""), ("description", r.description or "")]
+            try:
+                res = await _read_resource(session, r.uri)
+                surf.append(("body", "\n".join(c.text for c in (getattr(res, "contents", None) or [])
+                                               if getattr(c, "text", None))))
+            except Exception:  # noqa: BLE001 - an unreadable body still has a name and description
+                pass
+            owners.append(("resource:" + str(r.uri), "", surf))
+    except Exception:  # noqa: BLE001 - many servers expose no resources endpoint
         pass
     try:
-        for p in (await session.list_prompts()).prompts:
-            surfaces.append(("prompt:" + p.name, p.name,
-                             (p.description or "") + " "
-                             + " ".join((a.description or "") for a in (p.arguments or []))))
-    except Exception:  # noqa: BLE001
+        for pr in (await session.list_prompts()).prompts:
+            args = list(pr.arguments or [])
+            surf = [("name", pr.name or ""), ("description", pr.description or "")]
+            surf += [(f"argument.{a.name}", a.description or "") for a in args]
+            try:
+                got = await asyncio.wait_for(session.get_prompt(pr.name, {a.name: "example" for a in args}), _CALL_TIMEOUT_S)
+                surf.append(("messages", "\n".join(m.content.text for m in (got.messages or [])
+                                                   if getattr(m.content, "text", None))))
+            except Exception:  # noqa: BLE001
+                pass
+            owners.append(("prompt:" + pr.name, "", surf))
+    except Exception:  # noqa: BLE001 - many servers expose no prompts endpoint
         pass
-    for label, name, text in surfaces:
-        hits = _scan_conceal(name) + _scan_conceal(text)
-        if hits:
-            out.append(ProbeResult("tool_poisoning", label, "static",
-                                   evidence="; ".join(f"{c}: {e}" for c, e in hits),
-                                   rationale="concealed payload in model-facing metadata "
-                                             "(invisible in the approval view)"))
+    out, seen, scanned = [], set(), 0
+    for owner, purpose, surfaces in owners:
+        for path, text in surfaces:
+            if not text:
+                continue
+            scanned += 1
+            for h in poisoning.scan(text, purpose=purpose, own_params=own.get(owner, ())):
+                key = (owner, path, h.kind, h.span)
+                if key in seen:
+                    continue
+                seen.add(key)
+                layer = f" [{h.layer}]" if h.layer != "visible" else ""
+                out.append(ProbeResult("tool_poisoning", owner, "static", marker=f"{h.kind}:{h.confidence}",
+                                       evidence=f'{owner} / {path}{layer}: "{h.span}"',
+                                       rationale=f"{poisoning.WHY[h.kind]} (confidence {h.confidence.upper()}; static, so a "
+                                                 "lead until an agent run against a planted canary confirms compliance)"))
+    for t in tools:                                                # full-schema poisoning: parameter NAMES
+        for pname in poisoning.parameter_names(t):
+            scanned += 1
+            for h in poisoning.scan_name(pname):
+                out.append(ProbeResult("tool_poisoning", t.name, "static", marker=f"{h.kind}:{h.confidence}",
+                                       evidence=f'{t.name} / schema.properties.{pname} (name): "{h.span}"',
+                                       rationale=f"{poisoning.WHY[h.kind]} (confidence {h.confidence.upper()}; static lead)"))
+    if not out:
+        out.append(ProbeResult("tool_poisoning", "(server)", "oracle_negative",
+                               rationale=f"no model-directed directive in {scanned} model-facing surface(s), "
+                                         "incl. hidden layers and what tools return"))
     return out
 
 
@@ -1462,6 +1507,21 @@ def _res_text(result) -> str:
 
 
 _RES_CACHE: dict | None = None      # per-scan memo, set by scan_target: body-reading probes share one read per URI
+_CALL_CACHE: dict | None = None     # per-scan memo: one benign call per tool, shared by the probes that read results
+
+
+async def _benign_call(session, tool) -> tuple[str, str]:
+    """(result text, error text) of ONE benign call per tool per scan (context_oversharing + tool_poisoning share it)."""
+    key = (id(session), tool.name)
+    if _CALL_CACHE is not None and key in _CALL_CACHE:
+        return _CALL_CACHE[key]
+    try:
+        got = (_result_text(await session.call_tool(tool.name, _build_args(tool, {}))), "")
+    except Exception as exc:  # noqa: BLE001 - the failure text is a model-facing surface too
+        got = ("", str(exc))
+    if _CALL_CACHE is not None:
+        _CALL_CACHE[key] = got
+    return got
 
 
 async def _read_resource(session, uri):
@@ -1491,13 +1551,12 @@ async def probe_context_oversharing(session, tools) -> list[ProbeResult]:
         return [ProbeResult("context_oversharing", "(server)", "not_applicable", rationale="no context canary planted")]
     out: list[ProbeResult] = []
     returned, raised = [], []
-    for t in tools:                                   # exercise each tool with benign args
-        try:
-            text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
-            returned.append(text)
-        except Exception as exc:  # noqa: BLE001
-            raised.append(str(exc))
+    for t in tools:                                   # exercise each tool with benign args (one shared call)
+        text, err = await _benign_call(session, t)
+        if err:
+            raised.append(err)
             continue
+        returned.append(text)
         if canary in text:
             out.append(ProbeResult("context_oversharing", t.name, "oracle", marker=canary,
                        rationale="tool returned the server's environment context (a planted secret) to "
@@ -1772,9 +1831,10 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     # Plant a unique secret in the server's environment. If any tool/resource surfaces it to the model,
     # the server overshares its context (MCP10) — ground truth, since a random UUID can't be coincidence.
     # ponytail: module global = one-scan-at-a-time; add a context arg if we ever scan concurrently.
-    global _CTX_CANARY, _RES_CACHE
+    global _CTX_CANARY, _RES_CACHE, _CALL_CACHE
     _CTX_CANARY = "mcprt-ctx-" + uuid.uuid4().hex
     _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
+    _CALL_CACHE = {}         # one benign tools/call per tool per scan, shared by the result-reading probes
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=child_env, cwd=workdir)
@@ -1783,7 +1843,10 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as s:
                 # Bound connect/handshake so an unresponsive server fails fast instead of hanging.
-                await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
+                init = await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
+                from hunt import poisoning as _poisoning
+
+                _poisoning.remember_init(s, init)              # the server's guide text: read by tool_poisoning
                 _guard_call_tool(s, _CALL_TIMEOUT_S)
                 tools = (await asyncio.wait_for(s.list_tools(), _CONNECT_TIMEOUT_S)).tools
                 if surface is not None:          # inventory the attack surface in-session (no 2nd connect)
@@ -1817,6 +1880,7 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
         raise ScanError(_unwrap(exc) or f"{type(exc).__name__}: {exc}"[:200]) from exc
     finally:
         _RES_CACHE = None
+        _CALL_CACHE = None
         shutil.rmtree(workdir, ignore_errors=True)
     return results
 

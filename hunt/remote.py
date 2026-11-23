@@ -28,6 +28,7 @@ from pathlib import Path
 
 from mcp import ClientSession
 
+from hunt import poisoning
 from hunt.probes import VULNERABLE, probe_rug_pull, probe_sql_injection, probe_ssti, probe_tool_poisoning
 
 # Probes safe/meaningful over a remote channel (verdict from response or advertised metadata).
@@ -50,7 +51,7 @@ async def _connect_and_run(url: str, headers: dict):
             async with cm as streams:
                 read, write = streams[0], streams[1]
                 async with ClientSession(read, write) as s:
-                    await s.initialize()
+                    poisoning.remember_init(s, await s.initialize())
                     tools = (await s.list_tools()).tools
                     results = []
                     for probe in _REMOTE_PROBES:
@@ -124,7 +125,7 @@ async def check_unauthenticated(url: str, headers: dict | None = None) -> bool:
                 cm = sse_client(url, headers=noauth)
             async with cm as streams:
                 async with ClientSession(streams[0], streams[1]) as s:
-                    await s.initialize()
+                    poisoning.remember_init(s, await s.initialize())
                     await s.list_tools()
                     return True
         except Exception:  # noqa: BLE001

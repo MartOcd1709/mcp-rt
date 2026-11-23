@@ -67,7 +67,11 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
         for f in rep.get("findings", []):
             add_finding(f.get("cls", ""), f.get("tool", ""),
                         f.get("detail") or f.get("evidence", ""), f.get("sev", "Medium"), "probe")
-        components["direct_probe"] = f"ran ({len(rep.get('findings', []))} finding(s))"
+        for sl in rep.get("suspected", []):   # static leads (tool poisoning, lure text, ...): never dropped
+            leads.append({"kind": sl.get("cls", ""), "tool": sl.get("tool", ""),
+                          "observation": " — ".join(x for x in (sl.get("evidence"), sl.get("detail")) if x)})
+        components["direct_probe"] = (f"ran ({len(rep.get('findings', []))} finding(s), "
+                                      f"{len(rep.get('suspected', []))} static lead(s))")
         mcp06 = rep.get("mcp06", {}) or {}
         if mcp06.get("exposed"):
             _emit(progress, "  MCP06 intent-flow surface exposed: "
