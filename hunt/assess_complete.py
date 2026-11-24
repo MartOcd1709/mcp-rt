@@ -41,7 +41,8 @@ def _emit(progress, msg: str) -> None:
             pass
 
 
-def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: bool = True) -> dict:
+def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: bool = True,
+                 env_keys: tuple = ()) -> dict:
     """Run the full-depth assessment and return a unified result. Pure orchestration over existing,
     independently-tested layers — adds no detection logic and keeps the oracle as the only verdict."""
     import asyncio
@@ -53,6 +54,8 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     seen: set = set()
     surface: dict = {}            # tool manifest (with per-tool digests): drift detection across assessments
     phase1: dict = {}             # the direct-probe report: OWASP scorecard, tool-by-tool coverage, supply chain
+    canary: dict | None = None    # the sealed canary run as evidence: planted, actions, egress, file access, verdict
+    canary_cov: list[dict] = []   # what the canary run tested, per (tool, class)
 
     def add_finding(cls, tool, detail, sev="Medium", source="probe"):
         key = (cls, tool)
@@ -107,11 +110,15 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
 
     # ---- 2b. MCP-00 PROOF: one sealed canary run (planted credentials, elicitation + sampling honeypots) -------
     if do_cap:
-        _emit(progress, "phase 2b · MCP-00 canary proof: sealed run with planted credentials, egress recorded…")
+        _emit(progress, "phase 2b · MCP-00 canary proof: deep sealed run (planted credentials in HOME, project and "
+                        "environment; every tool, variant, resource and prompt; mid-session re-list; watch window)…")
         try:
-            from hunt.mcp00_proof import from_sealed
+            from hunt.mcp00_proof import coverage_of, from_sealed
             from mcp_rt.runtime.runner import run_server
-            proof = from_sealed(run_server(cmd, timeout=float(os.environ.get("MCPRT_SEALED_TIMEOUT_S", "90"))))
+            rec = run_server(cmd, timeout=float(os.environ.get("MCPRT_SEALED_TIMEOUT_S", "90")), declared_env=env_keys)
+            proof = from_sealed(rec)
+            canary_cov = coverage_of(rec, proof)
+            canary = canary_record(rec, proof["status"])
             for f in proof["findings"]:
                 add_finding(f["cls"], f["tool"], f["detail"], f["sev"], f["source"])
             leads.extend(proof["leads"])
@@ -179,8 +186,27 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
             "chains": chains, "components": components, "note": note, "surface": surface,
             "compliance": merge_compliance(phase1.get("compliance") or [], findings, leads,
                                            components.get("mcp00_proof", "")),
-            "coverage": phase1.get("coverage") or [], "mcp06": phase1.get("mcp06") or {},
+            "coverage": (phase1.get("coverage") or []) + canary_cov, "mcp06": phase1.get("mcp06") or {},
+            "canary": canary,
             "supply_posture": phase1.get("supply_posture")}
+
+
+def canary_record(rec: dict, status: str, max_events: int = 100) -> dict:
+    """The sealed canary run as a durable evidence record (what was planted, every action, every egress attempt with
+    its sha256 and captured bytes, every planted-secret open, every tamper write), bounded in size."""
+    keep_a = ("i", "kind", "name", "round", "args", "t0", "t1", "ok", "note")
+    return {
+        "token": rec.get("token"), "sealed": rec.get("sealed"), "server_started": rec.get("server_started"),
+        "status": status, "method": rec.get("method"), "evidence": rec.get("evidence"), "proof": rec.get("proof"),
+        "duration_s": rec.get("duration_s"), "watch_s": rec.get("watch_s"), "not_reached": rec.get("not_reached"),
+        "planted": [{k: x.get(k) for k in ("label", "kind", "where", "description")} for x in rec.get("planted") or []],
+        "actions": [{k: a.get(k) for k in keep_a} for a in rec.get("actions") or []],
+        "egress": (rec.get("egress") or [])[:max_events], "egress_total": len(rec.get("egress") or []),
+        "file_access": rec.get("file_access") or [], "tamper": rec.get("tamper") or [],
+        "redefinitions": rec.get("redefinitions") or [], "list_changed": rec.get("list_changed"),
+        "samplings": rec.get("samplings") or [], "elicitations": rec.get("elicitation_log") or [],
+        "limits": rec.get("limits") or [],
+    }
 
 
 def merge_compliance(compliance: list[dict], findings: list[dict], leads: list[dict], canary_status: str = "") -> list[dict]:

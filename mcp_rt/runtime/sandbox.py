@@ -46,9 +46,13 @@ PROBE_CHILD = (
     "u.close()\n"
 )
 _SA4 = re.compile(r'sin_port=htons\((\d+)\), sin_addr=inet_addr\("([0-9.]+)"\)')
-# strace -f prefixes each line with a pid. Only attempt syscalls carry a destination. getsockname and accept carry
-# a local or peer name, and counting those would invent attempts.
-_ATTEMPT = re.compile(r"^(?:\d+\s+)?(?:connect|sendto|sendmsg)\(")
+# strace -f prefixes each line with a pid, and the server trace also carries an epoch timestamp (-ttt). Only attempt
+# syscalls carry a destination. getsockname and accept carry a local or peer name, and counting those would invent
+# attempts.
+_ATTEMPT = re.compile(r"^(?:\d+\s+)?(?:\d+\.\d+\s+)?(?:connect|sendto|sendmsg)\(")
+# The server is traced for the network AND for file opens/renames (timestamped), so the canary run can say which
+# planted secret was opened, which file was written, and during which action.
+SERVER_TRACE = "network,openat,open,creat,rename,renameat,renameat2"
 
 
 def strace_destinations(text):
@@ -122,6 +126,7 @@ class Recorder:
             threading.Thread(target=self._tcp_conn, args=(conn,), daemon=True).start()
 
     def _tcp_conn(self, conn):
+        ts = time.time()                # when the attempt was made (the record is written after the read)
         try:
             raw = conn.getsockopt(socket.SOL_IP, SO_ORIGINAL_DST, 16)
             dport = struct.unpack("!H", raw[2:4])[0]
@@ -155,7 +160,7 @@ class Recorder:
             pass
         finally:
             conn.close()
-        self._record({"proto": "tcp", "dst": dip, "port": dport, "truncated": truncated,
+        self._record({"proto": "tcp", "dst": dip, "port": dport, "truncated": truncated, "ts": ts,
                       "payload": base64.b64encode(bytes(buf[:CAP])).decode()})
 
     def _udp_loop(self):
@@ -171,7 +176,7 @@ class Recorder:
                 if level == socket.SOL_IP and kind == IP_RECVORIGDSTADDR and len(cdata) >= 8:
                     dport = struct.unpack("!H", cdata[2:4])[0]
                     dip = socket.inet_ntoa(cdata[4:8])
-            self._record({"proto": "udp", "dst": dip, "port": dport, "truncated": len(data) > CAP,
+            self._record({"proto": "udp", "dst": dip, "port": dport, "truncated": len(data) > CAP, "ts": time.time(),
                           "payload": base64.b64encode(data[:CAP]).decode()})
 
 
@@ -279,7 +284,8 @@ def main(argv=None):
         server = json.load(f)
     rec.phase = "server"
     try:
-        proc = subprocess.Popen(["strace", "-f", "-e", "trace=network", "-o", args.strace_server, "--", *server],
+        proc = subprocess.Popen(["strace", "-f", "-ttt", "-e", f"trace={SERVER_TRACE}", "-o", args.strace_server,
+                                 "--", *server],
                                 cwd=args.workdir, start_new_session=True)
         report["server_started"] = True
         save()
