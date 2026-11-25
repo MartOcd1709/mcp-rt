@@ -43,6 +43,7 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from hunt import synth  # valid-input synthesis: carrier params get valid-shaped values so the payload reaches the sink
 from hunt.lure_text import RULE_WHY, non_string_type, scan_argument_name, scan_argument_text, scan_text
 
 VULNERABLE, SUSPECTED, CLEAN, INCONCLUSIVE, NOT_APPLICABLE = (
@@ -261,7 +262,8 @@ def _candidate_params(tool, param_re, desc_re, fallback) -> list[str]:
 
 
 def _build_args(tool, overrides: dict) -> dict:
-    """Satisfy required params with type-correct dummies, then apply overrides."""
+    """Required params get VALID-shaped values (so a real tool runs and the override payload reaches its sink); the
+    overridden param carries the payload. Falls back to type dummies when no synthesis context is set (unit tests)."""
     props = _schema(tool).get("properties", {}) or {}
     required = set(_schema(tool).get("required", list(props))) | set(overrides)
     args: dict = {}
@@ -269,8 +271,12 @@ def _build_args(tool, overrides: dict) -> dict:
         if n in overrides:
             args[n] = overrides[n]
             continue
-        t = (props.get(n, {}) or {}).get("type", "string")
-        args[n] = {"integer": 1, "number": 1, "boolean": False, "array": [], "object": {}}.get(t, "x")
+        s = props.get(n, {}) or {}
+        if _SYNTH_CTX is not None:
+            args[n] = synth.value(n, s, _SYNTH_CTX)
+        else:
+            t = s.get("type", "string")
+            args[n] = {"integer": 1, "number": 1, "boolean": False, "array": [], "object": {}}.get(t, "x")
     return args
 
 
@@ -1495,6 +1501,7 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
 
 
 _CTX_CANARY = ""   # set by scan_target: the planted env secret probe_context_oversharing hunts for
+_SYNTH_CTX: "synth.Context | None" = None   # set by scan_target: paths harvested from argv, for valid carrier args
 
 
 def _res_text(result) -> str:
@@ -1516,10 +1523,23 @@ async def _benign_call(session, tool) -> tuple[str, str]:
     key = (id(session), tool.name)
     if _CALL_CACHE is not None and key in _CALL_CACHE:
         return _CALL_CACHE[key]
+    args = _build_args(tool, {})
     try:
-        got = (_result_text(await session.call_tool(tool.name, _build_args(tool, {}))), "")
+        got = (_result_text(await session.call_tool(tool.name, args)), "")
     except Exception as exc:  # noqa: BLE001 - the failure text is a model-facing surface too
         got = ("", str(exc))
+    # if the benign call was rejected by validation, the error names the valid shape: repair once and retry
+    if _SYNTH_CTX is not None and not got[0] and got[1]:
+        fixed = synth.repair(args, _schema(tool), _SYNTH_CTX, got[1])
+        if fixed and fixed != args:
+            try:
+                got = (_result_text(await session.call_tool(tool.name, fixed)), "")
+            except Exception as exc:  # noqa: BLE001
+                got = ("", str(exc))
+    if _SYNTH_CTX is not None and got[0]:  # a real result yields real identifiers (tables, branches) for later probes
+        for s in synth.harvest_strings(got[0], 20):
+            if s not in _SYNTH_CTX.strings and len(_SYNTH_CTX.strings) < 80:
+                _SYNTH_CTX.strings.append(s)
     if _CALL_CACHE is not None:
         _CALL_CACHE[key] = got
     return got
@@ -1832,10 +1852,12 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     # Plant a unique secret in the server's environment. If any tool/resource surfaces it to the model,
     # the server overshares its context (MCP10) — ground truth, since a random UUID can't be coincidence.
     # ponytail: module global = one-scan-at-a-time; add a context arg if we ever scan concurrently.
-    global _CTX_CANARY, _RES_CACHE, _CALL_CACHE
+    global _CTX_CANARY, _RES_CACHE, _CALL_CACHE, _SYNTH_CTX
     _CTX_CANARY = "mcprt-ctx-" + uuid.uuid4().hex
     _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
     _CALL_CACHE = {}         # one benign tools/call per tool per scan, shared by the result-reading probes
+    # valid-shaped carrier args from the server's own launch paths (a --repository / --db-path is a real target)
+    _SYNTH_CTX = synth.Context(base_dir=workdir, paths=synth.harvest_argv(argv))
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=child_env, cwd=workdir)
