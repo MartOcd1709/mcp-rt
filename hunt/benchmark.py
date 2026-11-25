@@ -33,7 +33,7 @@ def grade_report(rep: dict) -> dict:
     """Turn a scan report into a benchmark result: score, grade, OWASP scorecard, coverage."""
     deduction = sum(_SEV_WEIGHT.get(f["sev"], 10) for f in rep["findings"])
     score = max(0, 100 - deduction)
-    tested = [c for c in rep["compliance"] if c["status"] != "NOT TESTED"]
+    tested = [c for c in rep["compliance"] if c["status"] not in ("NOT TESTED", "PARTIAL")]   # partial is not a pass or a fail
     passed = [c for c in tested if c["status"] == "PASS"]
     return {
         "benchmark": "MCP Security Benchmark",
@@ -70,7 +70,7 @@ def render_scorecard(b: dict) -> str:
                                  or "none"), "",
          "## OWASP MCP Top 10 scorecard", "", "| Control | Result |", "|---|---|"]
     for c in b["scorecard"]:
-        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED",
+        mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED", "PARTIAL": "◐ partial",
                 "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
         L.append(f"| {c['id']} {c['title']} | {mark} |")
     L += ["", f"> `{b['badge']}`", "",
