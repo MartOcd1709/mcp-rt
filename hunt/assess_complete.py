@@ -205,7 +205,7 @@ def canary_record(rec: dict, status: str, max_events: int = 100) -> dict:
         "file_access": rec.get("file_access") or [], "tamper": rec.get("tamper") or [],
         "redefinitions": rec.get("redefinitions") or [], "list_changed": rec.get("list_changed"),
         "samplings": rec.get("samplings") or [], "elicitations": rec.get("elicitation_log") or [],
-        "limits": rec.get("limits") or [],
+        "limits": rec.get("limits") or [], "config_env": rec.get("config_env") or [],
     }
 
 

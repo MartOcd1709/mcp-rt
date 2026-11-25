@@ -343,6 +343,19 @@ HONEYFILE_DESC = {
 ENV_CANARIES = {"OPENAI_API_KEY": "EOPENAI", "ANTHROPIC_API_KEY": "EANTHROPIC", "GITHUB_TOKEN": "EGITHUB",
                 "AWS_SECRET_ACCESS_KEY": "EAWS", "DATABASE_URL": "EDB", "SLACK_BOT_TOKEN": "ESLACK"}
 DOC_NAME = "project-notes.md"     # handed to path-like parameters: argument-supplied, never a planted secret
+# An environment variable NAME that holds a credential (decided on the name, generically). Only these are replaced by a
+# canary; a configuration variable (allowed commands, a mode, a path) keeps the operator's real value, or the server
+# would be assessed in a state it never runs in.
+_SECRET_NAME = re.compile(r"(?i)key|token|secret|passw|pwd|credential|auth|cookie|session|private|dsn|"
+                          r"connection_string|database_url")
+
+
+def operator_env(environ=None) -> dict:
+    """The operator's explicit passthrough (MCPRT_TARGET_ENV="NAME,NAME" + those variables): the server's real
+    configuration. Names only reach reports; values never do."""
+    environ = os.environ if environ is None else environ
+    names = [n.strip() for n in (environ.get("MCPRT_TARGET_ENV") or "").split(",") if n.strip()]
+    return {n: environ[n] for n in names if n in environ}
 
 
 def plant_honeyfiles(home, token):
@@ -353,10 +366,17 @@ def plant_honeyfiles(home, token):
         os.chmod(f, 0o600)
 
 
-def plant_canaries(home, token, declared_env=()):
+def plant_canaries(home, token, declared_env=(), passthrough=None):
     """Plant every canary for one sealed run. Returns (planted, env): planted = [{label, kind, where, description}]
-    with kind file | env | own_env | doc. own_env = a variable the server's OWN configuration declares (its leak is a
-    lead: it may be the server's own API), env = ambient developer-shell secrets (their leak is proof)."""
+    with kind file | env | own_env | doc. own_env = a credential variable of the server's OWN configuration (its leak is
+    a lead: it may be the server's own API), env = ambient developer-shell secrets (their leak is proof).
+
+    The server's own variables come from its client configuration (`declared_env`, names) and from the operator's
+    passthrough (`passthrough`, name -> value):
+      credential-looking name (declared or passed)   -> a canary replaces it (the seal has no network: the real secret
+                                                        is useless there, and a canary makes its leak visible)
+      configuration name with an operator value      -> the real value is passed (the server runs as configured)
+      configuration name with no value               -> left unset (we do not invent configuration)"""
     plant_honeyfiles(home, token)
     planted = [{"label": lab, "kind": "file", "where": rel, "path": str(Path(home) / rel),
                 "description": HONEYFILE_DESC.get(lab, rel)} for rel, lab in HONEYFILE_LABELS.items()]
@@ -364,12 +384,17 @@ def plant_canaries(home, token, declared_env=()):
     doc.write_text(f"Q3 roadmap notes (internal). ref {token}-DOC\n")
     planted.append({"label": "DOC", "kind": "doc", "where": DOC_NAME, "path": str(doc),
                     "description": "the document handed to a path parameter"})
-    env, declared = {}, [k for k in dict.fromkeys(declared_env) if k]
-    for i, key in enumerate(declared[:20]):
+    passthrough = dict(passthrough or {})
+    env = {}
+    own = [k for k in dict.fromkeys([*declared_env, *passthrough]) if k and _SECRET_NAME.search(k)]
+    for i, key in enumerate(own[:20]):
         lab = f"OWN{i:02d}"
         env[key] = f"{token}-{lab}"
         planted.append({"label": lab, "kind": "own_env", "where": key,
                         "description": f"the server's own configured credential {key}"})
+    for key, value in passthrough.items():
+        if key not in env:
+            env[key] = value                       # configuration, as the operator supplied it
     for key, lab in ENV_CANARIES.items():
         if key in env:
             continue
@@ -496,7 +521,8 @@ def analyse(drive, events, strace_text, token, planted, workdir):
     return egress, access, tamper
 
 
-def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=None, declared_env=()):
+def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=None, declared_env=(),
+                          passthrough=None):
     """The sealed-launch recipe shared by the one-shot scan and the agent tier's long-lived session.
     Returns (StdioServerParameters, paths): a stdio command that is `unshare -rn sandbox.py … --server-json
     <target argv>`, which proves the seal and only then execs the target with stdio inherited. The host opens
@@ -511,8 +537,10 @@ def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=
     paths = {k: os.path.join(workdir, v) for k, v in names.items()}
     Path(paths["server_json"]).write_text(json.dumps(list(target_argv)))
     # HOME is the workdir (and the server's cwd): the planted secrets are what a thief would find
-    planted, canary_env = plant_canaries(workdir, token, declared_env)
+    passthrough = operator_env() if passthrough is None else passthrough
+    planted, canary_env = plant_canaries(workdir, token, declared_env, passthrough)
     paths["planted"], paths["doc"] = planted, str(Path(workdir) / DOC_NAME)
+    paths["config_env"] = sorted(k for k in passthrough if not _SECRET_NAME.search(k))   # names only
     port = random.SystemRandom().randint(20000, 60000)
     host_ino = os.stat("/proc/self/ns/net").st_ino
     launcher = ["unshare", "-rn", "--", sys.executable, "-I", str(LAUNCHER),
@@ -531,12 +559,12 @@ def build_sealed_launcher(target_argv, workdir, token, extra_env=None, redirect=
     return StdioServerParameters(command=launcher[0], args=launcher[1:], env=env, cwd=workdir), paths
 
 
-def run_server(argv, *, token=None, timeout=120.0, hints=None, declared_env=(), deep=True):
+def run_server(argv, *, token=None, timeout=120.0, hints=None, declared_env=(), deep=True, passthrough=None):
     """Run one server under the sealed launcher and return its verdict record (deep canary run by default)."""
     token = token or "HT-" + secrets.token_hex(8)
     workdir = tempfile.mkdtemp(prefix="mcprt-rt-")
     started = time.time()
-    params, paths = build_sealed_launcher(argv, workdir, token, declared_env=declared_env)
+    params, paths = build_sealed_launcher(argv, workdir, token, declared_env=declared_env, passthrough=passthrough)
     drive = asyncio.run(_drive(params, token, timeout, hints, deep=deep, events_path=paths["events"],
                                doc_path=paths["doc"]))
 
@@ -572,6 +600,7 @@ def run_server(argv, *, token=None, timeout=120.0, hints=None, declared_env=(), 
             "egress": egress, "file_access": access, "tamper": tamper, "redefinitions": drive["redefinitions"],
             "list_changed": drive["list_changed"], "elicitation_log": drive["elicitation_log"],
             "watch_s": drive["watch_s"], "not_reached": drive["not_reached"], "deep": deep,
+            "config_env": paths["config_env"],
             "duration_s": round(time.time() - started, 2), "limits": LIMITS, "workdir": workdir}
 
 
