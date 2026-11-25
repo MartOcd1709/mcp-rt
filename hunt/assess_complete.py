@@ -218,7 +218,7 @@ def merge_compliance(compliance: list[dict], findings: list[dict], leads: list[d
     phases add evidence: a proven finding (any phase) fails its controls, a lead marks them SUSPECTED (never over a
     FAIL), and a sealed run whose seal was proven tested MCP02 (no planted secret left during real tool calls).
     Everything else stays NOT TESTED; nothing is assumed to pass. Phase 1 missing -> all ten start NOT TESTED."""
-    from hunt.report import CLASS_META, OWASP_MCP_TOP10
+    from hunt.report import CLASS_META, OWASP_MCP_TOP10, lead_controls
 
     if not compliance:
         compliance = [{"id": k, "title": v, "status": "NOT TESTED"} for k, v in OWASP_MCP_TOP10.items()]
@@ -231,11 +231,13 @@ def merge_compliance(compliance: list[dict], findings: list[dict], leads: list[d
         for c in controls(f.get("cls", "")):
             status[c] = "FAIL"
     for lead in leads:
-        for c in controls(lead.get("kind", "")):
-            if status[c] != "FAIL":
+        for c in lead_controls(lead.get("kind", "")):      # a partial class's lead marks only its primary control
+            if c in status and status[c] != "FAIL":
                 status[c] = "SUSPECTED"
     if "seal proven" in canary_status:
         for c in controls("mcp_cap"):
             if status[c] == "NOT TESTED":
                 status[c] = "PASS"
-    return [{**c, "status": status[c["id"]]} for c in compliance]
+    # a PARTIAL control's reason belongs to that status only: drop it when later evidence changed the status
+    return [{**{k: v for k, v in c.items() if k != "basis" or status[c["id"]] == c["status"]},
+             "status": status[c["id"]]} for c in compliance]

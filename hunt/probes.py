@@ -60,6 +60,9 @@ _METHOD_VERDICT = {
     "signature":       SUSPECTED,       # response-pattern inference only (e.g. a SQL parser error)
     "static":          SUSPECTED,       # structural scan (e.g. concealed metadata) — intent inferred
     "observed_change": SUSPECTED,       # in-session tool-def mutation — can't prove it's malicious
+    "cross_surface_echo": SUSPECTED,    # a planted value was read back through another channel, but the value was
+                                        # not secret-typed or the channel may be the tool's own store (telemetry_leak)
+    "partial_chain":   SUSPECTED,       # part of an exploit chain was demonstrated; the damaging leg was not
     "oracle_negative": CLEAN,           # the oracle ran and nothing fired
     "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
@@ -1502,6 +1505,11 @@ async def probe_deserialization(session, tools) -> list[ProbeResult]:
 
 _CTX_CANARY = ""   # set by scan_target: the planted env secret probe_context_oversharing hunts for
 _SYNTH_CTX: "synth.Context | None" = None   # set by scan_target: paths harvested from argv, for valid carrier args
+_TELEM_OBS: dict | None = None      # set by scan_target: where this server's log output lands (stderr file, workdir,
+                                    # MCP log notifications) — the channels probe_telemetry_leak reads
+_PRIVATE_MARKERS: dict = {}         # set by scan_target: {secret value: label}. What "private data" means for this run:
+                                    # the planted env canary plus the server's own secret-named env values. Labels only
+                                    # ever name the variable, never the value.
 
 
 def _res_text(result) -> str:
@@ -1800,10 +1808,400 @@ async def probe_xxe(session, tools) -> list[ProbeResult]:
     return out
 
 
+# --- telemetry leak (CWE-532, OWASP MCP08 family): a tool argument ends up where another party can read it ---------
+# Oracle only, per-run: every plantable argument gets its OWN random value, and the signal is that exact value coming
+# back through a channel OTHER than the reply to the call that carried it. Target-driven: arguments and channels are
+# classed by what they are (secret-typed vs free text; a log channel vs a telemetry-style surface vs any other output),
+# never by a server's tool names. Both ends decide the verdict (_telemetry_grade), so a value a tool is MEANT to keep and
+# hand back (a note, a commit message, a vault entry) is never reported.
+# ponytail: files are only looked for in the server's working directory; a server logging to ~/.cache or /var/log is
+# not seen. Widen with a before/after sweep of the usual log directories if that gap shows up on real servers.
+_SECRET_ARG = re.compile(r"(?<![a-z])(pass(word|wd|phrase|code)?|pwd|secret|token|api[-_ ]?key|credentials?|"
+                         r"private[-_ ]?key|access[-_ ]?key|auth(orization)?|bearer|cookie|otp|pin|ssn)(?![a-z])", re.I)
+_SECRET_ARG_DESC = re.compile(r"password|passphrase|\bsecret\b|api[- ]?key|access token|bearer token|credential|"
+                              r"private key", re.I)
+_TELEM_SURFACE = re.compile(r"(?<![a-z])(logs?|logging|telemetry|audit|metrics?|traces?|tracing|debug|diagnostics?|"
+                            r"events?|history|activity|journal|analytics|monitoring|stats|statistics)(?![a-z])", re.I)
+_STORE_PURPOSE = re.compile(r"(?<![a-z])(write|create|save|store|add|append|insert|update|set|commit|post|send|record|"
+                            r"remember|upload|put|edit|modify|publish|register|import|log)(?![a-z])", re.I)
+_TELEM_MAX_TOOLS = int(os.environ.get("MCPRT_TELEM_MAX_TOOLS", "64"))    # planted + read-back calls are each bounded
+
+
+def _words(name: str) -> str:
+    """camelCase -> snake_case, so one word-edge pattern reads both naming conventions."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name or "")
+
+
+def _free_string(spec, need: int) -> bool:
+    """A string argument that will accept an arbitrary planted value of `need` characters."""
+    spec = spec if isinstance(spec, dict) else {}
+    if spec.get("type", "string") != "string" or any(k in spec for k in ("enum", "const", "pattern")):
+        return False
+    if spec.get("format") not in (None, "password"):
+        return False
+    return not isinstance(spec.get("maxLength"), int) or spec["maxLength"] >= need
+
+
+def _plant_params(tool) -> tuple[list[str], list[str]]:
+    """(secret-typed, free-content) arguments of this tool that can carry a planted value."""
+    secret, content = [], []
+    for name, spec in (_schema(tool).get("properties") or {}).items():
+        spec = spec if isinstance(spec, dict) else {}
+        if not _free_string(spec, 40):
+            continue
+        desc = spec.get("description") if isinstance(spec.get("description"), str) else ""
+        if (_SECRET_ARG.search(_words(name)) or _SECRET_ARG_DESC.search(desc)
+                or spec.get("format") == "password" or spec.get("writeOnly") is True):
+            secret.append(name)
+        elif synth._kind(name, spec) in ("text", "query", "name", "string"):     # free text, not a url/path/date/...
+            content.append(name)
+    content.sort(key=lambda n: not _CONTENT_PARAM.search(n))                     # conventional content names first
+    return secret, content[:2]
+
+
+def _telemetry_grade(is_secret: bool, kind: str, stores: bool) -> str | None:
+    """confirmation_method for ONE planted value seen on ONE channel; None = by design, not reported.
+    kind: "log" (stderr / MCP log notification), "file" (the server wrote it to disk), "telem" (a tool or resource that
+    calls itself a log/audit/metrics surface), "other" (any other tool or resource). stores: the tool the value was
+    given to declares a storing purpose (save / create / commit / set ...)."""
+    if is_secret:
+        if kind in ("log", "telem"):
+            return "oracle"                                      # a secret in a log is a leak whatever the tool is for
+        if kind == "file":
+            return "cross_surface_echo" if stores else "oracle"  # a store may keep it on disk; anything else logged it
+        return None if stores else "cross_surface_echo"          # a vault hands back what it was given: by design
+    if kind == "log":
+        return "cross_surface_echo"                              # arguments are logged verbatim
+    if kind in ("telem", "file"):
+        return None if stores else "cross_surface_echo"          # a note in the notes file is by design
+    return None                                                  # content read back through another tool: storage
+
+
+def _written_files(workdir) -> list[tuple[str, str]]:
+    """(relative name, text) of what the server left in its working directory. Bounded: 200 files, 2 MB each."""
+    out: list[tuple[str, str]] = []
+    if not workdir or not os.path.isdir(workdir):
+        return out
+    for root, _dirs, files in os.walk(workdir):
+        for fn in files:
+            p = os.path.join(root, fn)
+            try:
+                if os.path.islink(p) or os.path.getsize(p) > 2_000_000:
+                    continue
+                out.append((os.path.relpath(p, workdir), Path(p).read_text(errors="replace")))
+            except OSError:
+                continue
+            if len(out) >= 200:
+                return out
+    return out
+
+
+async def _telemetry_surfaces(session, tools, obs: dict, planted_tools=frozenset()) -> list[tuple[str, str, str]]:
+    """Every channel a second party could read after the planted calls, as (kind, label, text). Tools that received
+    no planted value are read FIRST: re-calling a planted tool with ordinary arguments can overwrite the very state a
+    reader would have exposed (a "last value" slot), so the readers go before the writers are touched again."""
+    out: list[tuple[str, str, str]] = []
+    if obs.get("stderr"):
+        try:
+            out.append(("log", "the server's stderr log stream", Path(obs["stderr"]).read_text(errors="replace")))
+        except OSError:
+            pass
+    if obs.get("logs"):
+        out.append(("log", "an MCP log notification", "\n".join(obs["logs"])))
+    out += [("file", f"a file the server wrote ({name})", text) for name, text in _written_files(obs.get("workdir"))]
+    # read back through every tool, with ordinary arguments (sorted() is stable: untouched tools keep their order)
+    for t in sorted(tools[:_TELEM_MAX_TOOLS], key=lambda t: t.name in planted_tools):
+        try:
+            text = _result_text(await session.call_tool(t.name, _build_args(t, {})))
+        except Exception as exc:  # noqa: BLE001 - an error message is readable output too
+            text = str(exc)
+        kind = "telem" if _TELEM_SURFACE.search(_words(t.name) + " " + (t.description or "")) else "other"
+        out.append((kind, f"tool {t.name}", text))
+    try:
+        for res in (await session.list_resources()).resources[:50]:
+            try:                                          # read fresh: a cached body may predate the planted calls
+                text = _res_text(await asyncio.wait_for(session.read_resource(res.uri), _CALL_TIMEOUT_S))
+            except Exception:  # noqa: BLE001
+                continue
+            meta = " ".join(str(getattr(res, a, "") or "") for a in ("uri", "name", "description"))
+            out.append(("telem" if _TELEM_SURFACE.search(_words(meta)) else "other", f"resource {res.uri}", text))
+    except Exception:  # noqa: BLE001 — many servers expose no resources endpoint
+        pass
+    return out
+
+
+async def probe_telemetry_leak(session, tools) -> list[ProbeResult]:
+    """Sensitive data in telemetry / logs (CWE-532). VULNERABLE only when a value planted in a SECRET-typed argument
+    shows up in a log channel or a telemetry-style surface; arguments logged verbatim, or a secret readable back
+    through an ordinary tool, are leads. A clean result says no planted value surfaced in the channels read — it does
+    not say the server keeps an audit trail (under-logging cannot be proven from outside)."""
+    planted: dict[str, tuple[str, str, bool]] = {}        # value -> (tool, argument, secret-typed)
+    answers: dict[str, tuple[list, list]] = {}            # tool -> (returned, raised) of its planted call
+    for tool in tools[:_TELEM_MAX_TOOLS]:
+        secret, content = _plant_params(tool)
+        if not (secret or content):
+            continue
+        overrides = {}
+        for p in secret + content:
+            value = "mcprt-telem-" + uuid.uuid4().hex[:20]
+            planted[value] = (tool.name, p, p in secret)
+            overrides[p] = value
+        returned, raised = [], []
+        try:
+            returned.append(_result_text(await session.call_tool(tool.name, _build_args(tool, overrides))))
+        except Exception as exc:  # noqa: BLE001 - a rejected call can still have been logged
+            raised.append(str(exc))
+        answers[tool.name] = (returned, raised)
+    if not planted:
+        return [ProbeResult("telemetry_leak", "(server)", "not_applicable",
+                            rationale="no tool takes a free-text argument a value could be planted in")]
+    await asyncio.sleep(0.3)                              # let buffered log writes land
+    obs = _TELEM_OBS or {}
+    surfaces = await _telemetry_surfaces(session, tools, obs, frozenset(answers))
+    stores = {t.name: bool(_STORE_PURPOSE.search(_words(t.name) + " " + (t.description or ""))) for t in tools}
+    read = (f"{sum(k == 'log' for k, _, _ in surfaces)} log channel(s), {sum(k == 'file' for k, _, _ in surfaces)} "
+            f"written file(s), {sum(k in ('telem', 'other') for k, _, _ in surfaces)} tool/resource output(s)")
+    out: list[ProbeResult] = []
+    logged: dict[str, list[str]] = {}                     # log channel -> ["tool.argument", ...] (content, not secret)
+    for tool_name, (returned, raised) in answers.items():
+        best, in_log = None, False
+        for value, (owner, param, is_secret) in planted.items():
+            if owner != tool_name:
+                continue
+            for kind, label, text in surfaces:
+                if value not in text:
+                    continue
+                method = _telemetry_grade(is_secret, kind, stores.get(tool_name, False))
+                if method is None:
+                    continue
+                if kind == "log" and not is_secret:       # one logging behaviour, not one lead per tool
+                    logged.setdefault(label, []).append(f"{tool_name}.{param}")
+                    in_log = True
+                elif best is None or (method == "oracle" and best[0] != "oracle"):
+                    best = (method, param, label, value, is_secret)
+        if best:
+            method, param, label, value, is_secret = best
+            if method == "oracle":
+                why = (f"the secret-typed argument '{param}' was written in cleartext to {label} — sensitive data in "
+                       "a log / telemetry surface (CWE-532)")
+            elif is_secret:
+                why = (f"the secret-typed argument '{param}' can be read back in cleartext through {label}; that may "
+                       "be this tool's own store, so it is a lead, not a proven leak")
+            else:
+                why = (f"the argument '{param}' was written verbatim to {label}: anything sensitive a user passes "
+                       "would land there (CWE-532 exposure); the argument is not secret-typed, so it is a lead")
+            out.append(ProbeResult("telemetry_leak", tool_name, method, marker=value,
+                                   evidence=f"{tool_name}.{param} -> {label}", rationale=why))
+        elif not in_log:
+            out.append(ProbeResult("telemetry_leak", tool_name, _negative_method(returned, raised),
+                                   rationale=f"the planted value did not surface in {read}"))
+    for label, sources in logged.items():
+        shown = ", ".join(sources[:5]) + (f" and {len(sources) - 5} more" if len(sources) > 5 else "")
+        out.append(ProbeResult("telemetry_leak", "(server)", "cross_surface_echo",
+                               evidence=f"{shown} -> {label}",
+                               rationale=f"tool arguments are written verbatim to {label}: anything sensitive a user "
+                                         "passes would land there (CWE-532 exposure); the arguments are not "
+                                         "secret-typed, so it is a lead"))
+    return out
+
+
+# --- lethal trifecta (OWASP MCP06): private-data read + untrusted-content ingestion + external egress ------------
+# Two parts, both target-driven. (1) CHAIN, deterministic, no model: a URL-taking tool is handed a document on our own
+# recorder that names second-stage URLs (as page markup, JSON links, plain "key: url" lines and a Link header). Proof
+# is a request to one of those URLs carrying private data — untrusted content chose the destination and the same call
+# sent a secret there. A second-stage request without private data is a lead. (2) COMPOSITION: do this server's tools
+# together offer all three legs? That is EXPOSURE, not a lead: each tool is doing its advertised job, and a lead on
+# every server that can both read and fetch would bury the real ones (the benchmark's benign calibration server is
+# one such server). It is recorded as by-design and surfaced through the report's MCP06 exposure note.
+_HTML_FORMS = frozenset({"meta", "link", "anchor", "img", "form"})    # what a browser / crawler follows by design
+_TRIFECTA_MAX_TOOLS = int(os.environ.get("MCPRT_TRIFECTA_MAX_TOOLS", "8"))
+_LEG_INGEST = re.compile(r"fetch|download|crawl|scrape|brows|navigat|web ?search|search the web|\brss\b|\bfeed\b|"
+                         r"from the (internet|web)|web ?page|website|"
+                         r"read[^.]{0,40}(e-?mail|inbox|issue|pull request|comment|ticket|review)", re.I)
+_LEG_EGRESS = re.compile(r"(?<![a-z])(send|post|publish|upload|push|notify|forward|share|e-?mail|tweet|webhook|"
+                         r"http request|create[^.]{0,20}(issue|comment|pull request|ticket|gist|paste))(?![a-z])", re.I)
+_LEG_READ_VERB = re.compile(r"(?<![a-z])(read|open|load|get|list|search|query|select|dump|export|show|view|find|"
+                            r"look ?up|retrieve|cat)(?![a-z])", re.I)
+_LEG_PRIVATE_NOUN = re.compile(
+    r"(?<![a-z])(files?|documents?|docs?|director(y|ies)|folders?|workspace|repo(sitory|sitories)?|databases?|db|"
+    r"tables?|records?|rows?|notes?|memor(y|ies)|e-?mails?|inbox|messages?|secrets?|credentials?|passwords?|"
+    r"env(ironment)?|config(uration)?|calendar|contacts?|customers?|accounts?|vault|clipboard|ledger|tickets?)"
+    r"(?![a-z])", re.I)
+_URL_ARG = re.compile(r"(?<![a-z])(url|uri|href|link|endpoint|webhook)(?![a-z])", re.I)   # an argument that IS a URL
+_LEGS = ("private-data read", "untrusted-content ingestion", "external egress")
+
+
+class _FeedSink:
+    """Loopback recorder that also SERVES an untrusted document naming second-stage URLs on itself, and keeps every
+    request whole (path, then headers + body) so private data riding along can be seen."""
+
+    def __init__(self):
+        self.reqs: list[tuple[str, str]] = []
+        self._httpd = None
+        self.port = None
+
+    def url(self, kind: str, form: str, marker: str) -> str:
+        return f"http://127.0.0.1:{self.port}/{kind}-{form}-{marker}"
+
+    def _document(self, path: str) -> tuple[str, str]:
+        m = re.match(r"/feed-(html|json|text)-([0-9a-f]+)", path)
+        if not m:
+            return "", "text/plain"
+        fmt, marker = m.groups()
+
+        def nxt(form):
+            return self.url("next", form, marker)
+        if fmt == "html":
+            return (f'<html><head><meta http-equiv="refresh" content="0; url={nxt("meta")}">'
+                    f'<link rel="next" href="{nxt("link")}"></head><body><p>Daily digest.</p>'
+                    f'<a href="{nxt("anchor")}">continue</a><img src="{nxt("img")}">'
+                    f'<form action="{nxt("form")}" method="post"></form></body></html>'), "text/html"
+        if fmt == "json":
+            return json.dumps({"items": [], "next": nxt("next"), "next_page_url": nxt("nextpage"),
+                               "callback_url": nxt("callback"), "webhook_url": nxt("webhook"),
+                               "links": {"next": {"href": nxt("hal")}}}), "application/json"
+        return (f"headline: daily digest\nnext: {nxt('line')}\ncallback_url={nxt('kvcallback')}\n"
+                f"report_to: {nxt('report')}\n"), "text/plain"
+
+    def start(self) -> "_FeedSink":
+        sink = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def _serve(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(min(n, 65536)).decode("utf-8", "replace") if n else ""
+                sink.reqs.append((self.path, f"{self.headers}\n{body}"))
+                doc, ctype = sink._document(self.path)
+                data = doc.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                if doc:
+                    marker = self.path.rsplit("-", 1)[-1]
+                    self.send_header("Link", f'<{sink.url("next", "header", marker)}>; rel="next"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            do_GET = do_POST = do_PUT = _serve
+
+            def log_message(self, *a):
+                pass
+
+        socketserver.ThreadingTCPServer.daemon_threads = True
+        self._httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+        self.port = self._httpd.server_address[1]
+        threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
+        return self
+
+    def stop(self):
+        if self._httpd:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+
+
+def _trifecta_legs(tools, demonstrated=frozenset(), restricted=frozenset()) -> dict[str, list[str]]:
+    """Which tools offer each leg, read from what a tool says about itself. `demonstrated`: URL tools that reached our
+    recorder (ingestion + egress shown live). `restricted`: URL tools that refused it (those two legs are not live)."""
+    legs: dict[str, list[str]] = {leg: [] for leg in _LEGS}
+    for t in tools:
+        text = _words(t.name).replace("_", " ") + " " + (t.description or "")
+        url_tool = t.name in demonstrated or any(_URL_ARG.search(_words(p)) for p in _str_params(t))
+        if _EXEC_GENERAL.search(text):                       # a general executor can read, fetch and send
+            for leg in _LEGS:
+                legs[leg].append(t.name)
+            continue
+        if t.name not in restricted:
+            shown = " (demonstrated)" if t.name in demonstrated else ""
+            if url_tool or _LEG_INGEST.search(text):
+                legs["untrusted-content ingestion"].append(t.name + shown)
+            if url_tool or _LEG_EGRESS.search(text):
+                legs["external egress"].append(t.name + shown)
+        local = bool(_matching_params(t, _PATH_PARAM)) or bool(_SQL_DESC.search(text))
+        if _LEG_READ_VERB.search(text) and _LEG_PRIVATE_NOUN.search(text) and (local or not url_tool):
+            legs["private-data read"].append(t.name)
+    return legs
+
+
+async def probe_lethal_trifecta(session, tools) -> list[ProbeResult]:
+    """Lethal trifecta: private data leaves through a destination that untrusted content chose. VULNERABLE only on the
+    deterministic chain (a request to a document-named URL carrying a private value); a content-steered request without
+    private data is a lead; all three legs being present in one server is by-design exposure, named in the server row.
+    A clean result is about THIS server alone: legs spread across several servers are an estate-level question."""
+    if not tools:
+        return [ProbeResult("lethal_trifecta", "(server)", "not_applicable", rationale="the server exposes no tools")]
+    out: list[ProbeResult] = []
+    demonstrated, restricted = set(), set()
+    candidates = [(t, p[0]) for t in tools
+                  if (p := _candidate_params(t, _URL_PARAM, _FETCH_DESC, ["url", "uri", "href", "endpoint"]))]
+    sink = _FeedSink().start() if candidates else None
+    try:
+        for tool, param in candidates[:_TRIFECTA_MAX_TOOLS]:
+            marker = uuid.uuid4().hex[:12]
+            returned, raised = [], []
+            for fmt in ("html", "json", "text"):
+                try:
+                    r = await session.call_tool(tool.name, _build_args(
+                        tool, {param: _inject(tool, param, sink.url("feed", fmt, marker))}))
+                    returned.append(_result_text(r))
+                except Exception as exc:  # noqa: BLE001
+                    raised.append(str(exc))
+            await asyncio.sleep(0.4)
+            reqs = [(p, raw) for p, raw in list(sink.reqs) if marker in p]
+            fetched = any(p.startswith("/feed-") for p, _ in reqs)
+            second = [(p, raw) for p, raw in reqs if p.startswith("/next-")]
+            forms = {p.split("-")[1] for p, _ in second}
+            leaked = next((label for p, raw in second for value, label in _PRIVATE_MARKERS.items()
+                           if value in p or value in raw), None)
+            by_design = _url_access_by_design(tool.name, tool.description or "")
+            steered = sorted(forms - _HTML_FORMS if by_design else forms)
+            if fetched:
+                demonstrated.add(tool.name)
+            if leaked:
+                out.append(ProbeResult(
+                    "lethal_trifecta", tool.name, "oracle", marker=marker,
+                    evidence=f"{tool.name}: destination named by the fetched document ({', '.join(sorted(forms))}) "
+                             f"received {leaked}",
+                    rationale="a document fetched from an untrusted URL named a destination, and the same tool call "
+                              f"sent private data ({leaked}) there — untrusted-input-controlled exfiltration of "
+                              "private data in a single call (deterministic proof, no model in the loop)"))
+            elif steered:
+                out.append(ProbeResult(
+                    "lethal_trifecta", tool.name, "partial_chain", marker=marker,
+                    evidence=f"{tool.name} requested a URL only the fetched document named ({', '.join(steered)})",
+                    rationale="untrusted content steers this server's outbound requests; no private data was seen in "
+                              "that request, so the exfiltration leg is not demonstrated"))
+            else:
+                method = _negative_method(returned, raised)
+                if method == "refusal" and not fetched:
+                    restricted.add(tool.name)
+                out.append(ProbeResult(
+                    "lethal_trifecta", tool.name, method, marker=marker,
+                    rationale=("fetched the untrusted document and requested nothing it named" if fetched
+                               else "did not fetch the untrusted document")))
+    finally:
+        if sink:
+            sink.stop()
+    legs = _trifecta_legs(tools, demonstrated, restricted)
+    if all(legs.values()):
+        out.append(ProbeResult(
+            "lethal_trifecta", "(server)", "by_design",
+            evidence="; ".join(f"{leg}: {', '.join(names[:3])}" for leg, names in legs.items()),
+            rationale="exposure, not a finding: all three legs of the lethal trifecta are present in this one "
+                      "server, each a tool doing its advertised job. Text injected through the ingestion leg could "
+                      "steer a model to drive the private-read leg into the egress leg; whether an agent can be "
+                      "steered that way needs a model in the loop (agent red-team)"))
+    else:
+        have = [leg for leg, names in legs.items() if names]
+        out.append(ProbeResult(
+            "lethal_trifecta", "(server)", "oracle_negative",
+            rationale=f"this server alone does not combine the three legs (present: {', '.join(have) or 'none'}; "
+                      f"missing: {', '.join(leg for leg, names in legs.items() if not names)})"))
+    return out
+
+
 ALL_PROBES = [probe_ssrf, probe_command_injection, probe_code_injection, probe_path_traversal, probe_xxe,
               probe_tool_poisoning, probe_sql_injection, probe_ssti, probe_rug_pull,
               probe_arg_injection, probe_deserialization, probe_context_oversharing,
-              probe_lure_text, probe_session_argument]
+              probe_lure_text, probe_session_argument, probe_telemetry_leak, probe_lethal_trifecta]
 
 
 class ScanError(RuntimeError):
@@ -1852,7 +2250,7 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     # Plant a unique secret in the server's environment. If any tool/resource surfaces it to the model,
     # the server overshares its context (MCP10) — ground truth, since a random UUID can't be coincidence.
     # ponytail: module global = one-scan-at-a-time; add a context arg if we ever scan concurrently.
-    global _CTX_CANARY, _RES_CACHE, _CALL_CACHE, _SYNTH_CTX
+    global _CTX_CANARY, _RES_CACHE, _CALL_CACHE, _SYNTH_CTX, _TELEM_OBS, _PRIVATE_MARKERS
     _CTX_CANARY = "mcprt-ctx-" + uuid.uuid4().hex
     _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
     _CALL_CACHE = {}         # one benign tools/call per tool per scan, shared by the result-reading probes
@@ -1860,11 +2258,25 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     _SYNTH_CTX = synth.Context(base_dir=workdir, paths=synth.harvest_argv(argv))
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
+    _PRIVATE_MARKERS = {_CTX_CANARY: "the planted environment canary"}
+    _PRIVATE_MARKERS.update({v: f"the server's environment variable {k}" for k, v in child_env.items()
+                             if k != "MCPRT_CONTEXT_CANARY" and len(v) >= 12 and _SECRET_ARG.search(k.lower())})
+    # The server's log channels, kept so a planted value can be looked for in them: stderr goes to a file (O_APPEND,
+    # so our reads never move the child's write offset) and is replayed to our own stderr afterwards.
+    err_fd, err_path = tempfile.mkstemp(prefix="mcprt_stderr_")
+    errlog = os.fdopen(err_fd, "a")
+    log_notes: list[str] = []
+
+    async def _on_log(note) -> None:
+        if len(log_notes) < 500:
+            log_notes.append(json.dumps(getattr(note, "data", note), default=str)[:4000])
+
+    _TELEM_OBS = {"stderr": err_path, "workdir": workdir, "logs": log_notes}
     params = StdioServerParameters(command=argv[0], args=argv[1:], env=child_env, cwd=workdir)
     results: list[ProbeResult] = []
     try:
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as s:
+        async with stdio_client(params, errlog=errlog) as (read, write):
+            async with ClientSession(read, write, logging_callback=_on_log) as s:
                 # Bound connect/handshake so an unresponsive server fails fast instead of hanging.
                 init = await asyncio.wait_for(s.initialize(), _CONNECT_TIMEOUT_S)
                 from hunt import poisoning as _poisoning
@@ -1908,6 +2320,14 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     finally:
         _RES_CACHE = None
         _CALL_CACHE = None
+        _TELEM_OBS = None
+        _PRIVATE_MARKERS = {}
+        errlog.close()
+        try:                         # the operator still sees what the server said (a crash trace, a startup error)
+            sys.stderr.write(Path(err_path).read_text(errors="replace")[-65536:])
+        except OSError:
+            pass
+        Path(err_path).unlink(missing_ok=True)
         shutil.rmtree(workdir, ignore_errors=True)
     return results
 

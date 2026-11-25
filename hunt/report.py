@@ -174,6 +174,25 @@ OWASP_MCP_TOP10 = {
 # Lead-only classes (rework): a SUSPECTED lead may move a control's status, but a clean or inconclusive result from
 # these classes never establishes PASS (no PASS on a non-oracle negative). They are excluded from TESTED_CONTROLS.
 LEAD_ONLY_CLASSES = frozenset({"lure_text", "session_argument"})
+# Classes whose CLEAN covers only PART of their control. "No planted value reached a log" does not show that a server
+# keeps an audit trail (MCP08 is about lacking one), and "no exfiltration chain" does not show that an agent cannot be
+# subverted (MCP06 needs a model in the loop). They can FAIL or flag their control, never PASS it: a clean result is
+# reported as PARTIAL with this reason, and a lead from one marks only its primary (first-listed) control.
+PARTIAL_CONTROL_CLASSES = {
+    "telemetry_leak": "Tested: no planted value reached a log channel, a written file or a telemetry surface. "
+                      "Not testable from outside: whether the server keeps an audit trail at all.",
+    "lethal_trifecta": "Tested: no destination named by untrusted content received private data. Whether this server "
+                       "alone offers all three legs is stated in its exposure note. Not tested here: subversion of "
+                       "a real agent (agent red-team).",
+}
+
+
+def lead_controls(cls: str) -> list[str]:
+    """The controls a LEAD (or a partial clean) from this class speaks to."""
+    owasp = CLASS_META.get(cls, {}).get("owasp", [])
+    return owasp[:1] if cls in PARTIAL_CONTROL_CLASSES else owasp
+
+
 TESTED_CONTROLS = {c for name, m in CLASS_META.items() if name not in LEAD_ONLY_CLASSES for c in m["owasp"]}
 # Classes that need NO working tool call — they read tool metadata or the static package, so they stay
 # trustworthy even when the server is auth-gated. Everything else is execution-dependent.
@@ -195,11 +214,14 @@ COMPLIANCE_XWALK = {
 _INTENT_FLOW_TOOL = re.compile(r"fetch|http|\bweb\b|url|scrape|crawl|browse|search|download|request", re.I)
 
 
-def _mcp06_exposure(surface: dict) -> dict:
+def _mcp06_exposure(surface: dict, probe_results=()) -> dict:
     """Basic-scan flag for OWASP MCP06 (intent-flow / prompt-injection-via-context, the MCP-00 class):
     the server-side ENABLING CONDITIONS, not a confirmed finding. Confirmation needs the Advanced
     Agent Red-Team (a real agent in the loop)."""
     reasons = []
+    for r in probe_results:                 # the lethal_trifecta probe found all three legs in this one server
+        if r.probe == "lethal_trifecta" and r.tool == "(server)" and r.confirmation_method == "by_design":
+            reasons.append("all three lethal-trifecta legs are present in this one server (" + r.evidence + ")")
     if surface.get("resources"):
         reasons.append(f"exposes {len(surface['resources'])} resource(s) whose content is routed to the "
                        "model (direct MCP-00 / context-injection vector)")
@@ -225,7 +247,10 @@ async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str 
         # the class. Remap those negatives to INCONCLUSIVE, never a sealed false-CLEAN (outbound reach is still
         # caught by the egress oracle the sealed sweep merges). VULNERABLE/other verdicts are untouched.
         for r in probe_results:
-            if r.verdict == CLEAN and r.probe in ("ssrf", "context_oversharing"):
+            # lethal_trifecta's chain test uses the same host-side recorder; its server-level row is read from tool
+            # metadata and stays valid under the seal.
+            if r.verdict == CLEAN and (r.probe in ("ssrf", "context_oversharing")
+                                       or (r.probe == "lethal_trifecta" and r.tool != "(server)")):
                 r.confirmation_method, r.verdict = "probe_seal_incompatible", verdict_for("probe_seal_incompatible")
             elif r.verdict == CLEAN and r.probe == "xxe":
                 r.confirmation_method, r.verdict = "sandbox_unobservable", verdict_for("sandbox_unobservable")
@@ -269,24 +294,33 @@ async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str 
 
     def _controls(cls):
         return CLASS_META.get(cls, {}).get("owasp", [])
-    suspected_controls = {c for cls, v in cls_verdicts.items() if SUSPECTED in v for c in _controls(cls)}
+    no_pass = LEAD_ONLY_CLASSES | set(PARTIAL_CONTROL_CLASSES)       # can flag or fail a control, never pass it
+    suspected_controls = {c for cls, v in cls_verdicts.items() if SUSPECTED in v for c in lead_controls(cls)}
     real_controls = {c for cls, v in cls_verdicts.items()
-                     if cls not in LEAD_ONLY_CLASSES and v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
+                     if cls not in no_pass and v & {VULNERABLE, SUSPECTED, CLEAN} for c in _controls(cls)}
     inconclusive_controls = {c for cls, v in cls_verdicts.items() if v <= {INCONCLUSIVE}
                              for c in _controls(cls)} - real_controls
     # Tested = controls whose classes produced evidence in THIS run, not every class in CLASS_META: demo-only classes
     # never run in a scan, and mapping them to a control used to make it PASS with no evidence (MCP06). A lead can make
     # a control tested; a lead-only class can never make it PASS.
-    ran = {c for cls in cls_verdicts if cls not in LEAD_ONLY_CLASSES for c in _controls(cls)}
+    ran = {c for cls in cls_verdicts if cls not in no_pass for c in _controls(cls)}
     if tok.verdict in (VULNERABLE, CLEAN):
         ran |= set(_controls("token_passthrough"))
     if sc_dir:
         ran |= set(_controls("supply_chain"))
-    tested = ran | suspected_controls
+    tested = ran | suspected_controls | failed      # a proven finding always tested its controls
     if not sc_dir:                       # supply chain didn't run for this target -> MCP04 not tested here
         tested.discard("MCP04")
+    # a clean result from a partial class: its control is neither PASS nor untested
+    partial = {c: cls for cls in PARTIAL_CONTROL_CLASSES if CLEAN in cls_verdicts.get(cls, ())
+               for c in lead_controls(cls)}
     compliance = []
     for cid, title in OWASP_MCP_TOP10.items():
+        if cid not in tested and cid in partial:
+            compliance.append({"id": cid, "title": title, "status": "PARTIAL",
+                               "basis": PARTIAL_CONTROL_CLASSES[partial[cid]]
+                               + (" Some tools could not be tested." if INCONCLUSIVE in cls_verdicts[partial[cid]] else "")})
+            continue
         if cid not in tested:
             status = "NOT TESTED"
         elif cid in failed:
@@ -320,8 +354,9 @@ async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str 
     if auth_gated:
         safe = {c for cls in _NO_CRED_SAFE_CLASSES for c in CLASS_META.get(cls, {}).get("owasp", [])}
         for c in compliance:
-            if c["status"] == "PASS" and c["id"] not in safe:
+            if c["status"] in ("PASS", "PARTIAL") and c["id"] not in safe:
                 c["status"] = "NOT TESTED"      # couldn't exercise without credentials
+                c.pop("basis", None)
         for cov in coverage:
             if cov["verdict"] == "CLEAN" and cov["cls"] not in _NO_CRED_SAFE_CLASSES:
                 cov["verdict"] = "REQUIRES_CREDENTIALS"
@@ -348,7 +383,7 @@ async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str 
         "findings": findings,
         "surface": surface,
         "coverage": coverage,
-        "mcp06": _mcp06_exposure(surface),
+        "mcp06": _mcp06_exposure(surface, probe_results),
         "compliance": compliance,
         "supply_posture": supply_posture,
         "token_passthrough_transcript": tok.transcript,
@@ -428,8 +463,8 @@ def render_markdown(rep: dict) -> str:
           "| Control | Status |", "|---|---|"]
     for c in rep["compliance"]:
         mark = {"PASS": "✅ PASS", "FAIL": "❌ FAIL", "SUSPECTED": "⚠ SUSPECTED (unconfirmed lead)",
-                "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
-        L.append(f"| {c['id']} {c['title']} | {mark} |")
+                "PARTIAL": "◐ PARTIAL", "NOT TESTED": "— not tested"}.get(c["status"], c["status"])
+        L.append(f"| {c['id']} {c['title']} | {mark}{' — ' + c['basis'] if c.get('basis') else ''} |")
 
     # --- Compliance crosswalk: tested controls -> audit frameworks (A2) ------------------------
     L += ["", "## Compliance crosswalk", "",

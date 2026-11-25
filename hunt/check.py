@@ -166,7 +166,7 @@ def _run_full_check(target: str, do_cap: bool = True) -> int:
     print("\nOWASP MCP Top 10:")
     for c in rep.get("compliance", []):
         tag = {"FAIL": f"{_C['High']}FAIL{_R}", "PASS": "\033[32mPASS\033[0m",
-               "SUSPECTED": "\033[33mSUSPECTED\033[0m"}.get(c["status"], "not tested")
+               "SUSPECTED": "\033[33mSUSPECTED\033[0m", "PARTIAL": "partial"}.get(c["status"], "not tested")
         print(f"  {c['id']}  {tag:<16} {c['title']}")
 
     print(f"\nrecorded to the database — see: mcp-rt db findings\n")
