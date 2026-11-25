@@ -173,7 +173,10 @@ def coverage_of(rec: dict, result: dict | None = None) -> list[dict]:
     if result["status"].startswith("inconclusive") or not rec.get("actions"):
         return []
     hit = {(f["tool"], f["cls"]) for f in result["findings"]}
-    tools = sorted({a["name"] for a in rec["actions"] if a["kind"] == "tool" and a.get("t1")})
+    # a tool is CLEAN-eligible only if a call to it actually EXECUTED (ok). A tool whose every call was rejected by
+    # validation was never exercised -> no CLEAN credit (it must not read as "tested clean"); a finding keeps its tool.
+    tools = sorted({a["name"] for a in rec["actions"] if a["kind"] == "tool" and a.get("ok")}
+                   | {t for (t, _) in hit if t not in ("(server)", "(startup)")})
     rows = []
     for t in ["(startup)", *tools]:
         for cls in ("mcp_cap", "elicitation_credential_harvest", "sampling_instruction_laundering"):

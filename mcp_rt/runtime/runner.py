@@ -18,6 +18,8 @@ import mcp.types as types
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from hunt import synth  # valid-input synthesis (pure, stdlib-only): make a REAL tool actually execute
+
 from mcp_rt.runtime import observe
 
 LAUNCHER = Path(__file__).with_name("sandbox.py")
@@ -148,11 +150,23 @@ async def _watch(events_path):
             return round(now - start, 2)
 
 
-async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=None, doc_path=None, budget=None):
+async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=None, doc_path=None, budget=None,
+                 target_argv=(), workdir=None):
     """Drive the server over MCP. shallow: one benign call per tool (the redirect oracle). deep (the canary run):
     every tool with schema variants, every resource and prompt, the tool list re-read mid-session, a second round of
-    calls, then a watch window. Every action is timestamped so egress and file access can be tied to it."""
+    calls, then a watch window. Every action is timestamped so egress and file access can be tied to it.
+
+    Tool arguments are SYNTHESIZED (hunt.synth) to be valid-shaped for real servers: from each parameter's schema and
+    meaning, from paths the server was launched with, and from strings its own read tools return — then, if a call is
+    rejected, repaired once from the validation error. Without this, a real tool rejects a placeholder argument and its
+    code path never runs (found in the real-OSS trial)."""
     b = {**BUDGET, **(budget or {})}
+    ctx = synth.Context(base_dir=workdir or ".", url=CANARY, token=token, paths=synth.harvest_argv(list(target_argv)))
+
+    def _learn(text):  # a successful read tool's output yields real identifiers (tables, branches) for later calls
+        for s in synth.harvest_strings(text or "", 20):
+            if s not in ctx.strings and len(ctx.strings) < 80:
+                ctx.strings.append(s)
     out = {"instructions": None, "server_name": None, "tools": [], "calls": [], "elicitations": [], "samplings": [],
            "hinted_tools": [], "error": None, "actions": [], "redefinitions": [], "list_changed": 0,
            "elicitation_log": [], "watch_s": None, "not_reached": 0}
@@ -194,16 +208,28 @@ async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=
 
     async def call(session, tool, args, round_, record_compat=False):
         a = begin("tool", tool["name"], round_, args)
-        try:
-            res = await asyncio.wait_for(session.call_tool(tool["name"], args), CALL_TIMEOUT)
-            text = " ".join(getattr(c, "text", "") or "" for c in res.content)[:200]
-            end(a, not res.isError, text)
-            if record_compat:
-                out["calls"].append({"tool": tool["name"], "isError": bool(res.isError), "text": text})
-        except Exception as exc:  # a failing tool is a result, not a harness crash
-            end(a, False, repr(exc))
-            if record_compat:
-                out["calls"].append({"tool": tool["name"], "error": repr(exc)[:200]})
+
+        async def once(aa):  # a failing tool is a result, not a harness crash
+            try:
+                res = await asyncio.wait_for(session.call_tool(tool["name"], aa), CALL_TIMEOUT)
+                return (not res.isError), " ".join(getattr(c, "text", "") or "" for c in res.content)
+            except Exception as exc:
+                return False, repr(exc)
+
+        ok, text = await once(args)
+        if not ok:  # rejected by validation? the error names the valid shape — fix one param and retry once
+            fixed = synth.repair(args, tool.get("inputSchema") or {}, ctx, text)
+            if fixed and fixed != args:
+                ok2, text2 = await once(fixed)
+                a["repaired"] = ok2
+                if ok2:
+                    a["args"], ok, text = _clip(fixed), ok2, text2
+        end(a, ok, text[:200])
+        if ok:
+            _learn(text)
+        if record_compat:
+            out["calls"].append({"tool": tool["name"], "isError": not ok, "text": text[:200]} if ok
+                                else {"tool": tool["name"], "error": text[:200]})
 
     async def listing(session, round_):
         a = begin("list_tools", "tools/list", round_)
@@ -224,7 +250,7 @@ async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=
                 lc_at_list = out["list_changed"]
                 base = {}
                 for tool in out["tools"]:
-                    args = {k: _sample(v, token) for k, v in (tool["inputSchema"].get("properties") or {}).items()}
+                    args = {k: synth.value(k, v, ctx) for k, v in (tool["inputSchema"].get("properties") or {}).items()}
                     if hints and tool["name"] in hints:
                         args.update(apply_hints(hints[tool["name"]], token))
                         out["hinted_tools"].append(tool["name"])
@@ -258,7 +284,7 @@ async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=
                             a = begin("resource", str(it.uri), 1)
                             coro = session.read_resource(it.uri)
                         else:
-                            pargs = {arg.name: f"{token} sample" for arg in (it.arguments or [])}
+                            pargs = {arg.name: synth.value(arg.name, {"type": "string"}, ctx) for arg in (it.arguments or [])}
                             a = begin("prompt", it.name, 1, pargs)
                             coro = session.get_prompt(it.name, pargs)
                         try:
@@ -276,7 +302,7 @@ async def _drive(params, token, timeout, hints=None, *, deep=False, events_path=
                     if time.time() > deadline:
                         out["not_reached"] += 1
                         continue
-                    args = base.get(tool["name"]) or {k: _sample(v, token)
+                    args = base.get(tool["name"]) or {k: synth.value(k, v, ctx)
                                                       for k, v in (tool["inputSchema"].get("properties") or {}).items()}
                     await call(session, tool, args, 2)
                 after2 = await listing(session, 2)
@@ -566,7 +592,7 @@ def run_server(argv, *, token=None, timeout=120.0, hints=None, declared_env=(), 
     started = time.time()
     params, paths = build_sealed_launcher(argv, workdir, token, declared_env=declared_env, passthrough=passthrough)
     drive = asyncio.run(_drive(params, token, timeout, hints, deep=deep, events_path=paths["events"],
-                               doc_path=paths["doc"]))
+                               doc_path=paths["doc"], target_argv=list(argv), workdir=workdir))
 
     report = _read_json(paths["report"])
     server_events = [e for e in _read_events(paths["events"]) if e.get("phase") == "server"]
