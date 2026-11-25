@@ -63,6 +63,21 @@ def test_clean_when_a_layer_ran_and_nothing_fired(monkeypatch):
     assert r["verdict"] == "CLEAN" and not r["findings"]
 
 
+def test_inconclusive_not_clean_when_the_probe_battery_could_not_run(monkeypatch):
+    """A real server the harness cannot connect to (McpError): the 15-class battery never ran, so 'no finding'
+    is 'not observed', not 'clean' — even though the capability sensor technically ran. Found in the real-OSS trial."""
+    async def _boom(cmd, env=None):
+        raise RuntimeError("McpError: Connection closed")
+    monkeypatch.setenv("MCPRT_AI_PROVIDER", "")
+    monkeypatch.setattr("hunt.report.run_full_scan", _boom)
+    monkeypatch.setattr("hunt.hunt_cap.strace_available", lambda: True)
+    monkeypatch.setattr("hunt.hunt_cap.run_cap_hunt", lambda cmd, **kw: ("INCONCLUSIVE", []))  # ran, concluded nothing
+    r = ac.run_complete("python x.py")
+    assert r["components"]["direct_probe"].startswith("skipped")
+    assert r["components"]["mcp_cap"].startswith("ran")
+    assert r["verdict"] == "INCONCLUSIVE" and not r["findings"], r["components"]
+
+
 def test_advanced_flow_tier_persists_findings_and_leads(tmp_path, monkeypatch):
     from hunt.flow import run_flow
     from hunt.platform_db import Store
