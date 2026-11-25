@@ -176,8 +176,12 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
     except Exception:  # noqa: BLE001
         chains = []
 
-    ran_any = any(v.startswith("ran") for v in components.values())
-    verdict = "VULNERABLE" if findings else ("CLEAN" if ran_any else "INCONCLUSIVE")
+    # CLEAN is only honest when the deterministic probe battery (the 15 ground-truth classes) actually ran against
+    # this server. If it could not connect (McpError, handshake failure) no class was tested, so "no finding" means
+    # "not observed", not "clean" — even when the capability sensor or the sealed run technically "ran". A real server
+    # the harness cannot drive must read INCONCLUSIVE, never CLEAN (honesty spine; found in the real-OSS trial).
+    battery_ran = components.get("direct_probe", "").startswith("ran")
+    verdict = "VULNERABLE" if findings else ("CLEAN" if battery_ran else "INCONCLUSIVE")
     note = (f"{len(findings)} ground-truth finding(s), {len(leads)} lead(s) (MCP-00/strace — need "
             f"confirmation), {len(chains)} chain(s) · "
             + " · ".join(f"{k}:{v}" for k, v in components.items()))
@@ -205,7 +209,7 @@ def canary_record(rec: dict, status: str, max_events: int = 100) -> dict:
         "file_access": rec.get("file_access") or [], "tamper": rec.get("tamper") or [],
         "redefinitions": rec.get("redefinitions") or [], "list_changed": rec.get("list_changed"),
         "samplings": rec.get("samplings") or [], "elicitations": rec.get("elicitation_log") or [],
-        "limits": rec.get("limits") or [],
+        "limits": rec.get("limits") or [], "config_env": rec.get("config_env") or [],
     }
 
 
