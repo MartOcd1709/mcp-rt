@@ -127,11 +127,17 @@ def test_plain_fetch_and_refusal_are_clean(chain):
 
 
 # ---- lethal_trifecta: composition ------------------------------------------------------------------------------
-def test_all_three_legs_in_one_server_is_a_lead(chain):
-    r = chain["(server)"]
-    assert r.confirmation_method == "capability_composition" and r.verdict == P.SUSPECTED
+def test_all_three_legs_in_one_server_is_exposure_not_a_lead(chain):
+    r = chain["(server)"]                # tools doing their advertised jobs: named, never flagged
+    assert r.confirmation_method == "by_design" and r.verdict == P.CLEAN
     assert "read_ledger" in r.evidence and "(demonstrated)" in r.evidence
     assert "pinned_fetch" not in r.evidence                       # a tool that refused offers no live leg
+
+
+def test_benign_calibration_server_raises_no_flag_from_these_classes():
+    """The benchmark's benign server has a fetch tool and a file-read tool. Neither class may flag it."""
+    rows = _scan("safe_server.py", P.probe_telemetry_leak) + _scan("safe_server.py", P.probe_lethal_trifecta)
+    assert rows and not [r for r in rows if r.verdict in (P.VULNERABLE, P.SUSPECTED)]
 
 
 def test_a_missing_leg_is_clean_and_named():
@@ -167,7 +173,8 @@ def _scorecard(monkeypatch, rows, sealed=False) -> dict:
     monkeypatch.setattr(report, "scan_target", fake_scan)
     monkeypatch.setattr(report, "probe_token_passthrough", fake_tokens)
     rep = asyncio.run(report.run_full_scan(["python3", "no_such_server.py"], sealed=sealed))
-    return {c["id"]: c for c in rep["compliance"]} | {"_coverage": rep["coverage"]}
+    return {c["id"]: c for c in rep["compliance"]} | {"_coverage": rep["coverage"], "_mcp06": rep["mcp06"],
+                                                       "_suspected": rep["suspected"]}
 
 
 def _row(cls, method, tool="t"):
@@ -189,11 +196,19 @@ def test_a_proven_finding_fails_every_mapped_control(monkeypatch):
 
 
 def test_a_lead_marks_only_the_primary_control(monkeypatch):
-    s = _scorecard(monkeypatch, [_row("lethal_trifecta", "capability_composition", "(server)"),
+    s = _scorecard(monkeypatch, [_row("lethal_trifecta", "partial_chain", "fetcher"),
                                  _row("context_oversharing", "oracle_negative"),
                                  _row("telemetry_leak", "cross_surface_echo")])
     assert s["MCP06"]["status"] == "SUSPECTED" and s["MCP08"]["status"] == "SUSPECTED"
     assert s["MCP10"]["status"] == "PASS"                         # context_oversharing's own clean result stands
+
+
+def test_three_legs_by_design_is_an_exposure_note_and_never_a_lead(monkeypatch):
+    legs = ProbeResult("lethal_trifecta", "(server)", "by_design", evidence="private-data read: a; ...", rationale="r")
+    s = _scorecard(monkeypatch, [legs])
+    assert s["MCP06"]["status"] == "PARTIAL"                      # not SUSPECTED, not PASS
+    assert s["_mcp06"]["exposed"] and "lethal-trifecta legs" in s["_mcp06"]["reasons"][0]
+    assert not s["_suspected"]
 
 
 def test_inconclusive_only_stays_not_tested_and_mixed_says_so(monkeypatch):

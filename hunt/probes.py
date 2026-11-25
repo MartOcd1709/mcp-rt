@@ -63,8 +63,6 @@ _METHOD_VERDICT = {
     "cross_surface_echo": SUSPECTED,    # a planted value was read back through another channel, but the value was
                                         # not secret-typed or the channel may be the tool's own store (telemetry_leak)
     "partial_chain":   SUSPECTED,       # part of an exploit chain was demonstrated; the damaging leg was not
-    "capability_composition": SUSPECTED,  # every leg of a toxic capability combination is present in one server;
-                                          # exploiting it needs a model in the loop (lethal_trifecta)
     "oracle_negative": CLEAN,           # the oracle ran and nothing fired
     "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
@@ -2012,7 +2010,9 @@ async def probe_telemetry_leak(session, tools) -> list[ProbeResult]:
 # recorder that names second-stage URLs (as page markup, JSON links, plain "key: url" lines and a Link header). Proof
 # is a request to one of those URLs carrying private data — untrusted content chose the destination and the same call
 # sent a secret there. A second-stage request without private data is a lead. (2) COMPOSITION: do this server's tools
-# together offer all three legs? That is a lead by construction: turning it into theft needs a model in the loop.
+# together offer all three legs? That is EXPOSURE, not a lead: each tool is doing its advertised job, and a lead on
+# every server that can both read and fetch would bury the real ones (the benchmark's benign calibration server is
+# one such server). It is recorded as by-design and surfaced through the report's MCP06 exposure note.
 _HTML_FORMS = frozenset({"meta", "link", "anchor", "img", "form"})    # what a browser / crawler follows by design
 _TRIFECTA_MAX_TOOLS = int(os.environ.get("MCPRT_TRIFECTA_MAX_TOOLS", "8"))
 _LEG_INGEST = re.compile(r"fetch|download|crawl|scrape|brows|navigat|web ?search|search the web|\brss\b|\bfeed\b|"
@@ -2123,9 +2123,9 @@ def _trifecta_legs(tools, demonstrated=frozenset(), restricted=frozenset()) -> d
 
 async def probe_lethal_trifecta(session, tools) -> list[ProbeResult]:
     """Lethal trifecta: private data leaves through a destination that untrusted content chose. VULNERABLE only on the
-    deterministic chain (a request to a document-named URL carrying a private value); content-steered requests without
-    private data, and all three legs being present in one server, are leads. A clean result is about THIS server alone:
-    legs spread across several servers are an estate-level question."""
+    deterministic chain (a request to a document-named URL carrying a private value); a content-steered request without
+    private data is a lead; all three legs being present in one server is by-design exposure, named in the server row.
+    A clean result is about THIS server alone: legs spread across several servers are an estate-level question."""
     if not tools:
         return [ProbeResult("lethal_trifecta", "(server)", "not_applicable", rationale="the server exposes no tools")]
     out: list[ProbeResult] = []
@@ -2183,11 +2183,12 @@ async def probe_lethal_trifecta(session, tools) -> list[ProbeResult]:
     legs = _trifecta_legs(tools, demonstrated, restricted)
     if all(legs.values()):
         out.append(ProbeResult(
-            "lethal_trifecta", "(server)", "capability_composition",
+            "lethal_trifecta", "(server)", "by_design",
             evidence="; ".join(f"{leg}: {', '.join(names[:3])}" for leg, names in legs.items()),
-            rationale="all three legs of the lethal trifecta are present in this one server: text injected through "
-                      "the ingestion leg can steer a model to drive the private-read leg into the egress leg. "
-                      "Exploiting it needs a model in the loop, so it is a lead, not a demonstrated chain"))
+            rationale="exposure, not a finding: all three legs of the lethal trifecta are present in this one "
+                      "server, each a tool doing its advertised job. Text injected through the ingestion leg could "
+                      "steer a model to drive the private-read leg into the egress leg; whether an agent can be "
+                      "steered that way needs a model in the loop (agent red-team)"))
     else:
         have = [leg for leg, names in legs.items() if names]
         out.append(ProbeResult(

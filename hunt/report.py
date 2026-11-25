@@ -181,9 +181,9 @@ LEAD_ONLY_CLASSES = frozenset({"lure_text", "session_argument"})
 PARTIAL_CONTROL_CLASSES = {
     "telemetry_leak": "Tested: no planted value reached a log channel, a written file or a telemetry surface. "
                       "Not testable from outside: whether the server keeps an audit trail at all.",
-    "lethal_trifecta": "Tested: no destination named by untrusted content received private data, and this server "
-                       "alone does not combine the three legs. Not tested here: subversion of a real agent "
-                       "(agent red-team).",
+    "lethal_trifecta": "Tested: no destination named by untrusted content received private data. Whether this server "
+                       "alone offers all three legs is stated in its exposure note. Not tested here: subversion of "
+                       "a real agent (agent red-team).",
 }
 
 
@@ -214,11 +214,14 @@ COMPLIANCE_XWALK = {
 _INTENT_FLOW_TOOL = re.compile(r"fetch|http|\bweb\b|url|scrape|crawl|browse|search|download|request", re.I)
 
 
-def _mcp06_exposure(surface: dict) -> dict:
+def _mcp06_exposure(surface: dict, probe_results=()) -> dict:
     """Basic-scan flag for OWASP MCP06 (intent-flow / prompt-injection-via-context, the MCP-00 class):
     the server-side ENABLING CONDITIONS, not a confirmed finding. Confirmation needs the Advanced
     Agent Red-Team (a real agent in the loop)."""
     reasons = []
+    for r in probe_results:                 # the lethal_trifecta probe found all three legs in this one server
+        if r.probe == "lethal_trifecta" and r.tool == "(server)" and r.confirmation_method == "by_design":
+            reasons.append("all three lethal-trifecta legs are present in this one server (" + r.evidence + ")")
     if surface.get("resources"):
         reasons.append(f"exposes {len(surface['resources'])} resource(s) whose content is routed to the "
                        "model (direct MCP-00 / context-injection vector)")
@@ -380,7 +383,7 @@ async def run_full_scan(argv: list[str], env: dict | None = None, pkg_name: str 
         "findings": findings,
         "surface": surface,
         "coverage": coverage,
-        "mcp06": _mcp06_exposure(surface),
+        "mcp06": _mcp06_exposure(surface, probe_results),
         "compliance": compliance,
         "supply_posture": supply_posture,
         "token_passthrough_transcript": tok.transcript,
