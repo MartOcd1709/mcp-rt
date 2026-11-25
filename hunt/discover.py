@@ -15,31 +15,71 @@ deliberately NOT done here — that belongs behind the same consent gate as `mcp
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Known client config locations (home-level). Project-level files are found by walking --root.
+# Known client config locations, relative to a user's profile folder. Project-level files are found by walking --root.
 # Breadth matters: a server we never enumerate is a server we can never assess ("nothing missed").
+# ONE list for every OS: a location that belongs to another OS simply does not exist on this machine, so there is no
+# per-platform branch to get wrong (and a Linux test can plant a macOS or Windows layout and run the real code).
+# Desktop apps keep per-user data in a different folder on each OS; _per_os() writes one location out three times.
+_APP_DIRS = (".config", "Library/Application Support", "AppData/Roaming")      # Linux, macOS, Windows (%APPDATA%)
+
+
+def _per_os(rel: str) -> list[str]:
+    return [f"{base}/{rel}" for base in _APP_DIRS]
+
+
+# Locations were checked against each vendor's documentation on 2026-11-26. A "*" matches any one folder or file
+# name. Three confidence groups, kept apart so a claim about coverage can say which is which.
 _HOME_CONFIGS = [
+    # --- documented by the vendor; a dot-folder in the profile, so the same on every OS ---
     ".cursor/mcp.json",                                            # Cursor
     ".codex/config.toml",                                          # OpenAI Codex CLI
     ".gemini/settings.json",                                       # Gemini CLI
-    ".cline/data/settings/cline_mcp_settings.json",                # Cline
-    ".roo/mcp.json",                                               # Roo Code
-    ".config/Claude/claude_desktop_config.json",                   # Claude Desktop (Linux)
-    "Library/Application Support/Claude/claude_desktop_config.json",  # Claude Desktop (macOS)
+    ".cline/data/settings/cline_mcp_settings.json",                # Cline CLI
     ".claude.json",                                                # Claude Code (user scope)
-    ".config/Code/User/settings.json", ".vscode/mcp.json",         # VS Code / Copilot
+    ".copilot/mcp-config.json",                                    # GitHub Copilot CLI / Copilot agent
     ".codeium/windsurf/mcp_config.json",                           # Windsurf
-    ".continue/config.json",                                       # Continue
-    ".config/zed/settings.json",                                   # Zed (context_servers)
-    ".aws/amazonq/mcp.json",                                       # Amazon Q
-    ".config/github-copilot/mcp.json",                             # Copilot CLI
-    ".witsy/mcp.json",                                             # Witsy
+    ".codeium/windsurf-next/mcp_config.json",                      # Windsurf pre-release
+    ".continue/config.json", ".continue/config.yaml",              # Continue
+    ".aws/amazonq/mcp.json", ".aws/amazonq/default.json",          # Amazon Q Developer (legacy file, agent file)
+    ".aws/amazonq/agents/default.json", ".aws/amazonq/cli-agents/*.json",
+    ".kiro/settings/mcp.json",                                     # Kiro
+    ".lmstudio/mcp.json",                                          # LM Studio
+    # --- documented by the vendor; a per-user app folder that sits in a different place on each OS ---
+    *_per_os("Claude/claude_desktop_config.json"),                 # Claude Desktop
+    *_per_os("devin/mcp_config.json"),                             # Windsurf after its rename to Devin Desktop
+    ".config/zed/settings.json",                                   # Zed on macOS and Linux (context_servers)
+    ".config/goose/config.yaml", "AppData/Roaming/Block/goose/config/config.yaml",     # Goose
+    # --- from the vendor's source code or the platform's convention, not stated in its docs ---
+    *_per_os("Code/User/mcp.json"), *_per_os("Code/User/profiles/*/mcp.json"),   # VS Code: user-level, named profiles
+    *_per_os("Code/User/settings.json"),                           # VS Code before 1.102 ("mcp" key in settings)
+    *_per_os("Code - Insiders/User/mcp.json"),                     # VS Code Insiders
+    *_per_os("Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json"),   # Cline in VS Code
+    *_per_os("Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json"),     # Roo Code in VS Code
+    "AppData/Roaming/Zed/settings.json", ".var/app/dev.zed.Zed/config/zed/settings.json",          # Zed: Windows, Flatpak
+    ".continue/mcpServers/*.yaml", ".continue/mcpServers/*.json",  # Continue: one file per server
+    # --- candidates no vendor documents: a wrong guess costs one check for a file that is not there ---
+    ".vscode/mcp.json", ".roo/mcp.json", ".witsy/mcp.json", ".codeium/mcp_config.json",
+    ".config/github-copilot/mcp.json", ".config/github-copilot/intellij/mcp.json",
+    "AppData/Local/github-copilot/intellij/mcp.json",
+]
+# Servers an administrator deployed for EVERY user of the machine, outside any profile. Relative to the filesystem
+# root (the system drive on Windows); all vendor-documented.
+_SYSTEM_CONFIGS = [
+    "etc/claude-code/managed-mcp.json", "Library/Application Support/ClaudeCode/managed-mcp.json",
+    "Program Files/ClaudeCode/managed-mcp.json",                   # Claude Code, admin-managed
+    "etc/gemini-cli/settings.json", "Library/Application Support/GeminiCli/settings.json",
+    "ProgramData/gemini-cli/settings.json",                        # Gemini CLI, system-wide
+    "etc/codex/config.toml", "etc/codex/managed_config.toml",      # Codex CLI, system-wide
 ]
 _PROJECT_GLOBS = (".mcp.json", "mcp_settings.json", ".cursor/mcp.json",
-                  ".gemini/settings.json", ".vscode/mcp.json", ".roo/mcp.json")
+                  ".gemini/settings.json", ".vscode/mcp.json", ".roo/mcp.json",
+                  ".kiro/settings/mcp.json", ".amazonq/mcp.json", ".amazonq/default.json", ".codex/config.toml",
+                  ".devin/mcp_config.json", ".github/mcp.json")
 
 # ---- Secret redaction: discovery must never surface a credential value, anywhere. ---------------
 _SECRET_ARG = re.compile(
@@ -70,50 +110,76 @@ class DiscoveredServer:
                 "launch": self.launch, "env_keys": self.env_keys, "state": self.state}
 
 
-def _servers_from_obj(obj: dict) -> dict:
-    """Pull an {name: spec} server map from any known config shape."""
+def _servers_from_obj(obj, yaml_file: bool = False) -> dict:
+    """Pull an {name: spec} server map from any known config shape. Never raises on an unexpected shape: a config
+    we cannot read is skipped, it must not take the whole inventory down."""
     if not isinstance(obj, dict):
         return {}
-    return (obj.get("mcpServers") or obj.get("mcp_servers") or obj.get("servers")
-            or (obj.get("mcp") or {}).get("servers") or {})
+    mcp = obj.get("mcp")
+    found = (obj.get("mcpServers") or obj.get("mcp_servers") or obj.get("servers")
+             or (mcp.get("servers") if isinstance(mcp, dict) else None)
+             or obj.get("context_servers")                         # Zed
+             or (obj.get("extensions") if yaml_file else None)     # Goose (YAML only: elsewhere the word means plugins)
+             or {})
+    if isinstance(found, list):                                    # Continue's YAML lists servers, each with its name
+        found = {str(s.get("name") or f"server-{i + 1}"): s for i, s in enumerate(found) if isinstance(s, dict)}
+    return found if isinstance(found, dict) else {}
 
 
 def _parse(path: Path) -> list[DiscoveredServer]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        text = path.read_text(encoding="utf-8-sig")     # Windows editors save a byte-order mark; json.loads rejects it
+    except (OSError, UnicodeError):
         return []
+    is_yaml = path.suffix in (".yaml", ".yml")
     try:
         if path.suffix == ".toml":
             import tomllib
             obj = tomllib.loads(text)
+        elif is_yaml:
+            import yaml
+            obj = yaml.safe_load(text)
         else:
             obj = json.loads(re.sub(r"(^|\s)//.*", "", text))   # tolerate // comments (VS Code)
     except Exception:  # noqa: BLE001 — unparseable config is skipped, not fatal
         return []
     out = []
-    for name, spec in _servers_from_obj(obj).items():
+    for name, spec in _servers_from_obj(obj, is_yaml).items():
         if not isinstance(spec, dict):
             continue
-        sp = spec.get("transport", spec)    # Cline wraps the real spec under "transport"
-        url = sp.get("url", "")
-        if url:
-            out.append(DiscoveredServer(name, str(path), "http", url,
-                                        list((sp.get("env") or {}).keys())))
-        elif sp.get("command"):
-            launch = (sp["command"] + " " + " ".join(sp.get("args", []))).strip()
-            out.append(DiscoveredServer(name, str(path), "stdio", launch,
-                                        list((sp.get("env") or {}).keys())))
+        # Cline wraps the real spec under "transport"; elsewhere that key is just a word like "stdio"
+        sp = spec["transport"] if isinstance(spec.get("transport"), dict) else spec
+        if sp.get("type") in ("builtin", "platform", "frontend"):   # Goose's own built-ins are not installed servers
+            continue
+        # clients name the same three things differently: read every spelling
+        url = sp.get("url") or sp.get("uri") or sp.get("serverUrl") or sp.get("httpUrl") or ""
+        command, args, env = sp.get("command") or sp.get("cmd"), sp.get("args") or [], sp.get("env") or sp.get("envs")
+        if isinstance(command, dict):                               # older Zed: command is {path, args, env}
+            command, args, env = command.get("path"), command.get("args") or [], env or command.get("env")
+        elif isinstance(command, list) and command:
+            command, args = command[0], [*command[1:], *args]
+        env_keys = list(env.keys()) if isinstance(env, dict) else []
+        if isinstance(url, str) and url:
+            out.append(DiscoveredServer(str(name), str(path), "http", url, env_keys))
+        elif isinstance(command, str) and command:
+            launch = " ".join(str(a) for a in [command, *(args if isinstance(args, list) else [])]).strip()
+            out.append(DiscoveredServer(str(name), str(path), "stdio", launch, env_keys))
     return out
+
+
+def discover_system_configs(root: Path | None = None) -> list[DiscoveredServer]:
+    """Servers an administrator deployed for every user of this machine (admin-managed files outside any profile)."""
+    root = root or Path(os.environ.get("SystemDrive", "C:") + "\\" if os.name == "nt" else "/")
+    return [s for rel in _SYSTEM_CONFIGS for s in _parse(root / rel)]
 
 
 def discover_configs(home: Path | None = None, roots: list | None = None) -> list[DiscoveredServer]:
     home = home or Path.home()
     found: list[DiscoveredServer] = []
     for rel in _HOME_CONFIGS:
-        p = home / rel
-        if p.is_file():
-            found += _parse(p)
+        for p in (sorted(home.glob(rel)) if "*" in rel else [home / rel]):
+            if p.is_file():
+                found += _parse(p)
     for root in (roots or []):
         root = Path(root)
         for g in _PROJECT_GLOBS:
@@ -159,14 +225,24 @@ def discover_processes() -> list[DiscoveredServer]:
     up here and nowhere else. Command lines are redacted (a token passed as an arg never leaks)."""
     import shutil
     import subprocess
-    if not shutil.which("ps"):
+    import sys
+    if not shutil.which("ps"):                       # Windows has none: the runner lists processes its own way
         return []
+    # BSD ps (macOS) reads -e as "print each process's ENVIRONMENT", which would dump every variable and still not
+    # list every process; -ax is its "all processes".
+    argv = ["ps", "-axww", "-o", "args="] if sys.platform == "darwin" else ["ps", "-eo", "args"]
     try:
-        txt = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, timeout=10).stdout
+        txt = subprocess.run(argv, capture_output=True, text=True, timeout=10).stdout
     except Exception:  # noqa: BLE001
         return []
+    return processes_from_cmdlines(txt.splitlines())
+
+
+def processes_from_cmdlines(cmdlines) -> list[DiscoveredServer]:
+    """The name heuristic over command lines, however the caller listed the processes (`ps` here, psutil in the
+    runner, so the same rule applies on Linux, macOS and Windows)."""
     out, seen = [], set()
-    for line in txt.splitlines():
+    for line in cmdlines:
         cmd = line.strip()
         low = cmd.lower()
         if "mcp" not in low or not _PROC_HINT.search(low):
@@ -186,8 +262,8 @@ def _proc_name(cmd: str) -> str:
     for tok in cmd.split():
         t = tok.strip("'\"")
         if "mcp" in t.lower() and not _PROC_HINT.fullmatch(t):
-            return t.rsplit("/", 1)[-1][:60]
-    return (cmd.split() or ["mcp-process"])[0].rsplit("/", 1)[-1][:60]
+            return re.split(r"[\\/]", t)[-1][:60]
+    return re.split(r"[\\/]", (cmd.split() or ["mcp-process"])[0])[-1][:60]
 
 
 def discover(roots: list | None = None) -> list[DiscoveredServer]:
