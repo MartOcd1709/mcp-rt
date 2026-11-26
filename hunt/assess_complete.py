@@ -89,16 +89,25 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
         _emit(progress, f"  direct probes could not run: {str(e)[:100]}")
 
     # ---- 2. MCP-CAP — undeclared-capability hunt (novel MCP-00 class) ------------------------
+    cap_cov: list[dict] = []
     if do_cap:
         _emit(progress, "phase 2/4 · MCP-CAP — undeclared-capability hunt (MCP-00, strace sensor)…")
         try:
             from hunt.hunt_cap import run_cap_hunt, strace_available
+            from hunt.probes import verdict_for
             if strace_available():
                 status, hyps = run_cap_hunt(cmd)
+                cap_rows = getattr(hyps, "rows", [])     # every judged row of the same traced run, not only leads
                 for h in hyps:
                     leads.append({"kind": "MCP-CAP", "tool": getattr(h, "tool", ""),
                                   "observation": getattr(h, "observation", "")})
-                components["mcp_cap"] = f"ran ({status}, {len(hyps)} lead(s))"
+                # every judged row is shown, so what was ruled by design (and why) is visible, never dropped
+                cap_cov = [{"tool": r.tool, "cls": "mcp_cap", "verdict": verdict_for(r.method),
+                            "source": "capability trace",
+                            "detail": " ".join(x for x in (r.cap, r.detail, f"({r.why})" if r.why else "") if x)}
+                           for r in cap_rows]
+                shown = sum(r.method == "by_design" for r in cap_rows)
+                components["mcp_cap"] = f"ran ({status}, {len(hyps)} lead(s), {shown} by design)"
                 _emit(progress, f"  MCP-CAP: {status}, {len(hyps)} undeclared-capability lead(s)")
             else:
                 components["mcp_cap"] = "skipped: strace not installed"
@@ -190,7 +199,7 @@ def run_complete(target: str, *, progress=None, do_cap: bool = True, do_agent: b
             "chains": chains, "components": components, "note": note, "surface": surface,
             "compliance": merge_compliance(phase1.get("compliance") or [], findings, leads,
                                            components.get("mcp00_proof", "")),
-            "coverage": (phase1.get("coverage") or []) + canary_cov, "mcp06": phase1.get("mcp06") or {},
+            "coverage": (phase1.get("coverage") or []) + cap_cov + canary_cov, "mcp06": phase1.get("mcp06") or {},
             "canary": canary,
             "supply_posture": phase1.get("supply_posture")}
 

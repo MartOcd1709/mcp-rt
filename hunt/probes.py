@@ -63,6 +63,8 @@ _METHOD_VERDICT = {
     "cross_surface_echo": SUSPECTED,    # a planted value was read back through another channel, but the value was
                                         # not secret-typed or the channel may be the tool's own store (telemetry_leak)
     "partial_chain":   SUSPECTED,       # part of an exploit chain was demonstrated; the damaging leg was not
+    "observed_undeclared": SUSPECTED,   # a traced action (a program run, a write, a connection) that neither the
+                                        # tool's text, its launch workspace nor its identity accounts for (mcp_cap)
     "oracle_negative": CLEAN,           # the oracle ran and nothing fired
     "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
