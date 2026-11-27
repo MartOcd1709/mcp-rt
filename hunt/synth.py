@@ -31,6 +31,7 @@ class Context:
     base_dir: str = "."                       # a real, writable directory the harness owns (workdir)
     url: str | None = None                    # a real URL that resolves inside the seal (the recorder), for url params
     paths: list[str] = field(default_factory=list)      # real paths harvested from argv (repo, db, dirs, files)
+    launch: list[str] = field(default_factory=list)     # the argv paths themselves, without the added parent folders
     strings: list[str] = field(default_factory=list)    # identifier-like strings harvested from read-tool output
     token: str = ""                           # the run token (so a synthesized value still carries it when harmless)
 
@@ -240,9 +241,9 @@ def repair(args: dict, schema: dict, ctx: Context, error_text: str) -> dict | No
 _PATH_FLAG = re.compile(r"(?i)^--?(repo(sitory)?|db([_-]?path)?|dir|root|path|file|work([_-]?tree)?|cwd|source)$")
 
 
-def harvest_argv(argv) -> list[str]:
+def harvest_argv(argv, parents: bool = True) -> list[str]:
     """Real paths the server was launched with: a `--repository /srv/x` value, a bare absolute path argument, and
-    the parent directory of a file argument (its directory is usually a valid target too)."""
+    (parents=True) the parent directory of each (its directory is usually a valid target too)."""
     toks = argv if isinstance(argv, list) else shlex.split(str(argv))
     paths, i = [], 0
     while i < len(toks):
@@ -258,7 +259,7 @@ def harvest_argv(argv) -> list[str]:
         if val and val.startswith("/"):
             paths.append(val)
             d = os.path.dirname(val)
-            if d and d != "/" and d not in paths:
+            if parents and d and d != "/" and d not in paths:
                 paths.append(d)
         i += 1
     # de-dup, keep order
