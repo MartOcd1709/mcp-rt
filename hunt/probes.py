@@ -65,6 +65,10 @@ _METHOD_VERDICT = {
     "partial_chain":   SUSPECTED,       # part of an exploit chain was demonstrated; the damaging leg was not
     "observed_undeclared": SUSPECTED,   # a traced action (a program run, a write, a connection) that neither the
                                         # tool's text, its launch workspace nor its identity accounts for (mcp_cap)
+    "unscoped_leak":   SUSPECTED,       # path_traversal: a tool that is not a file reader returned our planted file,
+                                        # but no root is known, so the boundary it crossed is not established
+    "link_listed_unread": SUSPECTED,    # path_traversal: a folder tool listed our outside link, but its output did not
+                                        # depend on the linked content (it may stat or follow the link without showing it)
     "oracle_negative": CLEAN,           # the oracle ran and nothing fired
     "refusal":         CLEAN,           # the server deliberately refused / validated (control works)
     "by_design":       CLEAN,           # a dedicated tool did its advertised job (not a finding)
@@ -72,6 +76,8 @@ _METHOD_VERDICT = {
     "positive_control_unverified": INCONCLUSIVE,  # a probe's OWN precondition failed (path_traversal: the
                                                   # tool never reached its own in-root canary) — an
                                                   # out-of-root result cannot be trusted (not CLEAN/PROVEN)
+    "write_into_root_off":         INCONCLUSIVE,  # path_traversal: the variant writes into the server's own root
+                                                  # (e.g. staging into its repository); write-into-root mode is off
     "redirect_not_confirmed":      INCONCLUSIVE,  # #28 upstream-redirect SSRF: the server never called the
                                                   # sentinel upstream, or used TLS we can't terminate to emit
                                                   # the 302 — the redirect-follow is unobservable (not CLEAN)
@@ -234,9 +240,12 @@ def _schema(tool) -> dict:
     return s if isinstance(s, dict) else {}
 
 
-def _str_params(tool) -> list[str]:
+def _str_params(tool, arrays: bool = False) -> list[str]:
+    """String params; with arrays=True also array-of-string params (a list of paths takes a payload as a member)."""
     props = _schema(tool).get("properties", {}) or {}
-    return [n for n, s in props.items() if (s or {}).get("type", "string") == "string"]
+    return [n for n, s in props.items() if (s or {}).get("type", "string") == "string"
+            or (arrays and (s or {}).get("type") == "array"
+                and ((s or {}).get("items") or {}).get("type", "string") == "string")]
 
 
 def _ptype(tool, name: str) -> str:
@@ -247,7 +256,7 @@ def _matching_params(tool, param_re) -> list[str]:
     return [p for p in _str_params(tool) if param_re.search(p)]
 
 
-def _candidate_params(tool, param_re, desc_re, fallback) -> list[str]:
+def _candidate_params(tool, param_re, desc_re, fallback, arrays: bool = False) -> list[str]:
     """String params worth injecting into for this flaw.
 
     From the declared schema when it has params; otherwise (a server that under-declares its
@@ -255,7 +264,7 @@ def _candidate_params(tool, param_re, desc_re, fallback) -> list[str]:
     but only when the tool's name/description fits the category, so we don't blind-probe
     everything.
     """
-    params = _str_params(tool)
+    params = _str_params(tool, arrays)
     if params:
         named = [p for p in params if param_re.search(p)]
         if named:
@@ -550,6 +559,123 @@ async def _allowed_roots(session, tools) -> list[str]:
     return roots
 
 
+def _launch_roots() -> list[str]:
+    """Folders the server was launched with (`--repository /srv/repo`, a bare folder argument): a declared boundary
+    too. Only the argv paths themselves; the parent folders synth adds are not roots (else /srv would be one)."""
+    out = []
+    for p in (_SYNTH_CTX.launch if _SYNTH_CTX is not None else []):
+        rp = os.path.realpath(p)
+        if os.path.isdir(rp) and rp != os.sep and rp not in out:
+            out.append(rp)
+    return out
+
+
+def _rm(p) -> None:
+    """Remove whatever is at p (file, link or folder): a tool may have made a folder where we expected a file."""
+    p = Path(p)
+    try:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+_SNAP_MAX_BYTES = 32 << 20     # ponytail: in-memory snapshot; a larger root is not touched (variant INCONCLUSIVE)
+
+
+def _snapshot(root: str):
+    """Every entry under root (file bytes + mode + times, link targets, folders), so a variant that writes into the
+    server's own root can put back whatever it touched. None when the tree is too large to hold."""
+    snap, total = {}, 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            p = os.path.join(dirpath, n)
+            st = os.lstat(p)
+            if os.path.islink(p):
+                snap[p] = ("link", os.readlink(p))
+            elif os.path.isdir(p):
+                snap[p] = ("dir",)
+            elif os.path.isfile(p):
+                total += st.st_size
+                if total > _SNAP_MAX_BYTES:
+                    return None
+                snap[p] = ("file", Path(p).read_bytes(), st.st_mode, st.st_atime_ns, st.st_mtime_ns)
+    return snap
+
+
+def _restore(root: str, snap: dict) -> None:
+    """Undo everything under root since _snapshot: remove new entries, put back changed or missing ones."""
+    os.makedirs(root, exist_ok=True)
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        for n in filenames + dirnames:
+            p = os.path.join(dirpath, n)
+            was = snap.get(p)
+            now = "link" if os.path.islink(p) else "dir" if os.path.isdir(p) else "file"
+            if was is None or was[0] != now or (now == "link" and os.readlink(p) != was[1]):
+                _rm(p)
+    for p, was in sorted(snap.items()):
+        if was[0] == "dir":
+            os.makedirs(p, exist_ok=True)
+        elif was[0] == "link":
+            if not os.path.islink(p):
+                os.symlink(was[1], p)
+        elif not os.path.isfile(p) or Path(p).read_bytes() != was[1]:
+            Path(p).write_bytes(was[1])
+            os.chmod(p, was[2] & 0o7777)
+            os.utime(p, ns=(was[3], was[4]))
+
+
+# Path parameters are tagged by what they name: a CONTAINER (the folder a tool works in: a repository, project,
+# workspace, root) or a MEMBER (a file inside it). Read from the parameter's own name words and description, never
+# from tool names. A container gets the folder tests (scope link, observer); only a member carries a file payload.
+_CONTAINER_WORD = re.compile(r"\b(repo|repos|repository|repositories|dir|dirs|directory|directories|folder|folders|"
+                             r"project|root|workspace|workdir|cwd|worktree)\b", re.I)
+_FILE_WORD = re.compile(r"\b(files?|filenames?|filepaths?|docs?|documents?)\b", re.I)
+
+
+def _words(name: str) -> str:
+    return re.sub(r"([a-z])([A-Z])", r"\1 \2", name).replace("_", " ").replace("-", " ")
+
+
+def _scope_params(tool) -> tuple[list[str], list[str]]:
+    """(containers, members) among the tool's string and string-array params."""
+    props = _schema(tool).get("properties", {}) or {}
+    containers, members = [], []
+    for n in _str_params(tool, arrays=True):
+        w, desc = _words(n), str((props.get(n) or {}).get("description", ""))
+        if _CONTAINER_WORD.search(w) and not _FILE_WORD.search(w):
+            containers.append(n)
+        elif _FILE_WORD.search(w):
+            members.append(n)
+        elif _PATH_PARAM.search(n) or re.search(r"\bpaths?\b|folder|director", desc, re.I):
+            # a neutral name (path, location, target): its description decides; untold -> a member, as before
+            (containers if _CONTAINER_WORD.search(desc) and not _FILE_WORD.search(desc) else members).append(n)
+    return containers, members
+
+
+# A tool whose declared job is reading a file the caller names (read/open/view/cat a file): with no known root, a
+# plain out-of-root read is its contract (by_design). Any other tool that hands back our planted file is a lead.
+_FILE_READ_PURPOSE = re.compile(
+    r"\b(read|reads|open|opens|view|show|cat|display|print|load|loads|get|gets|retrieve|retrieves)\b"
+    r".{0,40}\b(files?|documents?|docs?|contents?|text)\b", re.I)
+
+
+def _file_read_by_design(tool) -> bool:
+    return bool(_FILE_READ_PURPOSE.search(f"{tool.description or ''} {_words(tool.name)}"))
+
+
+# File names a folder tool says it looks for (".ci.yml", "config/app.json"): taken from its description as data.
+_DESC_FILE = re.compile(r"(?<![\w/.-])((?:\.?[\w-]+/)*\.?[\w-]*\.(?:ya?ml|json|toml|ini|cfg|conf|txt|md|xml|env|"
+                        r"properties|lock|sh|py|js|ts))\b", re.I)
+
+
+def _desc_file_names(tool) -> list[str]:
+    names = [n for n in _DESC_FILE.findall(tool.description or "") if ".." not in n.split("/")][:4]
+    return list(dict.fromkeys(names + ["notes.txt"]))
+
+
 def _outside_root_dir(roots: list[str]):
     """A fresh temp dir guaranteed to sit OUTSIDE every root; None if the roots cover all candidates."""
     for base in ("/tmp", "/var/tmp", "/dev/shm", str(Path.home()), tempfile.gettempdir()):
@@ -567,7 +693,7 @@ def _outside_root_dir(roots: list[str]):
 # a cleaned-up canary in the root's PARENT (outside the managed area) → default-on, gated only by a
 # writable parent. B (in-root symlink) mutates the server's own managed root → OPT-IN, default off.
 _ALLOW_WRITE_INTO_ROOT = os.environ.get("MCPRT_ALLOW_WRITE_INTO_ROOT", "") == "1"
-_OUTPUT_DESC = re.compile(r"screenshot|screen[-_ ]?shot|\bpdf\b|snapshot|\bsave\b|export|download|"
+_OUTPUT_DESC = re.compile(r"screenshot|screen[-_ ]?shot|\bpdf\b|snapshot|\bsave\b|\bexport\b|download|"
                           r"capture|dump|\brender\b", re.I)
 _OUTPUT_PARAM = re.compile(r"filename|file|path|out(put)?|dest(ination)?|save|target|to", re.I)
 
@@ -725,7 +851,7 @@ async def _read_control(session, tool, params, roots, cleanups, tools):
         return await _relative_roundtrip(session, tools, cleanups)
     cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
     cmk = "PTCTL-" + uuid.uuid4().hex[:12]
-    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    cleanups.append(lambda p=cf: _rm(p))
     try:
         cf.write_text(cmk)
     except Exception:  # noqa: BLE001
@@ -749,13 +875,13 @@ async def _write_control(session, tool, path_p, content_p, roots, cleanups, tool
         return await _relative_roundtrip(session, tools, cleanups)
     cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
     cmk = "PTCTL-" + uuid.uuid4().hex[:12]
-    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    cleanups.append(lambda p=cf: _rm(p))
     try:
         await session.call_tool(tool.name, _build_args(tool, {path_p: str(cf), content_p: cmk}))
     except Exception:  # noqa: BLE001
         pass
     await asyncio.sleep(0.1)
-    if cf.exists() and cmk in cf.read_text(errors="replace"):
+    if cf.is_file() and cmk in cf.read_text(errors="replace"):
         return True, "tool wrote its own in-root canary via a plain path"
     return False, "tool did not write its own in-root canary via a plain path"
 
@@ -767,7 +893,7 @@ async def _output_control(session, tool, op, roots, cleanups, tools):
     if not wr:
         return await _relative_roundtrip(session, tools, cleanups)
     cf = Path(wr) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".out")
-    cleanups.append(lambda p=cf: p.unlink(missing_ok=True))
+    cleanups.append(lambda p=cf: _rm(p))
     try:
         await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, str(cf))}))
     except Exception:  # noqa: BLE001
@@ -778,9 +904,153 @@ async def _output_control(session, tool, op, roots, cleanups, tools):
     return False, "tool did not write its own in-root output canary via a plain path"
 
 
+async def _call_text(session, tool, overrides: dict) -> str:
+    """The text a call answers with; a raised error counts as its answer (an error can carry file content too)."""
+    try:
+        return _result_text(await session.call_tool(tool.name, _build_args(tool, overrides)))
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+
+
+def _observer_param(tool):
+    """The container param of a tool whose ONLY required argument is a container (status / diff / show of a
+    folder): such a tool shows what another tool did to that folder. None otherwise."""
+    props = _schema(tool).get("properties", {}) or {}
+    req = list(_schema(tool).get("required", list(props)))
+    return req[0] if len(req) == 1 and req[0] in _scope_params(tool)[0] else None
+
+
+async def _member_variant(session, tool, tools, containers, members, roots, d, cleanups) -> ProbeResult:
+    """A tool that takes the server's folder plus files inside it (stage / add / index these files). The folder is the
+    server's own root and the file payload goes in the member param; the planted marker is looked for in the reply AND
+    through every observer, since such a tool often answers "ok" and shows the file only later. The calls can write
+    into the server's root, so this runs only in write-into-root mode, under a snapshot that puts back whatever they
+    touched."""
+    mk = "PTM-" + uuid.uuid4().hex[:12]
+    if not _ALLOW_WRITE_INTO_ROOT:
+        return ProbeResult("path_traversal", tool.name, "write_into_root_off", marker=mk,
+            rationale="files-inside-the-server's-folder variant NOT run: its calls write into the server's own root "
+                      "(e.g. staging into its repository); set MCPRT_ALLOW_WRITE_INTO_ROOT=1 on a server you own")
+    root = _writable_root(roots)
+    snap = _snapshot(root) if root else None
+    if snap is None:
+        return _pt_inconclusive(tool.name, mk, "the server root is not writable or too large to snapshot and restore")
+    outside = d / ("member_" + uuid.uuid4().hex[:8] + ".txt")     # the marker is its content, never its name
+    outside.write_text(mk)
+    payloads = [(str(outside), mk, "plain-absolute-outside"), (os.path.relpath(outside, root), mk, "dotdot-outside")]
+    sp = _plant_sibling(root, cleanups)
+    if sp:
+        payloads.append((sp[0], sp[1], "sibling-prefix"))
+    fill = {c: root for c in containers}
+    observers = [(t, _observer_param(t)) for t in tools if t.name != tool.name and _observer_param(t)]
+
+    async def look(value) -> list[tuple[str, str]]:
+        seen = []
+        for m in members:
+            seen.append(("its reply", await _call_text(session, tool, {**fill, m: _inject(tool, m, value)})))
+            for ob, p in observers:
+                seen.append((f"observer {ob.name}", await _call_text(session, ob, {p: root})))
+        return seen
+
+    try:
+        answers = []
+        for value, expect, label in payloads:
+            seen = await look(value)
+            hit = next((where for where, t in seen if expect in t), None)
+            if hit:
+                return ProbeResult("path_traversal", tool.name, "oracle", marker=expect,
+                    evidence=f"{tool.name}({label}) -> {hit}",
+                    rationale=f"the server declares a root, yet a file outside it passed as a member of its folder "
+                              f"({label}) came back through {hit} — the boundary is NOT enforced for member paths")
+            answers += [t for _, t in seen]
+        cf = Path(root) / ("pt_ctrl_" + uuid.uuid4().hex[:8] + ".txt")
+        cmk = "PTCTL-" + uuid.uuid4().hex[:12]
+        cf.write_text(cmk)
+        seen = await look(cf.name)
+        if not any(cmk in t for _, t in seen):
+            seen = await look(str(cf))
+        if not any(cmk in t for _, t in seen):
+            return _pt_inconclusive(tool.name, mk, "neither the tool nor an observer showed an in-root file passed "
+                                                   "as a member of its folder")
+        if any(_is_refusal(t) for t in answers):
+            return ProbeResult("path_traversal", tool.name, "refusal", marker=mk,
+                rationale="boundary held for member paths: an in-root member was shown, every outside member refused")
+        return ProbeResult("path_traversal", tool.name, "oracle_negative", marker=mk,
+            rationale="no outside member came back in the reply or through an observer (in-root member control passed)")
+    finally:
+        _restore(root, snap)
+
+
+_LINK_DECLINED = re.compile(r"\bskip|\bignor|outside|not follow", re.I)
+
+
+def _two_contents(mk: str) -> tuple[str, str]:
+    """Two contents of the SAME length but different shape (1 line vs 8): output that depends on what a file says,
+    not on its size, tells them apart."""
+    b = "".join(f"k{i}: {mk}-b{i}\n" for i in range(8))
+    return f"k0: {mk}-a ".ljust(len(b) - 1, "x") + "\n", b
+
+
+async def _scope_link(session, tool, containers, roots, d) -> ProbeResult:
+    """A tool that works on a folder (walk / scan / summarise it). The probe builds its OWN folder (never the server's
+    root) and passes it as the container. Control: changing a regular file's content in it must change the output.
+    Then that file becomes a link to a probe-owned file OUTSIDE the folder and the outside content is swapped: output
+    that follows it proves the tool reads through a link out of the scope it was given (differential). Listing the
+    link while the output ignores its content is a lead."""
+    mk = "PTS-" + uuid.uuid4().hex[:10]
+    scope = _outside_root_dir(roots)
+    if scope is None:
+        return _pt_inconclusive(tool.name, mk, "no folder outside the server root to build the scope folder in")
+    names = _desc_file_names(tool)
+    outside = d / f"link_target_{mk}.txt"
+    a_text, b_text = _two_contents(mk)
+    files = [scope / n for n in names]
+
+    def put(path, text):
+        path.write_text(text)
+        os.utime(path, (1_700_000_000, 1_700_000_000))     # same times for both contents: only content differs
+
+    async def run() -> str:
+        return await _call_text(session, tool, {c: str(scope) for c in containers})
+
+    try:
+        for f in files:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            put(f, a_text)
+        a1, a2 = await run(), await run()
+        for f in files:
+            put(f, b_text)
+        if not (a1 == a2 != await run()):
+            return _pt_inconclusive(tool.name, mk, "its output does not change with the content of a regular file "
+                                                   "in the folder passed to it")
+        for f in files:
+            f.unlink()
+            os.symlink(outside, f)
+        put(outside, a_text)
+        la1, la2 = await run(), await run()
+        put(outside, b_text)
+        lb = await run()
+        if la1 == la2 != lb:
+            return ProbeResult("path_traversal", tool.name, "differential", marker=mk,
+                evidence=f"{tool.name}({containers[0]}=<probe folder holding a link to an outside file>)",
+                rationale="the output changed with the content of a file OUTSIDE the folder it was given, reached "
+                          "through a link inside that folder — the tool follows links out of its scope")
+        declined = any(_is_refusal(t) or _LINK_DECLINED.search(t) for t in (la1, lb))
+        if not declined and any(os.path.basename(n) in t for t in (la1, lb) for n in names):
+            return ProbeResult("path_traversal", tool.name, "link_listed_unread", marker=mk,
+                rationale="the tool listed a link pointing outside the folder it was given, but its output did not "
+                          "change with the linked content (it may stat or follow the link without showing it)")
+        return ProbeResult("path_traversal", tool.name, "refusal" if declined else "oracle_negative", marker=mk,
+            rationale="a link out of the folder it was given was not followed (regular-file control passed)")
+    finally:
+        shutil.rmtree(scope, ignore_errors=True)
+        _rm(outside)
+
+
 async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     out = []
     roots = await _allowed_roots(session, tools)   # the server's managed root(s); escapes target OUTSIDE them
+    roots += [r for r in _launch_roots() if r not in roots]     # a folder it was launched with is a boundary too
     if roots:
         d = _outside_root_dir(roots)
         if d is None:   # root covers every candidate (e.g. '/') — no out-of-root path exists to test
@@ -805,15 +1075,16 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
     for root in (roots or []):
         sp = _plant_sibling(root, cleanups)
         if sp:
-            read_payloads.append((sp[0], sp[1], "sibling-prefix (CVE-2025-53110)"))
+            read_payloads.append((sp[0], sp[1], "sibling-prefix"))
             sibling_planted = True
         lk = _plant_symlink(root, cleanups)
         if lk:
-            read_payloads.append((lk[0], lk[1], "symlink (CVE-2025-53109)"))
+            read_payloads.append((lk[0], lk[1], "in-root symlink"))
             symlink_planted = True
     had_reader = False
     try:
-        for tool in tools:
+        async def _one(tool, res):           # one tool's whole test; a failure here never reaches other tools
+            nonlocal had_reader
             writer = _writer_params(tool)
             if writer:                                   # arbitrary-write escape (path + caller content)
                 path_p, content_p = writer
@@ -826,23 +1097,23 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                 # blocked do we test whether a ../ vector ESCAPES the boundary (PROVEN).
                 for lbl, path_val in (("plain-absolute-outside", abs_p),
                                       ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
-                    target.unlink(missing_ok=True)
+                    _rm(target)
                     try:
                         returned.append(_result_text(await session.call_tool(
                             tool.name, _build_args(tool, {path_p: path_val, content_p: wmark}))))
                     except Exception as exc:  # noqa: BLE001
                         raised.append(str(exc))
                     await asyncio.sleep(0.1)
-                    landed[lbl] = target.exists() and wmark in target.read_text(errors="replace")
+                    landed[lbl] = target.is_file() and wmark in target.read_text(errors="replace")
                     if lbl == "plain-absolute-outside" and landed[lbl]:
                         break                              # no boundary -> by_design, don't bother crafting
-                target.unlink(missing_ok=True)
+                _rm(target)
                 refused = any(_is_refusal(t) for t in returned + raised)
                 naive_land = landed.get("plain-absolute-outside")
                 crafted_land = landed.get("dotdot-outside")
                 if naive_land or crafted_land:
                     if roots:                                  # a boundary is DECLARED -> any escape is a finding
-                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                        res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
                             evidence=f"{tool.name}(out-of-root write)",
                             rationale=("the server advertises a root, yet a plain absolute out-of-root write "
                                        "landed — the declared boundary is NOT enforced (arbitrary write)"
@@ -850,30 +1121,30 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                                        "the server advertises a root, a plain absolute out-of-root write was "
                                        "blocked, yet a ../ vector wrote our file outside it — boundary ESCAPED")))
                     elif naive_land:                           # no declared boundary -> unrestricted write is the contract
-                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=wmark,
+                        res.append(ProbeResult("path_traversal", tool.name, "by_design", marker=wmark,
                             evidence=f"{tool.name}(absolute out-of-root write)",
                             rationale="no boundary advertised and a plain absolute out-of-root write already "
                                       "succeeds: unrestricted file write is the tool's declared contract — "
                                       "by-design, not a traversal finding"))
                     else:                                      # SUBCASE-1: no root, plain blocked, ../ escaped
-                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
+                        res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=wmark,
                             evidence=f"{tool.name}(dotdot write escape)",
                             rationale="no advertised root, but a plain absolute out-of-root write was blocked "
                                       "while a ../ vector wrote our file outside — an intended-but-bypassable "
                                       "filter (real traversal write)"))
-                    continue
+                    return
                 # No out-of-root write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
                 ctrl_ok, ctrl_why = await _write_control(session, tool, path_p, content_p, roots, cleanups, tools)
                 if not ctrl_ok:
-                    out.append(_pt_inconclusive(tool.name, wmark, ctrl_why))
+                    res.append(_pt_inconclusive(tool.name, wmark, ctrl_why))
                 elif refused:
-                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=wmark,
+                    res.append(ProbeResult("path_traversal", tool.name, "refusal", marker=wmark,
                         rationale="boundary held: in-bounds write verified, out-of-root write refused (plain and ../)"))
                 else:
-                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=wmark,
+                    res.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=wmark,
                         evidence=f"{tool.name}(write outside root)",
                         rationale="write confined (in-bounds positive control passed; no out-of-root write landed)"))
-                continue
+                return
             op = _output_file_params(tool)
             if op:                                        # output-file tool (content generated internally)
                 omark = "PTC-" + uuid.uuid4().hex[:10]
@@ -884,7 +1155,7 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                 # wherever told (by_design). Only a confined output dir, escaped by a ../ vector, is PROVEN.
                 for lbl, t in (("plain-absolute-outside", abs_p),
                                ("dotdot-outside", "../" * 20 + abs_p.lstrip(os.sep))):
-                    out_file.unlink(missing_ok=True)
+                    _rm(out_file)
                     try:
                         r = await session.call_tool(tool.name, _build_args(tool, {op: _inject(tool, op, t)}))
                         returned.append(_result_text(r))
@@ -894,13 +1165,13 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                     landed[lbl] = out_file.exists()       # OUR uniquely-named file landed outside -> escape
                     if lbl == "plain-absolute-outside" and landed[lbl]:
                         break                              # saves to any absolute path -> by_design
-                out_file.unlink(missing_ok=True)
+                _rm(out_file)
                 refused = any(_is_refusal(t) for t in returned + raised)
                 naive_land = landed.get("plain-absolute-outside")
                 crafted_land = landed.get("dotdot-outside")
                 if naive_land or crafted_land:
                     if roots:                                  # a boundary is DECLARED -> any escape is a finding
-                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                        res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
                             evidence=("absolute-out-of-root" if naive_land else "dotdot-out-of-root"),
                             rationale=("the server advertises a root, yet the tool saved OUR file to a plain "
                                        "absolute out-of-directory path — output confinement NOT enforced"
@@ -908,32 +1179,42 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                                        "the server advertises a root, the plain output path was confined, yet "
                                        "a ../ vector wrote OUR file outside it — boundary ESCAPED (write-escape)")))
                     elif naive_land:                           # no declared boundary -> saves wherever told
-                        out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=omark,
+                        res.append(ProbeResult("path_traversal", tool.name, "by_design", marker=omark,
                             evidence=f"{tool.name}(absolute output path)",
                             rationale="no boundary advertised and a plain absolute output path already "
                                       "succeeds: the tool saves wherever told — by-design"))
                     else:                                      # SUBCASE-1: no root, plain confined, ../ escaped
-                        out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
+                        res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=omark,
                             evidence="dotdot-out-of-root",
                             rationale="no advertised root, but the plain output path was confined while a ../ "
                                       "vector wrote OUR file outside — an intended-but-bypassable filter "
                                       "(real write-escape)"))
-                    continue
+                    return
                 # No out-of-dir write landed -> positive-control split (CLEAN vs INCONCLUSIVE).
                 ctrl_ok, ctrl_why = await _output_control(session, tool, op, roots, cleanups, tools)
                 if not ctrl_ok:
-                    out.append(_pt_inconclusive(tool.name, omark, ctrl_why))
+                    res.append(_pt_inconclusive(tool.name, omark, ctrl_why))
                 elif refused:
-                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=omark,
+                    res.append(ProbeResult("path_traversal", tool.name, "refusal", marker=omark,
                         rationale="output path confined to the output directory (refused out-of-dir writes)"))
                 else:
-                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=omark,
+                    res.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=omark,
                         evidence=f"{tool.name}(output-dir escape)",
                         rationale="output path confined to the output directory (in-bounds positive control passed)"))
-                continue
-            params = _candidate_params(tool, _PATH_PARAM, _READ_DESC, ["path", "file", "filepath", "filename"])
+                return
+            containers, members = _scope_params(tool)
+            if containers and members and roots:     # a file inside the server's own folder (stage/add/index files)
+                had_reader = True
+                res.append(await _member_variant(session, tool, tools, containers, members, roots, d, cleanups))
+                return
+            params = [p for p in _candidate_params(tool, _PATH_PARAM, _READ_DESC,
+                                                   ["path", "file", "filepath", "filename"], arrays=True)
+                      if p not in containers]       # a folder-scope param never carries a file payload
+            if containers and not params:            # a folder tool (walk / scan / summarise a folder)
+                res.append(await _scope_link(session, tool, containers, roots, d))
+                return
             if not params:
-                continue
+                return
             had_reader = True
             naive = [v for v in read_payloads if v[2] in _PT_NAIVE_LABELS]
             crafted = [v for v in read_payloads if v[2] not in _PT_NAIVE_LABELS]
@@ -977,46 +1258,60 @@ async def probe_path_traversal(session, tools) -> list[ProbeResult]:
                         break
             if naive_leak or crafted_leak:
                 if roots:                                    # a boundary is DECLARED -> any out-of-root reach is a finding
-                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
-                        rationale=("the server advertises a root, yet a plain out-of-root path returned the "
+                    res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                        rationale=("the server declares a root, yet a plain out-of-root path returned the "
                                    "canary — the declared boundary is NOT enforced" if naive_leak else
-                                   f"the server advertises a root, a plain out-of-root path did not leak, yet a "
+                                   f"the server declares a root, a plain out-of-root path did not leak, yet a "
                                    f"crafted vector ({how}) returned the out-of-root canary — boundary ESCAPED")))
+                elif not _file_read_by_design(tool):         # no known root, and reading files is not its job
+                    res.append(ProbeResult("path_traversal", tool.name, "unscoped_leak", marker=marker, evidence=used,
+                        rationale=f"a tool whose stated job is not reading files returned our planted out-of-root "
+                                  f"file ({how}); no root is known for this server, so the boundary it crossed "
+                                  "is not established — a lead, not a proof"))
                 elif naive_leak:                             # no declared boundary -> unrestricted read is the contract
-                    out.append(ProbeResult("path_traversal", tool.name, "by_design", marker=marker,
+                    res.append(ProbeResult("path_traversal", tool.name, "by_design", marker=marker,
                         evidence=f"{tool.name} <- {how}",
                         rationale="no boundary advertised and a plain out-of-root path already returns the "
                                   "canary: unrestricted read is the tool's declared contract — by-design, "
                                   "not traversal"))
                 else:                                        # SUBCASE-1: no root, plain denied, crafted leaked
-                    out.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
+                    res.append(ProbeResult("path_traversal", tool.name, "oracle", marker=marker, evidence=used,
                         rationale=f"no advertised root, but a plain out-of-root path was denied while a crafted "
                                   f"vector ({how}) returned the out-of-root canary — an intended-but-bypassable "
                                   "filter (real traversal)"))
             else:                                            # no leak -> positive-control split (CLEAN vs INCONCLUSIVE)
                 ctrl_ok, ctrl_why = await _read_control(session, tool, params, roots, cleanups, tools)
                 if not ctrl_ok:
-                    out.append(_pt_inconclusive(tool.name, marker, ctrl_why))
+                    res.append(_pt_inconclusive(tool.name, marker, ctrl_why))
                 elif refused:
-                    out.append(ProbeResult("path_traversal", tool.name, "refusal", marker=marker,
+                    res.append(ProbeResult("path_traversal", tool.name, "refusal", marker=marker,
                         rationale="boundary held: in-bounds read verified, every out-of-root vector refused "
                                   "(plain and crafted)"))
                 else:
-                    out.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=marker,
+                    res.append(ProbeResult("path_traversal", tool.name, "oracle_negative", marker=marker,
                         rationale="did not return the out-of-root canary (in-bounds positive control passed)"))
+        for tool in tools:
+            res: list = []
+            try:
+                await _one(tool, res)
+            except Exception as exc:  # noqa: BLE001 - this tool is INCONCLUSIVE; every other tool's result stands
+                res = [ProbeResult("path_traversal", tool.name, "error",
+                                   rationale=f"this tool's test aborted ({_unwrap(exc) or type(exc).__name__}); "
+                                             "the other tools' results are kept")]
+            out.extend(res)
         # Honest NOT_APPLICABLE (never a silent CLEAN) for adjacent vectors we could not actually test.
         if had_reader and not sibling_planted:
             why = ("server's allowed root could not be determined at runtime" if not roots
                    else "the server-root's parent is not writable (cannot plant the sibling canary)")
             out.append(ProbeResult("path_traversal", "(sibling-prefix vector)", "not_applicable",
-                                   rationale="CVE-2025-53110 sibling-prefix NOT tested: " + why))
+                                   rationale="sibling-prefix NOT tested: " + why))
         if had_reader and not symlink_planted:
             why = ("in-root symlink is opt-in — set MCPRT_ALLOW_WRITE_INTO_ROOT=1 on a server you own"
                    if not _ALLOW_WRITE_INTO_ROOT else
                    ("server's allowed root could not be determined at runtime" if not roots
                     else "the server root is not writable (cannot plant the in-root symlink)"))
             out.append(ProbeResult("path_traversal", "(symlink vector)", "not_applicable",
-                                   rationale="CVE-2025-53109 in-root symlink NOT tested: " + why))
+                                   rationale="in-root symlink NOT tested: " + why))
     finally:
         for c in cleanups:
             try:
@@ -1037,7 +1332,9 @@ def _writer_params(tool):
         path_p = next((p for p in params if _PATH_PARAM.search(p)), None)
         content_p = next((p for p in params if _CONTENT_PARAM.search(p)), None)
         return (path_p, content_p) if (path_p and content_p) else None
-    if _PATH_PARAM.search(tool.name):                 # empty schema + write-ish name -> guess
+    # empty schema: guess a path+content writer only when the name says both (write_file_content), never from a
+    # folder/create word alone — a folder creator guessed as a writer made folders where the probe read files back
+    if _FILE_WORD.search(_words(tool.name)) and _CONTENT_PARAM.search(tool.name):
         return ("path", "content")
     return None
 
@@ -2257,7 +2554,8 @@ async def scan_target(argv: list[str], env: dict | None = None, probes=None,
     _RES_CACHE = {}          # one resources/read per URI per scan, shared by the body-reading probes
     _CALL_CACHE = {}         # one benign tools/call per tool per scan, shared by the result-reading probes
     # valid-shaped carrier args from the server's own launch paths (a --repository / --db-path is a real target)
-    _SYNTH_CTX = synth.Context(base_dir=workdir, paths=synth.harvest_argv(argv))
+    _SYNTH_CTX = synth.Context(base_dir=workdir, paths=synth.harvest_argv(argv),
+                               launch=synth.harvest_argv(argv, parents=False))
     child_env = dict(env or os.environ)
     child_env["MCPRT_CONTEXT_CANARY"] = _CTX_CANARY
     _PRIVATE_MARKERS = {_CTX_CANARY: "the planted environment canary"}
