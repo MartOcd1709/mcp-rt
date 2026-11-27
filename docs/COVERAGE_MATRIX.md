@@ -2,20 +2,31 @@
 
 > GENERATED from `mcp_rt/taxonomy.py` (T5 / SAM1-17). Do not hand-edit — edit the taxonomy and regenerate.
 > COVERED means a zero-FP proof exists (vuln+safe fixture/test). PARTIAL/PLANNED/N-A are shown openly;
-> we never claim zero unknown-unknowns.
+> we never claim zero unknown-unknowns. COVERED is not a claim that a live assessment tests the item:
+> what a live assessment does not fully test is listed under 'Live assessment gaps'.
 
 **Canonical items:** 79  ·  **COVERED (zero-FP):** 50 (63.3%)  ·  **PARTIAL:** 16  ·  **PLANNED:** 11  ·  **N-A:** 2
 
 ## Per-standard coverage
 
-| Standard | items | COVERED | PARTIAL | PLANNED | N-A | unmapped |
-|---|---|---|---|---|---|---|
-| OWASP-MCP (https://owasp.org/www-project-mcp-top-10/) | 10 | 10 | 0 | 0 | 0 | 0 |
-| ASI (https://genai.owasp.org/resource/owasp-top-10-fo) | 10 | 9 | 0 | 1 | 0 | 0 |
-| CoSAI (https://www.coalitionforsecureai.org/wp-content/) | 34 | 25 | 3 | 6 | 0 | 0 |
-| CIS (https://www.cisecurity.org/benchmark/ai-benchmar) | 10 | 6 | 0 | 1 | 0 | 3 |
-| SPEC2026 (https://modelcontextprotocol.io/specification/20) | 13 | 7 | 1 | 5 | 0 | 0 |
-| MCP38 (arXiv:2603.18063) | 38 | 27 | 8 | 3 | 0 | 0 |
+| Standard | items | COVERED (proof exists) | tested in a live assessment | PARTIAL | PLANNED | N-A | unmapped |
+|---|---|---|---|---|---|---|---|
+| OWASP-MCP (https://owasp.org/www-project-mcp-top-10/) | 10 | 10 | 9 of 10 (MCP04 not tested; MCP06, MCP08 partial) | 0 | 0 | 0 | 0 |
+| ASI (https://genai.owasp.org/resource/owasp-top-10-fo) | 10 | 9 | not measured | 0 | 1 | 0 | 0 |
+| CoSAI (https://www.coalitionforsecureai.org/wp-content/) | 34 | 25 | not measured | 3 | 6 | 0 | 0 |
+| CIS (https://www.cisecurity.org/benchmark/ai-benchmar) | 10 | 6 | not measured | 0 | 1 | 0 | 3 |
+| SPEC2026 (https://modelcontextprotocol.io/specification/20) | 13 | 7 | not measured | 1 | 5 | 0 | 0 |
+| MCP38 (arXiv:2603.18063) | 38 | 27 | not measured | 8 | 3 | 0 | 0 |
+
+## Live assessment gaps
+
+OWASP MCP controls a live assessment reports NOT TESTED or PARTIAL, whatever the COVERED column says:
+
+| control | live scorecard | why |
+|---|---|---|
+| MCP04 Supply Chain Attacks and Dependency Tampering | NOT TESTED | supply-chain analysis needs the server's installed package on disk; a live assessment that cannot resolve it reports MCP04 NOT TESTED (every console scorecard to date) |
+| MCP06 Intent Flow Subversion (Prompt Injection via Context) | PARTIAL | tested: no destination named by untrusted content received private data; not tested: subversion of a real agent (agent red-team) |
+| MCP08 Lack of Audit and Telemetry | PARTIAL | tested: no planted value reached a log, file or telemetry surface; not testable from outside: whether the server keeps an audit trail |
 
 ## Canonical items
 

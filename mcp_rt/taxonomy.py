@@ -265,6 +265,19 @@ UNMAPPED: dict[str, str] = {
     "CIS:CIS-7": "domain-level: Observability/Audit — see NO-AUDIT (PLANNED); 55 recs gated",
 }
 
+# ---- what a LIVE assessment does not fully test (honest scorecard) ------------------------
+# COVERED above means a vuln+safe proof exists for the class. It is not a claim that a live assessment of a server
+# exercises it. These OWASP MCP controls are reported NOT TESTED or PARTIAL in live scorecards (hunt/report.py).
+LIVE_GAPS: dict[str, tuple[str, str]] = {
+    "OWASP-MCP:MCP04": ("NOT TESTED", "supply-chain analysis needs the server's installed package on disk; a live "
+                                      "assessment that cannot resolve it reports MCP04 NOT TESTED (every console "
+                                      "scorecard to date)"),
+    "OWASP-MCP:MCP06": ("PARTIAL", "tested: no destination named by untrusted content received private data; not "
+                                   "tested: subversion of a real agent (agent red-team)"),
+    "OWASP-MCP:MCP08": ("PARTIAL", "tested: no planted value reached a log, file or telemetry surface; not testable "
+                                   "from outside: whether the server keeps an audit trail"),
+}
+
 
 # ---- derivations + generation ------------------------------------------------------------
 def _all_refs() -> set[str]:
@@ -322,7 +335,8 @@ def render_markdown() -> str:
          "",
          "> GENERATED from `mcp_rt/taxonomy.py` (T5 / SAM1-17). Do not hand-edit — edit the taxonomy and regenerate.",
          "> COVERED means a zero-FP proof exists (vuln+safe fixture/test). PARTIAL/PLANNED/N-A are shown openly;",
-         "> we never claim zero unknown-unknowns.",
+         "> we never claim zero unknown-unknowns. COVERED is not a claim that a live assessment tests the item:",
+         "> what a live assessment does not fully test is listed under 'Live assessment gaps'.",
          "",
          f"**Canonical items:** {cov['total_items']}  ·  "
          f"**COVERED (zero-FP):** {cov['by_status'][COVERED]} ({cov['covered_pct']}%)  ·  "
@@ -330,12 +344,21 @@ def render_markdown() -> str:
          "",
          "## Per-standard coverage",
          "",
-         "| Standard | items | COVERED | PARTIAL | PLANNED | N-A | unmapped |",
-         "|---|---|---|---|---|---|---|"]
+         "| Standard | items | COVERED (proof exists) | tested in a live assessment | PARTIAL | PLANNED | N-A | unmapped |",
+         "|---|---|---|---|---|---|---|---|"]
     for name, s in STANDARDS.items():
         c = bs[name]
+        st = {iid: LIVE_GAPS[f"{name}:{iid}"][0] for iid in s["items"] if f"{name}:{iid}" in LIVE_GAPS}
+        no, part = [i for i, v in st.items() if v == "NOT TESTED"], [i for i, v in st.items() if v == "PARTIAL"]
+        live = (f"{len(s['items']) - len(no)} of {len(s['items'])} ({', '.join(no)} not tested"
+                f"{'; ' + ', '.join(part) + ' partial' if part else ''})") if st else "not measured"
         L.append(f"| {name} ({s['src'].split(' ')[0][:48]}) | {len(s['items'])} | "
-                 f"{c[COVERED]} | {c[PARTIAL]} | {c[PLANNED]} | {c[NA]} | {c['unmapped']} |")
+                 f"{c[COVERED]} | {live} | {c[PARTIAL]} | {c[PLANNED]} | {c[NA]} | {c['unmapped']} |")
+    L += ["", "## Live assessment gaps", "",
+          "OWASP MCP controls a live assessment reports NOT TESTED or PARTIAL, whatever the COVERED column says:", "",
+          "| control | live scorecard | why |", "|---|---|---|"]
+    L += [f"| {ref.split(':')[1]} {STANDARDS[ref.split(':')[0]]['items'][ref.split(':')[1]]} | {st} | {why} |"
+          for ref, (st, why) in LIVE_GAPS.items()]
     L += ["", "## Canonical items", "",
           "| id | title | status | our class | evidence / gap | external refs |",
           "|---|---|---|---|---|---|"]
@@ -378,6 +401,10 @@ def selfcheck() -> list[str]:
             ref = f"{name}:{iid}"
             if ref not in refs and ref not in UNMAPPED:
                 problems.append(f"UNCOVERED standard item (no row, not UNMAPPED): {ref} — {s['items'][iid]}")
+    for ref, (st, _) in LIVE_GAPS.items():
+        std, _, iid = ref.partition(":")
+        if std not in STANDARDS or iid not in STANDARDS[std]["items"] or st not in ("NOT TESTED", "PARTIAL"):
+            problems.append(f"LIVE_GAPS: bad entry {ref} ({st})")
     # single-source: the printed count must equal the matrix length
     if coverage()["total_items"] != len(TAXONOMY):
         problems.append("coverage().total_items != len(TAXONOMY)")
